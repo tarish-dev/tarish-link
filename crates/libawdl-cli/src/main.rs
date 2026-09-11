@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 use libawdl::{
     action::ActionFrame,
+    data::{is_ipv6_multicast, DataHeader},
     dot11::{Dot11, FrameControl},
     radiotap::Radiotap,
     election::{ElectionParams, ElectionParamsV2},
@@ -32,6 +33,8 @@ enum Seen<'a> {
     /// "half the capture is unparseable" and "half the capture is ACKs" look identical
     /// otherwise, and only one of them is a bug.
     OtherWifi(FrameControl),
+    /// An AWDL **data** frame: the payload path rather than the control plane.
+    AwdlData { seq: u16, ethertype: &'static str, multicast: bool, bytes: usize },
     Awdl { rt: Radiotap, dot11: Dot11, af: ActionFrame<'a> },
 }
 
@@ -39,6 +42,25 @@ fn classify(pkt: &[u8]) -> Seen<'_> {
     let Some(rt) = Radiotap::parse(pkt) else { return Seen::NotTrusted };
     let Some(body80211) = rt.payload(pkt) else { return Seen::NotTrusted };
     let Some(fc) = FrameControl::parse(body80211) else { return Seen::NotTrusted };
+    if fc.frame_type == libawdl::dot11::TYPE_DATA {
+        // QoS Data carries a 26-byte header (24 + 2 for the QoS control field), then
+        // LLC/SNAP (8), then the AWDL data header. Getting the QoS field wrong shifts
+        // everything by two bytes and the ethertype lands on garbage.
+        let qos = if fc.subtype & 0x08 != 0 { 2 } else { 0 };
+        let dst: [u8; 6] = match body80211.get(4..10).and_then(|b| b.try_into().ok()) {
+            Some(d) => d,
+            None => return Seen::OtherWifi(fc),
+        };
+        if let Some(h) = body80211.get(24 + qos + 8..).and_then(DataHeader::parse) {
+            return Seen::AwdlData {
+                seq: h.sequence,
+                ethertype: h.ethertype_name(),
+                multicast: is_ipv6_multicast(dst),
+                bytes: pkt_len_of(body80211, &h),
+            };
+        }
+        return Seen::OtherWifi(fc);
+    }
     if !fc.is_action() {
         return Seen::OtherWifi(fc);
     }
@@ -49,6 +71,11 @@ fn classify(pkt: &[u8]) -> Seen<'_> {
         Some(af) => Seen::Awdl { rt, dot11, af },
         None => Seen::OtherWifi(fc),
     }
+}
+
+/// Size of the encapsulated packet, for reporting only.
+fn pkt_len_of(body: &[u8], h: &DataHeader) -> usize {
+    body.len().saturating_sub(h.payload_offset)
 }
 
 fn print_frame(n: u64, rt: &Radiotap, d: &Dot11, af: &ActionFrame) {
@@ -219,6 +246,11 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
     let mut awdl_n: u64 = 0;
     let mut other: u64 = 0;
     let mut not_trusted: u64 = 0;
+    let mut data_n: u64 = 0;
+    let mut data_mcast: u64 = 0;
+    let mut data_bytes: u64 = 0;
+    let mut data_seq_max: u16 = 0;
+    let mut data_proto: BTreeMap<&'static str, u64> = BTreeMap::new();
     let mut by_kind: BTreeMap<&'static str, u64> = BTreeMap::new();
     let mut by_subtype: BTreeMap<u8, u64> = BTreeMap::new();
     let mut by_tag: BTreeMap<u8, u64> = BTreeMap::new();
@@ -240,6 +272,15 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
     while let Ok(pkt) = cap.next_packet() {
         total += 1;
         match classify(pkt.data) {
+            Seen::AwdlData { seq, ethertype, multicast, bytes } => {
+                data_n += 1;
+                if multicast {
+                    data_mcast += 1;
+                }
+                *data_proto.entry(ethertype).or_default() += 1;
+                data_bytes += bytes as u64;
+                data_seq_max = data_seq_max.max(seq);
+            }
             Seen::NotTrusted => not_trusted += 1,
             Seen::OtherWifi(fc) => {
                 other += 1;
@@ -329,7 +370,15 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
         }
     }
 
-    eprintln!("\n--- {total} frames: {awdl_n} AWDL, {other} other 802.11, {not_trusted} not 802.11");
+    eprintln!("\n--- {total} frames: {awdl_n} AWDL action, {data_n} AWDL data, {other} other 802.11, {not_trusted} not 802.11");
+    if data_n > 0 {
+        eprintln!(
+            "AWDL data plane: {data_n} frames ({data_mcast} multicast), {data_bytes} payload bytes, highest seq {data_seq_max}"
+        );
+        for (p, n) in &data_proto {
+            eprintln!("  carries {p:<6} {n}");
+        }
+    }
     for (k, n) in &by_kind {
         eprintln!("  other {k:<12} {n}");
     }

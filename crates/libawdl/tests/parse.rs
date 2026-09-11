@@ -133,3 +133,61 @@ fn a_clean_tag_region_stops_cleanly() {
     assert!(it.next().is_none());
     assert_eq!(it.stop(), Some(Stop::Clean), "consumed exactly, no trailing bytes");
 }
+
+/// The AWDL data header, short form — the payload path.
+///
+/// Values cross-checked against `tshark -Y awdl_data` on `datapath-wifi-off.pcap`: 44
+/// frames, `awdl_data.ethertype` 0x86dd throughout, max `awdl_data.seq` 416.
+#[test]
+fn the_short_data_header_yields_sequence_and_ethertype() {
+    use libawdl::data::{DataHeader, ETHERTYPE_IPV6};
+
+    // 2 unnamed bytes, seq LE, 0x0000 (short form), ethertype BE, then the packet.
+    let mut b = vec![0x00, 0x00];
+    b.extend_from_slice(&416u16.to_le_bytes());
+    b.extend_from_slice(&[0x00, 0x00]);
+    b.extend_from_slice(&0x86ddu16.to_be_bytes());
+    b.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // start of an IPv6 header
+
+    let h = DataHeader::parse(&b).expect("short form parses");
+    assert_eq!(h.sequence, 416);
+    assert!(!h.long_form);
+    // The ethertype is BIG-endian while the sequence beside it is little-endian. Read
+    // 0x86dd the wrong way round and you get 0xdd86, which matches nothing and looks
+    // like a framing bug rather than a byte-order one.
+    assert_eq!(h.ethertype, ETHERTYPE_IPV6);
+    assert_eq!(h.ethertype_name(), "IPv6");
+    assert_eq!(h.payload(&b), Some(&[0x60, 0x00, 0x00, 0x00][..]));
+}
+
+/// The long form embeds TLVs with a ONE-byte length, not the two-byte form action
+/// frames use, and is closed by a second 0x03 marker.
+#[test]
+fn the_long_data_header_walks_short_tags_and_stops_at_the_marker() {
+    use libawdl::data::DataHeader;
+
+    let mut b = vec![0x00, 0x00];
+    b.extend_from_slice(&7u16.to_le_bytes()); // seq
+    b.extend_from_slice(&[0x03, 0x02, 0xaa, 0xbb]); // long-form opener: 0x03, len 2
+    b.extend_from_slice(&[0x10, 0x02, 0x01, 0x02]); // a short tag: type, len 2, value
+    b.extend_from_slice(&[0x03, 0x01, 0xcc]); // closing 0x03 block
+    b.extend_from_slice(&0x86ddu16.to_be_bytes());
+    b.extend_from_slice(&[0x60]);
+
+    let h = DataHeader::parse(&b).expect("long form parses");
+    assert_eq!(h.sequence, 7);
+    assert!(h.long_form);
+    assert_eq!(h.tagged, &[0x10, 0x02, 0x01, 0x02][..], "one short tag between the markers");
+    assert_eq!(h.ethertype, 0x86dd);
+}
+
+/// IPv6 multicast is why the data plane is observable at all.
+#[test]
+fn ipv6_multicast_addresses_are_recognised() {
+    use libawdl::data::is_ipv6_multicast;
+    // 33:33:00:00:00:fb is ff02::fb, mDNS -- and multicast is never rate-adapted, so
+    // these frames arrive at the lowest basic rate and decode when unicast does not.
+    assert!(is_ipv6_multicast([0x33, 0x33, 0x00, 0x00, 0x00, 0xfb]));
+    assert!(is_ipv6_multicast([0x33, 0x33, 0x00, 0x00, 0x00, 0x16]));
+    assert!(!is_ipv6_multicast([0x8a, 0xc3, 0xf7, 0x4b, 0xce, 0xde]));
+}

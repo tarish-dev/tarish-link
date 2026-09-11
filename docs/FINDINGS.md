@@ -946,6 +946,76 @@ An earlier attempt produced the same *observation* with none of this and was wit
 (finding 16). The difference between the two is not the data; it is that this one could
 have come out wrong.
 
+## 19. The data plane, decoded — without ever capturing a file
+
+The encapsulation AirDrop uses to carry a payload, obtained from frames that are not the
+payload.
+
+```
+802.11 QoS Data  ->  LLC/SNAP  ->  AWDL data header  ->  IPv6  ->  UDP / ICMPv6
+```
+
+Cross-checked against `tshark -Y awdl_data` on `captures/datapath-wifi-off.pcap`: 44 frames
+in both, ethertype `0x86dd` throughout in both, maximum sequence **416** in both.
+
+### Why the file itself could not be captured, settled
+
+Four attempts, and the answer is neither the path nor the bandwidth:
+
+| attempt | result |
+|---|---|
+| 20 MHz, phones far (-85 dBm) | 23,117 Block Acks, **0** data frames |
+| 80 MHz | almost no traffic — and the room was empty, so this proved nothing |
+| 20 MHz, phones close (-49 dBm) | 35,895 Block Acks, **44** data frames |
+| 40 MHz centred on 151 | 1,655 control frames — **worse**, not better |
+
+**Multicast decodes; unicast does not.** All 44 data frames are addressed to
+`33:33:00:00:00:fb` (`ff02::fb`, mDNS) or `33:33:00:00:00:16` (`ff02::16`, MLDv2).
+Multicast cannot be rate-adapted, because there is no ACK to adapt against, so it goes out
+at the lowest basic rate. The unicast payload rides high VHT rates that this adapter cannot
+demodulate — which is also why every Block Ack arrives while the traffic being acknowledged
+does not.
+
+**Widening the monitor makes it worse on `mt76`.** Both 40 and 80 MHz reduced total capture
+by an order of magnitude against 20 MHz. Driver behaviour, not protocol.
+
+**And the sequence numbers prove the missing frames exist.** 44 captured frames carry
+sequence numbers up to **416**, so roughly 416 were transmitted and we decoded a tenth.
+
+### Why it did not matter
+
+**The multicast frames use the same encapsulation a file transfer uses.** The rate differs;
+the framing does not. So the header was recoverable from the frames we could read, and
+`crates/libawdl/src/data.rs` decodes it.
+
+An earlier hypothesis — that both phones being on one access point let AirDrop carry the
+payload over the infrastructure link instead of AWDL — is **refuted**: with Wi-Fi off on
+both, there were still 35,895 Block Acks. The payload rides AWDL.
+
+### The header, and two traps in it
+
+```
+2 bytes  unnamed
+2 bytes  sequence, LITTLE-endian    per-peer, monotonic
+         short form: 2 bytes 0x0000
+         long form:  0x03 <len> <len bytes>, TLVs, then 0x03 <len> again
+2 bytes  ethertype, BIG-endian      0x86dd in everything observed
+         then the IPv6 packet
+```
+
+- **The sequence is little-endian and the ethertype beside it is big-endian.** Read
+  `0x86dd` the wrong way round and you get `0xdd86`, which matches nothing and reads as a
+  framing bug rather than a byte-order one.
+- **The long form's TLVs use a ONE-byte length**, unlike the two-byte form every action
+  frame uses. The wrong tag width walks off the end of the frame.
+
+### What is still missing
+
+The payload bytes themselves, and therefore anything about how AirDrop chunks a file above
+IP. That needs an adapter that can demodulate high-rate unicast VHT — a more capable radio,
+not a different configuration. **The framing question is answered; the throughput question
+is not.**
+
 ---
 
 ## Open, not yet investigated

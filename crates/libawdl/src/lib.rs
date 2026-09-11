@@ -29,6 +29,7 @@
 //! decoders land one at a time, each with a fixture.
 
 pub mod action;
+pub mod data;
 pub mod dot11;
 pub mod election;
 pub mod radiotap;

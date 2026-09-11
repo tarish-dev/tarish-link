@@ -48,6 +48,9 @@ Every claim names the capture behind it — see [docs/FINDINGS.md](docs/FINDINGS
   access point's channel while associated and falls back to channel 6 when not, with every
   other slot byte-identical. AWDL/Wi-Fi coexistence on one radio is **one window in
   sixteen** — not DBS, not a second radio, not firmware.
+- **The data plane is decoded**: `802.11 QoS Data -> LLC/SNAP -> AWDL data header ->
+  IPv6`. Obtained from multicast mDNS frames, which arrive at the lowest basic rate —
+  the unicast payload rides VHT rates our adapter cannot demodulate.
 - A frame carries its schedule **twice, in two different encodings**.
 - The **discovery layer decodes**: device names, `_airdrop._tcp.local`, and port **8770**,
   under a fixed 15-entry label dictionary with no negotiation.
