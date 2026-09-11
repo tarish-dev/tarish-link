@@ -769,12 +769,64 @@ The `AP Beacon alignment delta` field from finding 6 belongs to this mechanism: 
 time-sharing with an AP needs to know where that AP's beacon falls relative to its own
 windows. It read 0 in the captures where nothing was time-sharing.
 
-### What is not proven
+### Proven by controlled removal — see finding 16
 
-That `be:35` is associated to `[redacted-ap]`. It is inferred: the device advertises a
-DFS access-point channel that matches an AP present in the same room, in one fixed slot,
-continuously. No other explanation has been offered for why an AWDL schedule would carry a
-non-social DFS channel, but the association itself was not observed.
+This entry originally recorded the association as *inferred*. It is now measured: taking
+the device off Wi-Fi removes channel 104 from slot 0 and nothing else changes.
+
+## 16. ★ Slot 0 is the association slot — proven by taking Wi-Fi away
+
+The control finding 15 needed. Same device, same room, same capture setup; the only
+variable is whether the phones are associated to an access point.
+
+```
+with Wi-Fi      104,  0, 149, 0, 0, 0, 0, 0, 6, 0, 149, 0, 0, 0, 0, 0
+without Wi-Fi     6,  0, 149, 0, 0, 0, 0, 0, 6, 0, 149, 0, 0, 0, 0, 0
+                  ^
+                  slot 0, and nothing else
+```
+
+**Channel 104 occurrences with both phones off Wi-Fi: zero**, across the whole capture.
+`be:35` had advertised it in every previous capture of the evening — 142, 640, 821, 905
+and 218 frames — and now advertises `[6, 149]` only.
+
+Everything else is untouched: same 4-of-16 occupancy, same slots 2 and 10 on channel 149,
+same slot 8 on channel 6.
+
+### What this establishes
+
+**Slot 0 is the association slot.** It carries the access point's channel while the device
+is associated, and falls back to channel 6 — the 2.4 GHz social channel — when it is not.
+A device never gives the slot up; it changes what is in it.
+
+So AWDL's coexistence with infrastructure Wi-Fi is not a firmware capability, a DBS
+feature, or a second radio. **It is one of sixteen windows, reserved permanently, whose
+channel follows the association.** One window in sixteen — 6.25% of airtime — is what
+holds a Wi-Fi link while AWDL runs on the same radio.
+
+### The false start that made the control work
+
+The first attempt disconnected one iPhone and changed nothing, because that phone had
+**never** advertised 104 — it had silently rejoined another saved SSID. Two lessons, both
+cheap here and expensive later:
+
+- **Verify the variable actually moved.** A control that does not change the input proves
+  nothing, and it looked like a real negative result.
+- **A 2.4 GHz association is invisible in the schedule.** Its channel would be 6, which is
+  already the rendezvous slot, so it cannot be told apart from an unassociated device. Only
+  a 5 GHz AP shows up distinctly. Any future test of this must use a 5 GHz network.
+
+### And it is the whole BCM4383 problem, now with a mechanism
+
+`tarishd` picks one band, `libmosey` builds a 16/16 single-channel schedule (finding 8),
+and **no slot is ever reserved for the association**. On a chip that cannot hold two
+channels, AWDL therefore takes the radio and Wi-Fi dies — BUILD-NOTES 40 and 42, recorded
+as a hardware limitation.
+
+Apple runs on hardware with the same constraint and keeps its association by scheduling
+around it. The capability we lack is not in the silicon; it is in the scheduler, and
+`libmosey` will not express it. **Multi-channel scheduling with a reserved association slot
+is a requirement for `libawdl`** — and finding 16 is what it has to reproduce.
 
 ---
 
