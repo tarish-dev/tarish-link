@@ -853,6 +853,39 @@ rather than the silicon, and `libmosey` will not express it — which would make
 multi-channel scheduling with a reserved association slot a requirement for `libawdl`.
 **Conditional on a control that has not yet been run.**
 
+## 17. A 6 GHz association is invisible in the channel sequence
+
+`k-mbprom5` appears in several captures advertising `[6, 149]` with **nothing in slot 0** —
+no access point channel — which looked like evidence against finding 15, or like Macs
+scheduling differently from iPhones.
+
+Neither. The machine reports:
+
+```
+Channel: 53 (6GHz, 160MHz)    PHY Mode: 802.11be    Signal: -37 dBm
+```
+
+**It is associated on 6 GHz.** Every operating class observed in an AWDL channel sequence
+is 2.4 GHz (`0x51`) or 5 GHz (`0x80`); nothing encodes a 6 GHz channel. So the association
+has no representation available, and slot 0 falls back to 6 as it would with no association
+at all.
+
+### Two bands are invisible here, for different reasons
+
+- **2.4 GHz** — its channel is 6, which is already the rendezvous slot, so an associated
+  device is indistinguishable from an unassociated one.
+- **6 GHz** — no operating class exists for it in the sequence encoding.
+
+Only a **5 GHz** association shows up distinctly. Any test of the association-slot
+hypothesis must use one, and a device that appears to contradict it should have its band
+checked before the hypothesis is doubted.
+
+### A note on method
+
+This was resolved by reading the Wi-Fi state of the machine the work is running on, after
+proposing an experiment that would have required the operator to determine the band from
+an iPhone's UI — which does not display it. The information was already to hand.
+
 ---
 
 ## Open, not yet investigated
