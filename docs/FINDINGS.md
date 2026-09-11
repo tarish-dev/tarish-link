@@ -698,6 +698,84 @@ advertising AirDrop at `5b28e76c-….local:8770`"*. That matters for three thing
 Moved to [SETUP.md](SETUP.md), with the rig, the build steps and the traps.
 
 
+## 15. ★ The AP's channel IS in the AWDL slots — coexistence by time-sharing, observed
+
+**This is the highest-value question in the research brief (§6.3), and the answer is yes.**
+
+The brief asks: does a device associated to an access point put the AP's channel into its
+AWDL channel sequence, and does it do so even when that channel is not a social channel?
+
+`captures/transfer-attempt.pcap`, and every other capture taken tonight. One sender,
+`be:35:be:c9:05:1f`, advertises this sequence — 640 times, byte-identical:
+
+```
+slot   0    1    2    3  4  5  6  7  8   9   10   11 12 13 14 15
+chan  104   0   149   0  0  0  0  0  6   0   149   0  0  0  0  0
+       ^
+       the access point's channel
+```
+
+**Channel 104 is 5520 MHz, and 5520 MHz is `[redacted-ap]`** — confirmed by a scan the
+same evening (`xx:xx:xx:xx:xx:xx  5520  -58  [redacted-ap]`). It is **not** an AWDL
+social channel: only 6, 44 and 149 appear in Google's 263-country table, and our own notes
+record that `libmosey` **rejects 104 as an AWDL channel outright**.
+
+So the sequence carries it, and carries it differently from `p` and `s` — exactly the
+possibility the brief flagged and nobody had demonstrated.
+
+### It is a standing arrangement, not a transfer-time upgrade
+
+Present in every capture of the evening, not only during the attempted transfer:
+
+| capture | frames advertising `[6, 104, 149]` |
+|---|---|
+| `run-d-iphone.pcap` | 142 |
+| `run-e-long.pcap` | 821 |
+| `two-locks-awdl.pcap` | 905 |
+| `transfer-attempt.pcap` | 640 |
+
+The device keeps a slot for its AP whether or not anything is being sent. It is how it
+stays associated, not something it negotiates when a transfer starts.
+
+### The budget, in slots
+
+Four of sixteen windows occupied, and each has a job:
+
+| slots | channel | purpose |
+|---|---|---|
+| 1 (slot 0) | **104** | the infrastructure association |
+| 2 (slots 2, 10) | 149 | AWDL, the regional social channel |
+| 1 (slot 8) | 6 | the fixed cross-band rendezvous — finding 7 |
+| 12 | — | absent |
+
+**This is what "AWDL and Wi-Fi coexist on one radio" actually means.** Not two radios, not
+DBS, not a firmware trick: the device schedules one window in sixteen for the AP and is
+simply not on the AWDL channel then. 1/16 of the time is enough to hold an association.
+
+### What it corrects on our side, and it is the whole BCM4383 problem
+
+`tarishd` chooses **one band** and hands `libmosey` a single channel set, and `libmosey`
+builds a 16/16 single-channel schedule (finding 8, measured). **We never reserve a slot for
+the association at all.** So on a chip that cannot physically do two channels at once,
+AWDL takes the radio and Wi-Fi dies — which is precisely the frankel behaviour recorded in
+BUILD-NOTES 40 and 42, and which we treated as a hardware limitation.
+
+It is not only a hardware limitation. Apple solves it in the **schedule**, on hardware that
+also cannot hold two channels at once, by not being on the AWDL channel during slot 0. Our
+stack cannot express that, because `libmosey` will not build a multi-channel sequence — and
+that is now a requirement for `libawdl` rather than an optimisation.
+
+The `AP Beacon alignment delta` field from finding 6 belongs to this mechanism: a device
+time-sharing with an AP needs to know where that AP's beacon falls relative to its own
+windows. It read 0 in the captures where nothing was time-sharing.
+
+### What is not proven
+
+That `be:35` is associated to `[redacted-ap]`. It is inferred: the device advertises a
+DFS access-point channel that matches an AP present in the same room, in one fixed slot,
+continuously. No other explanation has been offered for why an AWDL schedule would carry a
+non-social DFS channel, but the association itself was not observed.
+
 ---
 
 ## Open, not yet investigated

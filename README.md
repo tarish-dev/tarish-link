@@ -44,6 +44,9 @@ Every claim names the capture behind it — see [docs/FINDINGS.md](docs/FINDINGS
   picks one band and stays there.
 - A device is **absent for most of its own schedule** (3/16 to 9/16 slots occupied).
   Slot occupancy, not link rate, is what governs AWDL throughput.
+- **The AP's channel is in the AWDL slots.** A device associated to an access point on
+  channel 104 — not a social channel, and one `libmosey` rejects outright — keeps slot 0
+  for it, continuously. That is AWDL/Wi-Fi coexistence on one radio, done in the schedule.
 - A frame carries its schedule **twice, in two different encodings**.
 - The **discovery layer decodes**: device names, `_airdrop._tcp.local`, and port **8770**,
   under a fixed 15-entry label dictionary with no negotiation.
