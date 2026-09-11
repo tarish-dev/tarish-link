@@ -566,6 +566,72 @@ BLE presence in general:
 - **The `0x05` beacon is the signal**, and it lives in the app, where Bluetooth already
   belongs — `libmosey` links no Bluetooth library and Google draws the same line.
 
+## 13. Two locks, 35s apart: each device's BLE beacon stops before its own AWDL — and the gap is 1-5s, not 10
+
+The definitive version of findings 11 and 12, and it **corrects the interval I reported in
+both**.
+
+`captures/two-locks-awdl.pcap` and `two-locks-ble.pcap`. Two iPhones with AirDrop sheets
+open, both Pixels off the air, 180s on channel 149 with BLE and AWDL recorded together.
+One iPhone locked, then the other about 35 seconds later — a deliberate gap, so the two
+departures could not blur into one event.
+
+| device | AirDrop beacon last seen | its AWDL last frame | gap |
+|---|---|---|---|
+| iPhone B -> `8a:c3:f7:4b:ce:de` | **48.1s** | **53.3s** | **+5.2s** |
+| iPhone A -> `be:35:be:c9:05:1f` | **83.4s** | **84.7s** | **+1.3s** |
+| third device `02:3b` (never locked) | — | 128.8s | — |
+
+```
+AirDrop beacons     40826f6a  first  0.0  last 48.1   139 beacons
+                    40401947  first  0.5  last 83.4   287 beacons
+```
+
+**35.3s apart on BLE, 31.4s apart on AWDL.** The two departures are cleanly separated and
+each BLE device pairs with exactly one AWDL device by timing — which is what finding 12
+explicitly could not do, because the address spaces are independently randomised and
+nothing links them but coincidence in time.
+
+### BLE goes first, per device, every time
+
+Not as an aggregate and not as a cluster effect. Each phone's own beacon ceased at its own
+lock, and its own AWDL frames followed 1.3 to 5.2 seconds later.
+
+### The "ten seconds" in findings 11 and 12 was my measurement, not the protocol
+
+Both earlier numbers came from a BLE capture running through `bluetoothctl scan on`, which
+enables duplicate filtering: each unchanged advertisement is reported roughly once per 16
+seconds. The last beacon I could see was therefore up to 16s **before** the true
+cessation, which inflated every gap.
+
+With `hcitool lescan --duplicates` the same two phones produced 139 and 287 beacons instead
+of 6 each, and the real interval is **1-5 seconds**.
+
+That matters for anything built on it: a peer-expiry timeout sized for a ten-second gap
+would be two to eight times longer than it needs to be.
+
+### The third device is no longer a clean control
+
+In finding 12 an unlocked device transmitted for the full capture, which is what refuted
+collective wind-down. Here the same device ran to 128.8s — 44 seconds after the last iPhone
+left — and then stopped on its own without being touched.
+
+That does not reinstate collective idling: it outlived both departures by a wide margin and
+stopped long after, which looks like its own idle timeout once no peers remained. But it
+is a weaker control than finding 12 implied, and worth saying so.
+
+### Where this leaves peer expiry
+
+Unchanged in direction, sharper in magnitude. Expire on the **`0x05` beacon**, with a
+timeout on the order of a few seconds:
+
+- **AWDL silence is not departure** — a device attends 3-9 of its 16 windows, and it keeps
+  transmitting for seconds after it has already stopped sharing.
+- **BLE presence is not sharing** — Nearby, Find My and AirPlay continue from a phone whose
+  share sheet is closed (finding 12).
+- **The AirDrop beacon is the signal**, it stops within a second or two of the user
+  leaving, and it lives in the app where Bluetooth already belongs.
+
 ---
 
 ## Setup
