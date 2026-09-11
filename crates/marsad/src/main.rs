@@ -152,6 +152,9 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
     // Election state per sender: the strongest claim each node made, and how often it
     // said it was following someone else.
     let mut claims: BTreeMap<String, (u32, u32, u64, u64)> = BTreeMap::new();
+    // Who names whom. An election claim is only meaningful as a relationship, so this
+    // records the edge rather than two separate tallies that have to be guessed at.
+    let mut follows: BTreeMap<(String, String), u64> = BTreeMap::new();
 
     while let Ok(pkt) = cap.next_packet() {
         total += 1;
@@ -201,6 +204,12 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
                             } else {
                                 slot.3 += 1;
                             }
+                            let m = if e.claims_mastership() {
+                                "(itself)".to_string()
+                            } else {
+                                libawdl::dot11::Mac(e.master).to_string()
+                            };
+                            *follows.entry((dot11.src.to_string(), m)).or_default() += 1;
                         }
                     }
                     if t.tag == 18 {
@@ -260,6 +269,12 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
         eprintln!("election (per sender: best metric, best counter, frames claiming master / following):");
         for (who, (metric, counter, master_n, follow_n)) in &claims {
             eprintln!("  {who}  metric {metric:<12} counter {counter:<8} master {master_n:<5} following {follow_n}");
+        }
+    }
+    if !follows.is_empty() {
+        eprintln!("who names whom as master:");
+        for ((src, m), n) in &follows {
+            eprintln!("  {src}  ->  {m:<20} {n}");
         }
     }
     if !masters.is_empty() {

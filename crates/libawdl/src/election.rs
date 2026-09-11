@@ -62,10 +62,12 @@ impl ElectionParams {
 
 /// Election Parameters v2 (tag 24).
 ///
-/// Carries counters v1 has no room for. `master_counter` and `self_counter` are the
-/// interesting pair: an election is decided on (counter, metric, address) in that
-/// order, so a node with a higher counter wins regardless of metric — which is what
-/// stops a cluster oscillating between two nodes with similar metrics.
+/// Carries counters v1 has no room for.
+///
+/// **The counters do not order the election** — see [`ElectionParamsV2::beats`]. Their
+/// observed values are wildly inconsistent between devices in one capture (68364, 608,
+/// 155, 0), which rules out a cluster-wide clock as well. Their meaning is unresolved
+/// and deliberately not guessed at here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElectionParamsV2 {
     pub master: [u8; 6],
@@ -104,15 +106,21 @@ impl ElectionParamsV2 {
 
     /// Would this node's claim beat `other`'s?
     ///
-    /// Ordering is (counter, metric, address) — counter first, which is the part that
-    /// matters: a node that has simply been master for longer wins even against a
-    /// better metric, and that is what keeps a cluster from flapping between two
-    /// similar candidates.
+    /// **Metric first, then address.** The counter is deliberately NOT the leading term,
+    /// and an earlier version of this function had it first on the strength of the
+    /// paper's "(counter, metric, address)" phrasing. A capture refuted that:
     ///
-    /// Derived from the field layout and from the paper, **not yet confirmed against a
-    /// contested election in a capture.** Treat as a hypothesis until it is.
+    /// ```text
+    /// 6a:89:d8:a5:88:9b   metric 510   counter 68364   ->  followed be:35
+    /// be:35:be:c9:05:1f   metric 520   counter   608   ->  won
+    /// ```
+    ///
+    /// The node with a counter more than a hundred times larger yielded to the one with
+    /// the higher metric. Whatever the counter orders, it is not this.
+    ///
+    /// Address breaks a metric tie. That part is still inferred rather than observed —
+    /// no capture so far has contained two nodes with equal metrics.
     pub fn beats(&self, other: &ElectionParamsV2, self_addr: [u8; 6], other_addr: [u8; 6]) -> bool {
-        (self.self_counter, self.self_metric, self_addr)
-            > (other.self_counter, other.self_metric, other_addr)
+        (self.self_metric, self_addr) > (other.self_metric, other_addr)
     }
 }

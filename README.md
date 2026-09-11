@@ -45,9 +45,8 @@ Every claim names the capture behind it — see [docs/FINDINGS.md](docs/FINDINGS
   Slot occupancy, not link rate, is what governs AWDL throughput.
 - A frame carries its schedule **twice, in two different encodings**.
 - Tags **32 and 33** are on the wire and in no published table.
-- **Our own election claim is a constant**: metric 1, counter 0, in all 346 frames, while
-  the Apple device beside it runs metric 510 with a counter that ticks. We forfeit every
-  election, and oscillate between claiming and yielding.
+- The election **works**, and a first reading that said otherwise was wrong — see
+  finding 9, kept as a correction. Elections order on **metric**, not on the counter.
 - `AP Beacon alignment delta` exists — evidence AWDL is designed to time-share with an
   access point, not merely tolerate one.
 

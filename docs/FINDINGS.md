@@ -266,63 +266,102 @@ assuming a peer's encoding, and a reminder that "what Apple does" and "what libm
 does" are two different reference points — we have been treating the second as though it
 were the first.
 
-## 9. Our election claim is a constant: metric 1, counter 0, for ever
+## 9. The election works. My first reading of it did not.
 
-`captures/blazer-mix.pcap`. Our device and a real Apple device, same capture, same
-channel. Every value below cross-checked with `tshark -V`.
+**This entry replaces an earlier version that was wrong on its central claim.** It is kept
+as a correction rather than deleted, because the way it was wrong is the useful part.
 
-| | ours (`libmosey`) | Apple |
-|---|---|---|
-| **Self Metric** | **1** | **510** |
-| **Self Counter** | **0**, in all 346 frames | **68192 -> 68193 -> 68194**, incrementing |
-| Distance to master | 0 in 514 advertisements, 1 in 178 | 0 throughout |
+### What I claimed, on 40 seconds and two devices
 
-AWDL decides an election on **(counter, metric, address)**, counter first. A node
-advertising counter 0 and metric 1 has made the weakest claim expressible. It cannot win
-against anything.
+That our node "oscillates" between claiming and yielding mastership — 514 advertisements
+at distance 0 against 178 at distance 1 — and that this was a candidate mechanism for the
+long-standing "sending does not find peers" bug.
 
-**A counter that never moves while the peer's ticks is the signature of a field that is
-never maintained, not of a node that is losing fairly.** Apple's counter advanced three
-times in forty seconds; ours sat at zero for 346 consecutive frames.
+### What a longer capture with four devices actually shows
 
-### The oscillation is the part that should worry us
+`captures/run-d-iphone.pcap`, 90s, channel 149, one Pixel and three Apple devices
+including an iPhone actively scanning.
 
-Our device did not simply lose and settle. It **alternated**: 514 advertisements at
-distance 0 — *I am the master* — against 178 at distance 1 naming the Apple device with
-its metric of 510.
+```
+who names whom as master
+  6a:89:d8:a5:88:9b  ->  be:35:be:c9:05:1f    98     (100% consistent)
+  aa:a8:1b:28:3a:10  ->  (itself)            175     (100% consistent)
+  be:35:be:c9:05:1f  ->  (itself)            142     (100% consistent)
+  f6:49:75:da:e8:d4  ->  (itself)            498     <- ours
+  f6:49:75:da:e8:d4  ->  be:35:be:c9:05:1f   292     <- ours
+```
 
-So within one forty-second capture our node repeatedly claimed a cluster it could not
-hold, yielded, and claimed it again. A node that keeps changing its mind about who the
-master is drags its availability windows with it every time, because the schedule is
-anchored to the master's timing. Two nodes that are each periodically master of their own
-cluster have no stable overlap at all.
+Our node looks inconsistent in aggregate. Plotted against time it is not:
 
-**This is a candidate mechanism for the oldest open bug in the Android work** — "sending
-does not find peers: we hear their questions, never their answers", reported as
-unreliable sending against reliable receiving. Receiving needs only that we are listening
-when they transmit; sending needs a shared schedule. That is a hypothesis with a
-plausible mechanism and a capture behind it, **not a diagnosis** — confirming it means
-capturing a failed send alongside the election state at that moment.
+```
+ 0s-10s: 1111111111111111111111111111111111111111     following be:35
+10s-20s: 1111111111111111111111111111111111111111
+20s-30s: 1111111111111111111111111111111111111111
+30s-40s: 1111111111111111111111111100000000000000     <- one transition, ~37s
+40s-90s: 0000000000000000000000000000000000000000     claiming master
+```
 
-### What libawdl must do differently
+One clean transition, not flapping. And the reason is in the same capture:
 
-1. **Maintain a real master counter** and increment it. It is the first term of the
-   comparison and a constant zero forfeits every election.
-2. **Advertise a metric that means something.** 1 against 510 is not a device that
-   modestly declines to lead; it is a field nobody filled in.
-3. **Do not claim and yield repeatedly.** Whatever hysteresis Apple applies, our stack
-   does not have it, and the cost lands on synchronisation rather than showing up as an
-   error.
+```
+6a:89:d8:a5:88:9b   last heard 25.6s
+be:35:be:c9:05:1f   last heard 30.3s      <- the master it was following
+aa:a8:1b:28:3a:10   last heard 31.4s
+```
 
-These are three requirements we would not have known to write down. They came out of
-putting our own frames and Apple's in one capture and reading them with the same parser —
-which is the whole argument for this project existing.
+**Every Apple device stopped transmitting at around 30 seconds, and our node promoted
+itself about six seconds later.** A node whose master disappears is supposed to take over
+its own cluster. That is not a bug; it is the behaviour working.
 
-### Both election tags ship together
+### What the aggregate hid, and the lesson
 
-Every frame from both devices carries tag 5 **and** tag 24. v2 is not a replacement; a
-device advertises the old and new forms simultaneously, and the two name the same master.
-An implementation that emits only one is not doing what the devices do.
+Two contiguous phases summed into counts that looked like 63/37 flapping. **A per-sender
+total cannot distinguish "changed its mind repeatedly" from "changed its mind once", and
+the difference is everything.** Any future claim about election behaviour needs the time
+series, not the tally.
+
+### The ordering claim was also wrong
+
+I wrote that the election orders on **(counter, metric, address)**, counter first, from
+the paper's phrasing. The same capture refutes it:
+
+| device | metric | counter | outcome |
+|---|---|---|---|
+| `6a:89` | 510 | **68364** | **followed** |
+| `be:35` | 520 | 608 | **won** |
+
+A counter more than a hundred times larger lost to a higher metric. **Metric decides**;
+whatever the counter orders, it is not this. `ElectionParamsV2::beats` has been corrected.
+Address as the tie-break is still inferred — no capture yet holds two nodes with equal
+metrics.
+
+The counters are also not a cluster-wide clock: 68364, 608, 155 and 0 in one capture. Two
+Apple devices in an earlier capture sat within 2 of each other (68349, 68351), which is
+what suggested a shared clock; four devices show that was a coincidence. **Meaning
+unresolved, and deliberately not guessed at.**
+
+### What does survive
+
+Only this, and it is much weaker than what it replaced:
+
+- Our node advertises **metric 1** where Apple devices advertise 510, 520 and 537.
+- Our node advertises **self counter 0**, unchanged across every frame in every capture,
+  where Apple's vary.
+
+Both are still true and still look like fields nobody fills in. **Neither has been shown
+to cause a problem.** Our node followed the strongest peer while that peer was present and
+promoted itself correctly when it left — with a metric of 1 throughout. For a phone, never
+wanting to be master is arguably the right posture anyway.
+
+So this is a note for `libawdl` to decide deliberately rather than a defect to fix, and
+the link to the sending bug is **withdrawn**. There was never evidence for it.
+
+### The open question this leaves
+
+Three Apple devices stopped transmitting within six seconds of each other, mid-capture.
+That is either the share sheet closing, a cluster-wide idle timeout, or AWDL teardown —
+and which it is matters, because it determines how long a peer stays reachable after a
+user stops looking at their screen. Worth a capture designed around it.
 
 ---
 
