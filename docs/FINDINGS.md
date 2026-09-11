@@ -769,13 +769,10 @@ The `AP Beacon alignment delta` field from finding 6 belongs to this mechanism: 
 time-sharing with an AP needs to know where that AP's beacon falls relative to its own
 windows. It read 0 in the captures where nothing was time-sharing.
 
-### Still inferred — see finding 16, which did NOT establish what I claimed
+### Proven — see finding 18
 
-That `be:35` is associated to `[redacted-ap]`. The device advertises a DFS access-point
-channel matching an AP in the same room, in one fixed slot, continuously, and no other
-explanation has been offered for why an AWDL schedule would carry a non-social DFS
-channel. The association itself has not been observed, and the controlled removal in
-finding 16 did not happen.
+Originally recorded as inferred, then as falsely proven (finding 16), and now established
+by a controlled experiment with both states confirmed before either capture was read.
 
 ## 16. Slot 0's content changed — but NOT because of anything we did
 
@@ -885,6 +882,69 @@ checked before the hypothesis is doubted.
 This was resolved by reading the Wi-Fi state of the machine the work is running on, after
 proposing an experiment that would have required the operator to determine the band from
 an iPhone's UI — which does not display it. The information was already to hand.
+
+## 18. ★ PROVEN: slot 0 is the association slot
+
+The controlled experiment, run properly. Both states confirmed by the operator **before**
+either capture was analysed, and the prediction stated in advance.
+
+`captures/assoc-connected.pcap` and `captures/assoc-disconnected.pcap`. Two iPhones with
+AirDrop sheets open throughout; the only variable is whether they are associated to a
+5 GHz access point.
+
+```
+connected      104, 0, 149, 0, 0, 0, 0, 0, 6, 0, 149, 0, 0, 0, 0, 0     166 frames
+disconnected     6, 0, 149, 0, 0, 0, 0, 0, 6, 0, 149, 0, 0, 0, 0, 0     510 frames
+                 ^
+                 only slot 0 differs; every other slot is byte-identical
+```
+
+| state | slot 0 = 104 | slot 0 = 6 |
+|---|---|---|
+| connected to the 5 GHz AP | **166** | 0 |
+| Wi-Fi off | **0** | **1020** |
+
+**Slot 0 is the association slot.** It carries the access point's channel while the device
+is associated and falls back to channel 6 — the 2.4 GHz social channel — when it is not.
+The slot is never surrendered; only its content changes. Occupancy stays at 4 of 16, slots
+2 and 10 stay on 149, slot 8 stays on 6.
+
+### What this means
+
+AWDL's coexistence with infrastructure Wi-Fi is **not** a firmware capability, a DBS
+feature, or a second radio. **It is one window in sixteen, reserved permanently, whose
+channel follows the association.** 6.25% of airtime is what holds a Wi-Fi link while AWDL
+runs on the same chip.
+
+### And it is the BCM4383 problem, with a mechanism and a fix
+
+`tarishd` picks one band and `libmosey` builds a 16/16 single-channel schedule (finding 8,
+measured), so **no slot is ever reserved for the association**. On a chip that cannot hold
+two channels at once, AWDL therefore takes the radio and Wi-Fi dies — recorded in
+BUILD-NOTES 40 and 42 as a hardware limitation.
+
+Apple runs hardware under the same constraint and keeps its association by scheduling
+around it. **The capability we lack is in the scheduler, not the silicon**, and `libmosey`
+will not express it — which makes multi-channel scheduling with a reserved slot 0 a
+requirement for `libawdl`, with this capture as the exact target to reproduce.
+
+The `AP Beacon alignment delta` field (finding 6) belongs to this mechanism: a device
+time-sharing with an AP needs to know where that AP's beacon falls relative to its own
+windows.
+
+### How this one was run, after three that were not
+
+1. Operator confirmed both phones connected.
+2. Capture taken, and **checked for the precondition before interpreting** — 166 frames
+   carrying 104, so at least one phone was on the 5 GHz side of a dual-band SSID and the
+   association was visible. Had it not been, the run would have been reported inconclusive.
+3. Prediction stated in advance: slot 0 falls back to 6, everything else unchanged.
+4. Operator confirmed Wi-Fi off on both.
+5. Second capture taken and compared.
+
+An earlier attempt produced the same *observation* with none of this and was withdrawn
+(finding 16). The difference between the two is not the data; it is that this one could
+have come out wrong.
 
 ---
 
