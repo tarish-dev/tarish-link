@@ -45,6 +45,10 @@ Every claim names the capture behind it — see [docs/FINDINGS.md](docs/FINDINGS
 - A device is **absent for most of its own schedule** (3/16 to 9/16 slots occupied).
   Slot occupancy, not link rate, is what governs AWDL throughput.
 - A frame carries its schedule **twice, in two different encodings**.
+- The **discovery layer decodes**: device names, `_airdrop._tcp.local`, and port **8770**,
+  under a fixed 15-entry label dictionary with no negotiation.
+- A device announces it has stopped sharing by **dropping its BLE `0x05` beacon**, 1-5
+  seconds before its AWDL frames stop. AWDL silence is not departure.
 - Tags **32 and 33** are on the wire and in no published table.
 - The election **works**, verified across four devices and two captures: highest metric
   holds mastership, and our node followed correctly for 1019 consecutive advertisements.

@@ -632,6 +632,65 @@ timeout on the order of a few seconds:
 - **The AirDrop beacon is the signal**, it stops within a second or two of the user
   leaving, and it lives in the app where Bluetooth already belongs.
 
+## 14. The discovery layer, decoded — device names, service types and port 8770
+
+Service Response (tag 2) is the densest tag in the protocol — 444 AirDrop records in a
+single 180s capture — and the one that makes a capture legible.
+
+```
+services advertised
+  _airdrop._tcp.local                      444
+  _applicationservicepairing._tcp.local    246
+  _appsvcprepair._tcp.local                246
+
+instances
+  9e392c9db1dd._airdrop._tcp.local         -> 87b469cc-….local:8770
+  91eae90ce21e._airdrop._tcp.local         -> 5b28e76c-….local:8770
+  iPhone, iPhone (2)                       device names, in the clear
+```
+
+Counts cross-checked against `tshark -V` on the same capture: 444 / 246 / 246 exactly,
+and port **8770** on all 444 AirDrop SRV records.
+
+### AWDL does not carry mDNS verbatim
+
+It carries the same records under its own encoding with a **fixed dictionary**, so the
+strings every AirDrop frame would otherwise repeat cost two bytes:
+
+```
+0xC007 -> _airdrop._tcp.local        0xC00C -> local
+0xC009 -> _airdrop                   0xC00A -> _tcp.local
+0xC000 -> NULL, contributes nothing to the name
+```
+
+There is no negotiation and no per-frame table. The dictionary is static and shared, so a
+decoder either knows these fifteen values or produces names that **still parse and are
+wrong** — which is the failure mode to watch for, since nothing errors.
+
+### Three traps, all of which parse cleanly when wrong
+
+- **The name length includes the type byte that follows it.** Taking it at face value runs
+  the name decoder one byte into the type field: the name gains a spurious trailing label
+  and every later offset in the record is shifted.
+- **SRV priority, weight and port are big-endian** — DNS's own layout, carried through
+  unchanged, and the only big-endian fields in AWDL. Read little-endian, port 8770 becomes
+  16418. Plausible, and wrong.
+- **A record that will not parse ends the list.** Resyncing by scanning for the next
+  plausible record manufactures entries that were never on the air; if the offsets are
+  wrong they are wrong from that point on.
+
+### What it gives us
+
+An identity layer. Before this a capture was addresses; now it is *"iPhone (2) is
+advertising AirDrop at `5b28e76c-….local:8770`"*. That matters for three things:
+
+- **Correlating BLE with AWDL.** Findings 12 and 13 could only pair a BLE beacon with an
+  AWDL sender by the timing of a departure. A device name and a stable instance identifier
+  give a second, independent handle.
+- **Knowing what to advertise.** `libawdl` must emit these records, and now we have real
+  ones to match rather than a specification to interpret.
+- **Port 8770**, read off the air. Worth noting our own GoOpenDrop config carries 8772.
+
 ---
 
 ## Setup

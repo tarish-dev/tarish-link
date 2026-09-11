@@ -32,6 +32,7 @@ pub mod action;
 pub mod dot11;
 pub mod election;
 pub mod radiotap;
+pub mod service;
 pub mod sync;
 pub mod tlv;
 

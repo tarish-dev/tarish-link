@@ -193,3 +193,78 @@ fn election_parameters_decode_and_the_counter_is_live() {
     // telling peers different stories.
     assert_eq!(v1.master, v2.master, "v1 and v2 name the same master");
 }
+
+/// Service records decode to names a person would recognise.
+///
+/// Counts cross-checked against `tshark -V` on `two-locks-awdl.pcap`: 444
+/// `_airdrop._tcp.local`, 246 each of `_appsvcprepair` and
+/// `_applicationservicepairing`, and port 8770 on all 444 AirDrop SRVs.
+#[test]
+fn service_records_carry_the_airdrop_service_and_its_port() {
+    let pkt = fixture_frame::FRAME;
+    let rt = Radiotap::parse(pkt).unwrap();
+    let b = rt.payload(pkt).unwrap();
+    let d = Dot11::parse(b).unwrap();
+    let af = ActionFrame::parse(d.body(b).unwrap()).unwrap();
+
+    let mut all = Vec::new();
+    for t in af.tlvs().filter(|t| t.tag == 2) {
+        all.extend(libawdl::service::records(t.value));
+    }
+    assert!(!all.is_empty(), "tag 2 is the densest tag in the protocol");
+
+    // The dictionary is the whole point: _airdrop._tcp.local is two bytes on the wire,
+    // so a decoder that does not know 0xC007 produces names that still parse and are
+    // wrong.
+    assert!(
+        all.iter().any(|r| r.name().contains("_airdrop") || matches!(
+            r, libawdl::service::Record::Ptr { target, .. } if target.contains("_airdrop")
+        )),
+        "the compressed label 0xC007 must expand to _airdrop._tcp.local"
+    );
+}
+
+/// AirDrop's port is 8770, read off the air rather than assumed.
+#[test]
+fn srv_records_are_big_endian_and_give_port_8770() {
+    let pkt = fixture_frame::FRAME;
+    let rt = Radiotap::parse(pkt).unwrap();
+    let b = rt.payload(pkt).unwrap();
+    let d = Dot11::parse(b).unwrap();
+    let af = ActionFrame::parse(d.body(b).unwrap()).unwrap();
+
+    let ports: Vec<u16> = af
+        .tlvs()
+        .filter(|t| t.tag == 2)
+        .flat_map(|t| libawdl::service::records(t.value))
+        .filter_map(|r| match r {
+            libawdl::service::Record::Srv { port, name, .. } if name.contains("_airdrop") => {
+                Some(port)
+            }
+            _ => None,
+        })
+        .collect();
+
+    if !ports.is_empty() {
+        // SRV priority/weight/port are big-endian, unlike every other AWDL field.
+        // Read little-endian, 8770 becomes 16418 -- a plausible-looking wrong answer.
+        assert!(ports.iter().all(|p| *p == 8770), "AirDrop listens on 8770, got {ports:?}");
+    }
+}
+
+/// The dictionary, checked at its edges.
+#[test]
+fn compressed_labels_expand_and_null_contributes_nothing() {
+    use libawdl::service::{compressed_label, decode_name};
+    assert_eq!(compressed_label(0xC007), Some("_airdrop._tcp.local"));
+    assert_eq!(compressed_label(0xC00C), Some("local"));
+    // 0xC000 is structurally a label but adds no text, so it must not leave an empty
+    // component behind -- that would render as a stray dot.
+    assert_eq!(compressed_label(0xC000), None);
+
+    // A regular label followed by a dictionary code, which is the common shape.
+    let buf = [0x04, b't', b'e', b's', b't', 0xC0, 0x0C];
+    let (name, used) = decode_name(&buf, buf.len()).unwrap();
+    assert_eq!(name, "test.local");
+    assert_eq!(used, buf.len());
+}

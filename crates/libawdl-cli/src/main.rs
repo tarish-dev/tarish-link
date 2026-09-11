@@ -18,6 +18,7 @@ use libawdl::{
     dot11::{Dot11, FrameControl},
     radiotap::Radiotap,
     election::{ElectionParams, ElectionParamsV2},
+    service,
     sync::{ChannelSequence, SyncParams},
     tlv::Stop,
 };
@@ -86,6 +87,26 @@ fn print_frame(n: u64, rt: &Radiotap, d: &Dot11, af: &ActionFrame) {
                         },
                         s.tx_channel,
                     );
+                }
+            }
+            2 => {
+                for r in service::records(t.value) {
+                    match r {
+                        service::Record::Ptr { name, target } => {
+                            println!("           PTR  {name} -> {target}")
+                        }
+                        service::Record::Srv { name, port, target, .. } => {
+                            println!("           SRV  {name} -> {target}:{port}")
+                        }
+                        service::Record::Txt { name, strings } => {
+                            println!("           TXT  {name}  {}", strings.join(" "))
+                        }
+                        service::Record::Other { name, rtype, data } => println!(
+                            "           {:<4} {name}  {} bytes",
+                            service::type_name(rtype),
+                            data.len()
+                        ),
+                    }
                 }
             }
             5 => {
@@ -213,6 +234,8 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
     // Who names whom. An election claim is only meaningful as a relationship, so this
     // records the edge rather than two separate tallies that have to be guessed at.
     let mut follows: BTreeMap<(String, String), u64> = BTreeMap::new();
+    let mut services: BTreeMap<String, u64> = BTreeMap::new();
+    let mut instances: BTreeMap<String, u64> = BTreeMap::new();
 
     while let Ok(pkt) = cap.next_packet() {
         total += 1;
@@ -249,6 +272,22 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
                                 libawdl::dot11::Mac(sp.master).to_string()
                             };
                             *masters.entry(m).or_default() += 1;
+                        }
+                    }
+                    if t.tag == 2 {
+                        for r in service::records(t.value) {
+                            match &r {
+                                service::Record::Ptr { name, target } => {
+                                    *services.entry(name.clone()).or_default() += 1;
+                                    *instances.entry(target.clone()).or_default() += 1;
+                                }
+                                service::Record::Srv { target, port, .. } => {
+                                    *instances
+                                        .entry(format!("{target}:{port}"))
+                                        .or_default() += 1;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     if t.tag == 24 {
@@ -327,6 +366,18 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
         eprintln!("election (per sender: best metric, best counter, frames claiming master / following):");
         for (who, (metric, counter, master_n, follow_n)) in &claims {
             eprintln!("  {who}  metric {metric:<12} counter {counter:<8} master {master_n:<5} following {follow_n}");
+        }
+    }
+    if !services.is_empty() {
+        eprintln!("services advertised:");
+        for (k, n) in &services {
+            eprintln!("  {k:<40} {n}");
+        }
+    }
+    if !instances.is_empty() {
+        eprintln!("instances / targets seen:");
+        for (k, n) in instances.iter().take(12) {
+            eprintln!("  {k:<48} {n}");
         }
     }
     if !follows.is_empty() {
