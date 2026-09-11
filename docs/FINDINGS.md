@@ -697,3 +697,23 @@ advertising AirDrop at `5b28e76c-….local:8770`"*. That matters for three thing
 
 Moved to [SETUP.md](SETUP.md), with the rig, the build steps and the traps.
 
+
+---
+
+## Open, not yet investigated
+
+### AirDrop to non-contacts may now require a matching code
+
+Operator observation, 2026-09-11: recent iOS appears to show a code on both devices that
+must match before an AirDrop to a non-contact proceeds.
+
+This sits **above AWDL**, in the AirDrop HTTPS exchange on port 8770 (`/Ask`), which is
+TLS and therefore invisible to an over-the-air capture. Nothing in this repository can
+observe it; it would show only as a pause in frame timing.
+
+**Why it matters.** `tarishsharingd` implements `/Ask`, and our devices are by definition
+non-contacts to an Apple peer. If current iOS requires this step, a transfer that worked
+before an iOS update can start being refused in a way that looks like our own regression.
+
+To investigate from the Android side, where we are one end of the TLS connection and can
+log the exchange — not from the Pi.
