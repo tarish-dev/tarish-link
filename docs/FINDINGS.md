@@ -436,6 +436,74 @@ series said it changed its mind once, correctly. **Any claim about election beha
 made from the timeline or not at all** — and it was the operator insisting on more
 verification, not the data, that caught the first version.
 
+## 11. BLE gives ten seconds' earlier notice of a departure than AWDL silence does
+
+Prompted by an operator observation: Apple devices notice when another device goes away,
+and that the mechanism is probably BLE rather than AWDL.
+
+`captures/dual-awdl.pcap` and the matching BLE capture — 150s, both radios recorded
+simultaneously on the same Pi, `tcpdump` on `mon0` and `btmon` on `hci0`. An iPhone had
+its AirDrop sheet open, and its screen was locked partway through.
+
+| event | t |
+|---|---|
+| iPhone's AirDrop BLE beacon last seen | **35.8s** |
+| AWDL master `be:35` last frame | **46.1s** (+10.3s) |
+| another node promotes itself to master | **50.3s** (+14.5s) |
+
+**BLE stopped first, by ten seconds.** Then AWDL took another four before any peer
+reacted at all.
+
+### Why this is what you would expect, structurally
+
+The AirDrop BLE beacon is **only** emitted while a device is actively sharing. With no
+sheet open anywhere, a scan of the air returns Apple types 9 (AirPlay) and 22 and no
+type `0x05` at all. So its presence is a continuously refreshed binary: *this device is
+AirDropping right now*.
+
+AWDL cannot be that, and the reason is finding 6: **a device occupies only 3 to 9 of its
+16 availability windows.** A peer is legitimately not transmitting most of the time, so
+"silent" and "gone" are indistinguishable without waiting long enough to be sure — which
+is exactly the ten seconds observed. Absence is normal in AWDL; absence is meaningful in
+BLE.
+
+Two beacons were distinguishable in the capture by payload, which is what made the
+measurement possible at all:
+
+```
+0512409728940000000003ef8b5c621691d06a00   real contact hashes  -> the iPhone
+0512000000000000000001000000000000000000   all-zero hashes      -> our own device
+```
+
+Ours continued throughout; the iPhone's stopped and never returned.
+
+### What is NOT established
+
+**That the BLE device and the AWDL device are the same physical unit.** BLE addresses and
+AWDL addresses are independently randomised, so they cannot be linked from the capture.
+The correlation is temporal and circumstantial: one device's AirDrop beacon ceased, and
+about ten seconds later one device's AWDL presence ceased, in a window where exactly one
+device was locked.
+
+There is a competing explanation worth taking seriously: **AWDL clusters may idle
+collectively.** In `run-d-iphone.pcap` three Apple devices went quiet within six seconds
+of each other, and here `be:35` — which held mastership for a full 120s in an earlier
+capture — went silent shortly after the iPhone's sheet closed. It is possible the open
+sheet was keeping the whole cluster awake rather than that we watched one device leave.
+
+The BLE scan also ran with duplicate filtering on, so "last seen" is approximate.
+
+### What it means for us
+
+If BLE cessation is the signal, then **peer expiry belongs in the app, not the daemon** —
+BLE lives in the app, deliberately, because `libmosey` links no Bluetooth library at all
+and Google draws the same line. A peer list that expires entries on AWDL silence will
+either drop live peers that are simply between windows, or hold dead ones for ten seconds
+longer than Apple does.
+
+That is a concrete, testable difference in behaviour, and it would show up to a user
+exactly as "devices linger in the list after they are gone".
+
 ---
 
 ## Setup
