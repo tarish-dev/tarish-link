@@ -363,6 +363,79 @@ That is either the share sheet closing, a cluster-wide idle timeout, or AWDL tea
 and which it is matters, because it determines how long a peer stays reachable after a
 user stops looking at their screen. Worth a capture designed around it.
 
+## 10. Verified: our election is correct, and the behaviour I called a defect is Apple's too
+
+`captures/run-e-long.pcap` — 120s, channel 149, one Pixel and three Apple devices, with an
+iPhone's share sheet **held open for the whole capture** so a master is present throughout.
+That was the control finding 9 lacked.
+
+```
+election over time, one column per 5s.  M = claims master, f = follows, * = transition
+
+02:3b:e8:75:9c:03  fffffffffffffffffffffffff
+86:85:97:ed:a7:2e  MMMMMMMMMMM*fffff*fffff*f
+be:35:be:c9:05:1f  MMMMMMMMMMMMMMMMMMMMMMMMM
+f6:49:75:da:e8:d4  fffffffffffffffffffffffff     <- ours
+```
+
+| device | metric | counter | claims | follows | names as master |
+|---|---|---|---|---|---|
+| `be:35` (Apple) | **527** | 659 | 821 | 0 | itself — **holds it for all 120s** |
+| `86:85` (Apple) | 523 | 208 | 552 | 629 | **alternates** — itself, then `be:35`, repeatedly |
+| `02:3b` (Apple) | 510 | 68368 | 0 | 216 | `be:35` |
+| **ours** | **1** | 0 | **0** | **1019** | `be:35`, in every single frame |
+
+### Our node is exonerated
+
+**1019 advertisements, every one of them following, no claim at any point.** With a master
+present for the full two minutes our node stayed a follower throughout — which is exactly
+right for a node whose metric is 1. Taken with finding 9, where it promoted itself six
+seconds after every peer went silent, the election logic is doing both halves correctly:
+yield while a stronger node is present, take over when it leaves.
+
+### The behaviour I called a defect is what Apple devices do
+
+`86:85` — a genuine Apple device — **alternates repeatedly** between claiming mastership
+and following `be:35`, with three transitions inside two minutes. That is the pattern I
+flagged as suspicious in our stack.
+
+Its metric is **523 against the master's 527.** A near-tie contends; a distant one does
+not. Our node at metric 1, and `02:3b` at 510, both follow without ever wavering.
+
+So oscillation is not a symptom of anything. It is what AWDL does when two candidates are
+closely matched, and had I looked at an Apple device first rather than only at ours, I
+would not have raised it.
+
+### Metric ordering, confirmed on four devices
+
+```
+527  be:35   master
+523  86:85   contends, mostly follows
+510  02:3b   follows
+  1  ours    follows
+```
+
+Highest metric holds mastership. The counter remains irrelevant to the outcome: `02:3b`
+carries **68368**, a hundred times the winner's 659, and follows without contest.
+
+### What this means for libawdl
+
+- **The election is understood well enough to implement.** Advertise a metric, follow the
+  highest, take over on silence. Confirmed against four devices in two captures.
+- **Metric 1 is a deliberate posture, not a bug.** A node that never wants to be master
+  is a legitimate configuration, and ours behaves correctly as one. Whether `libawdl`
+  should ever claim mastership is now a design choice with evidence behind it rather than
+  a defect to fix.
+- **Counter still unexplained**, and now demonstrably not load-bearing for the election.
+  `libawdl` can advertise something sane and revisit it if a peer ever appears to care.
+
+### The method note
+
+`marsad timeline` exists because of finding 9. A tally said our node flapped; the time
+series said it changed its mind once, correctly. **Any claim about election behaviour is
+made from the timeline or not at all** — and it was the operator insisting on more
+verification, not the data, that caught the first version.
+
 ---
 
 ## Setup

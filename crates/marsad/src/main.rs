@@ -135,6 +135,64 @@ fn print_frame(n: u64, rt: &Radiotap, d: &Dot11, af: &ActionFrame) {
     }
 }
 
+/// Election state over time, one row per sender.
+///
+/// THIS EXISTS BECAUSE A TALLY LIED. Summed over a capture, our node looked like it was
+/// flapping between claiming and yielding mastership -- 498 frames one way, 292 the
+/// other. Plotted against time it had changed its mind exactly once, six seconds after
+/// every peer went silent, which is correct behaviour rather than a defect. A per-sender
+/// total cannot tell those apart and the difference is everything, so any claim about
+/// election behaviour gets made from this view or not at all.
+///
+/// `M` = claiming mastership (distance 0), `f` = following someone, `.` = silent.
+fn timeline<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, bucket_s: i64) {
+    let mut first_ts: Option<i64> = None;
+    // sender -> bucket -> (claims, follows)
+    let mut rows: BTreeMap<String, BTreeMap<i64, (u32, u32)>> = BTreeMap::new();
+    let mut last_bucket = 0i64;
+
+    while let Ok(pkt) = cap.next_packet() {
+        let ts = pkt.header.ts.tv_sec;
+        let base = *first_ts.get_or_insert(ts);
+        let bucket = (ts - base) / bucket_s;
+        last_bucket = last_bucket.max(bucket);
+
+        if let Seen::Awdl { dot11, af, .. } = classify(pkt.data) {
+            for t in af.tlvs() {
+                if t.tag != 24 {
+                    continue;
+                }
+                if let Some(e) = ElectionParamsV2::parse(t.value) {
+                    let row = rows.entry(dot11.src.to_string()).or_default();
+                    let cell = row.entry(bucket).or_insert((0, 0));
+                    if e.claims_mastership() {
+                        cell.0 += 1;
+                    } else {
+                        cell.1 += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    println!("election over time — one column per {bucket_s}s.  M = claims master, f = follows, . = silent\n");
+    for (who, row) in &rows {
+        print!("{who}  ");
+        for b in 0..=last_bucket {
+            print!("{}", match row.get(&b) {
+                None => '.',
+                // A bucket containing both is a real transition, not noise -- shown as
+                // its own symbol so it cannot be mistaken for either state.
+                Some((m, f)) if *m > 0 && *f > 0 => '*',
+                Some((m, _)) if *m > 0 => 'M',
+                _ => 'f',
+            });
+        }
+        println!();
+    }
+    println!("\n* = both states within one bucket (a transition)");
+}
+
 fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool) {
     let mut total: u64 = 0;
     let mut awdl_n: u64 = 0;
@@ -294,6 +352,7 @@ fn usage() -> ! {
     eprintln!("  marsad live  <iface>       capture from a monitor interface (needs root)");
     eprintln!("  marsad read  <file.pcap>   dissect a recorded capture");
     eprintln!("  marsad stats <file.pcap>   counts only, no per-frame output");
+    eprintln!("  marsad timeline <file.pcap> [bucket_s]   election state over time");
     std::process::exit(2)
 }
 
@@ -318,6 +377,11 @@ fn main() {
         "read" | "stats" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             run(cap, args[1] == "stats");
+        }
+        "timeline" => {
+            let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
+            let bucket = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+            timeline(cap, bucket);
         }
         _ => usage(),
     }
