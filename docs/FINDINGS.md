@@ -504,6 +504,68 @@ longer than Apple does.
 That is a concrete, testable difference in behaviour, and it would show up to a user
 exactly as "devices linger in the list after they are gone".
 
+## 12. Departure is per-device, not a cluster winding down
+
+Finding 11 left two explanations open: either a device's own BLE beacon ceasing is the
+departure signal, or an AWDL cluster idles collectively and the ten-second gap was a
+wind-down. `captures/two-iphones-awdl.pcap` and `two-iphones-ble.pcap` separate them.
+
+Setup: **both Pixels taken off the air entirely** (`mosey0` absent, `tarish.awdl.wanted=0`,
+channel override cleared), two iPhones with AirDrop sheets open, 180s on channel 149 with
+BLE and AWDL recorded at once. The operator locked one iPhone, then the other.
+
+| device | locked? | AWDL last frame |
+|---|---|---|
+| `be:35:be:c9:05:1f` | yes | 100.1s |
+| `8a:c3:f7:4b:ce:de` | yes | 101.7s |
+| `02:3b:e8:75:9c:03` | **no** | **178.2s — transmitted throughout** |
+
+**The third device is the control, and it settles it.** `02:3b` was never touched, kept
+sending AWDL for the full capture, and took over as master when the other two stopped. A
+cluster winding down collectively would have taken it with them. Departure is per-device.
+
+The two that were locked stopped **1.6s apart**, which matches "one before the other".
+
+### The ten-second gap reproduces
+
+BLE AirDrop beacons last seen at 90.4s; the locked devices' AWDL frames ceased at 100.1s
+and 101.7s. Same ordering and roughly the same interval as finding 11: **BLE first, AWDL
+about ten seconds later.**
+
+### Presence and sharing are separate signals
+
+After the AirDrop beacons stopped, the air still carried Apple types **0x10 (Nearby),
+0x12 (Find My), 0x09 (AirPlay)** from the same devices — 42 frames in the remaining
+85 seconds. Only type **0x05** went away.
+
+So the devices never left; they stopped *sharing*. A peer list wants exactly that
+distinction, and BLE draws it with two different beacon types. AWDL cannot draw it at all.
+
+### A measurement limitation, now fixed
+
+The BLE side was captured through `bluetoothctl scan on`, which enables **duplicate
+filtering**: the controller reports each unchanged advertisement roughly once per 16
+seconds. Both iPhones' beacons therefore appear on the same 16s cadence and both fall in
+one sampling window, so BLE could not resolve the 1.6s separation that AWDL showed
+clearly.
+
+`tools/dual-capture.sh` now uses `hcitool lescan --duplicates`, which reports every
+advertisement. Good enough for presence, useless for timing a departure — worth knowing
+before trusting a BLE timestamp.
+
+### What this means for Tarish
+
+Peer expiry should hang off **the AirDrop beacon specifically**, not AWDL silence and not
+BLE presence in general:
+
+- **AWDL silence is not departure.** A device attends 3-9 of its 16 windows, so silence is
+  its normal state, and it stopped transmitting ten seconds after it had already stopped
+  sharing.
+- **BLE presence is not sharing.** Nearby and Find My continue from a device that has
+  closed its share sheet.
+- **The `0x05` beacon is the signal**, and it lives in the app, where Bluetooth already
+  belongs — `libmosey` links no Bluetooth library and Google draws the same line.
+
 ---
 
 ## Setup
