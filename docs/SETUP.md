@@ -71,7 +71,7 @@ sudo tcpdump -i mon0 -w awdl.pcap -s 0
 ```
 
 ```sh
-marsad stats awdl.pcap      # on any machine
+awdl stats awdl.pcap      # on any machine
 ```
 
 **A capture is evidence; a live run is an anecdote.** Every finding in `FINDINGS.md`

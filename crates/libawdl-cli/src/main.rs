@@ -1,11 +1,11 @@
-//! marsad — watch the air, keep only AWDL.
+//! awdl — watch the air, keep only AWDL.
 //!
 //! Three subcommands, all reading the same parser:
 //!
 //! ```text
-//!   marsad live <iface> [--chan N]   capture from a monitor interface
-//!   marsad read <file.pcap>          the same, from a recorded capture
-//!   marsad stats <file.pcap>         how much of a capture is AWDL, and which tags
+//!   awdl live <iface> [--chan N]   capture from a monitor interface
+//!   awdl read <file.pcap>          the same, from a recorded capture
+//!   awdl stats <file.pcap>         how much of a capture is AWDL, and which tags
 //! ```
 //!
 //! `read` exists so every finding is reproducible without the radio. A capture is
@@ -348,11 +348,11 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
 }
 
 fn usage() -> ! {
-    eprintln!("marsad — pull AWDL out of the air\n");
-    eprintln!("  marsad live  <iface>       capture from a monitor interface (needs root)");
-    eprintln!("  marsad read  <file.pcap>   dissect a recorded capture");
-    eprintln!("  marsad stats <file.pcap>   counts only, no per-frame output");
-    eprintln!("  marsad timeline <file.pcap> [bucket_s]   election state over time");
+    eprintln!("awdl — pull AWDL out of the air\n");
+    eprintln!("  awdl live  <iface>       capture from a monitor interface (needs root)");
+    eprintln!("  awdl read  <file.pcap>   dissect a recorded capture");
+    eprintln!("  awdl stats <file.pcap>   counts only, no per-frame output");
+    eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
     std::process::exit(2)
 }
 

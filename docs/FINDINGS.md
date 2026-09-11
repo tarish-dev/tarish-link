@@ -8,7 +8,7 @@ Each entry names the capture it came from. A claim with no capture behind it say
 
 `captures/awdl-149.pcap` — 45s, channel 149, Raspberry Pi 400 + ALFA AWUS036ACM (`mt76x2u`).
 
-|  | marsad | `tshark -Y awdl` |
+|  | ours | `tshark -Y awdl` |
 |---|---|---|
 | frames in capture | 6584 | 6584 |
 | identified as AWDL | **278** | **278** |
@@ -73,7 +73,7 @@ forgotten.
 
 ## 5. Half the air is ACKs, which is not the same as unparseable
 
-The first version of `marsad stats` reported 3158 of 6584 frames "unparsed", which looked
+The first version of `awdl stats` reported 3158 of 6584 frames "unparsed", which looked
 alarming and was an artefact: it demanded a full 24-byte management header before it
 would say what a frame was, and a control frame is ten bytes with no third address.
 
@@ -431,7 +431,7 @@ carries **68368**, a hundred times the winner's 659, and follows without contest
 
 ### The method note
 
-`marsad timeline` exists because of finding 9. A tally said our node flapped; the time
+`awdl timeline` exists because of finding 9. A tally said our node flapped; the time
 series said it changed its mind once, correctly. **Any claim about election behaviour is
 made from the timeline or not at all** — and it was the operator insisting on more
 verification, not the data, that caught the first version.

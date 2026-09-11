@@ -1,6 +1,7 @@
-# marsad
+# tarish-libawdl
 
-**مرصد — an observatory.** It watches the air and keeps only AWDL.
+**An AWDL implementation, built from captures.** Named for what it replaces:
+`libmosey_daemon_ffi.so`, the closed Google library our AirDrop stack currently sits on.
 
 Apple Wireless Direct Link is how AirDrop moves bytes. This is a parser for it, written
 from the frame format rather than around an existing implementation, because the point
@@ -57,7 +58,7 @@ Every claim names the capture behind it — see [docs/FINDINGS.md](docs/FINDINGS
 
 ```
 crates/awdl      the parser. No I/O, no OS dependency — bytes in, structures out.
-crates/marsad    the CLI. Capture, filter, dissect.
+crates/libawdl-cli    the CLI. Capture, filter, dissect.
 captures/        real captures kept as fixtures, so findings are reproducible
 docs/            what each field turned out to mean, and how we know
 ```
@@ -71,9 +72,9 @@ phone attached. A parser that needs a radio to test is a parser nobody tests.
 ```sh
 cargo build --release
 
-sudo marsad live mon0        # capture from a monitor interface
-marsad read  capture.pcap    # dissect a recording
-marsad stats capture.pcap    # how much of this capture is AWDL, and which tags
+sudo awdl live mon0        # capture from a monitor interface
+awdl read  capture.pcap    # dissect a recording
+awdl stats capture.pcap    # how much of this capture is AWDL, and which tags
 ```
 
 Bringing up a monitor interface has one trap worth knowing: **the managed interface on

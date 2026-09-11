@@ -1,9 +1,13 @@
 [package]
-name = "marsad"
+name = "libawdl-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Capture the air and pull AWDL out of it."
+
+[[bin]]
+name = "awdl"
+path = "src/main.rs"
 
 [dependencies]
 libawdl = { path = "../libawdl" }

@@ -188,11 +188,11 @@ impl crate::Radio for Nl80211 {
         // monitor interface, not on a process spawn. It is wired up in the capture
         // tool, which already owns a pcap handle; duplicating that here would mean two
         // handles on one interface.
-        Err(Error::Unsupported("tx is not wired to this backend yet — see marsad"))
+        Err(Error::Unsupported("tx is not wired to this backend yet — see the CLI crate"))
     }
 
     fn rx(&mut self, _timeout_ms: u32) -> Result<Option<crate::RxFrame>> {
-        Err(Error::Unsupported("rx is not wired to this backend yet — see marsad"))
+        Err(Error::Unsupported("rx is not wired to this backend yet — see the CLI crate"))
     }
 }
 
