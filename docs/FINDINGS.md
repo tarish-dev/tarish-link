@@ -1020,18 +1020,48 @@ is not.**
 
 ## Open, not yet investigated
 
-### AirDrop to non-contacts may now require a matching code
+### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
 
-Operator observation, 2026-09-11: recent iOS appears to show a code on both devices that
-must match before an AirDrop to a non-contact proceeds.
+**Corrected.** An earlier version of this note warned that recent iOS may require a
+matching code before an AirDrop to a non-contact proceeds, and that our devices, being
+non-contacts by definition, could start being refused after an iOS update.
 
-This sits **above AWDL**, in the AirDrop HTTPS exchange on port 8770 (`/Ask`), which is
-TLS and therefore invisible to an over-the-air capture. Nothing in this repository can
-observe it; it would show only as a pause in frame timing.
+Operator observation, and it settles it: **the code request only ever appears between two
+iPhones.** It has never appeared for an Android peer — not for Tarish, and not for stock
+Quick Share's AirDrop support either, which is Google's own privileged implementation
+riding the same `wonder.ko` and `libmosey`. So it is gated on both ends being Apple
+devices, and there is no interop cliff waiting for us.
 
-**Why it matters.** `tarishsharingd` implements `/Ask`, and our devices are by definition
-non-contacts to an Apple peer. If current iOS requires this step, a transfer that worked
-before an iOS update can start being refused in a way that looks like our own regression.
+**Why that is coherent.** The code is the bootstrap of a *persistent* trust relationship,
+and that only means anything when both peers have durable cryptographic identities to bind
+it to. Between Apple devices there is an Apple ID behind each end. A third-party peer has
+nothing to bind, so it falls back to the per-transfer accept prompt — which is exactly what
+Tarish already presents, and is arguably the more honest behaviour anyway.
 
-To investigate from the Android side, where we are one end of the TLS connection and can
-log the exchange — not from the Pi.
+It also appears once per device pair and never again, which is consistent with a trust
+binding being stored rather than a check being repeated.
+
+**What was wrong in my reasoning.** I traced the caching to our TLS certificate, which
+`sharingd` regenerates on every start (`build_acceptor`, "generated fresh at each start",
+deliberately not persisted). That would have meant a prompt after every daemon restart. The
+chain was plausible and the premise was false — the prompt never applies to us, so nothing
+about our certificate affects it.
+
+### The certificate rotation is still real, and still worth a decision
+
+Independent of the above. Two of our identities change on every restart:
+
+- **mDNS instance name** — derived from `mosey0`'s MAC, which is fresh each AWDL session.
+  Blazer appeared as `56:ba:4f:f6:3a:44`, `16:50:71:fb:18:bb` and `f6:49:75:da:e8:d4` in
+  one evening.
+- **TLS certificate** — generated at each start and never written to disk.
+
+Apple's instance names rotate too, so that half matches. The certificate is a deliberate
+choice with a real argument behind it in the code: *"a key that never touches storage
+cannot be stolen from storage."* Nothing currently depends on identity continuity, so
+nothing is broken.
+
+**It is worth knowing that we have foreclosed the option**, though. Any future feature that
+wants a peer to remember us — a trusted-device list, a one-time confirmation, a
+reconnect-without-prompting — needs a stable identity, and we throw ours away twice per
+restart. That should stay a decision rather than becoming an accident.
