@@ -1136,7 +1136,11 @@ fn phase<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
     const SLOTS: u64 = 16;
     const TU: u64 = 1024;
     const AW_US: u64 = 16 * TU;
-    const CYCLE_US: u64 = SLOTS * AW_US;
+    // A channel-sequence slot is presence_mode (4) availability windows, so the cycle is
+    // 1024 TU and not 256. Folding onto a quarter of the real period aliases four
+    // different slots together, which is what this tool did before OWL was read properly.
+    const SLOT_US: u64 = 4 * AW_US;
+    const CYCLE_US: u64 = SLOTS * SLOT_US;
 
     let mut hist: BTreeMap<String, [u64; 16]> = BTreeMap::new();
     let mut no_tsf: u64 = 0;
@@ -1160,7 +1164,7 @@ fn phase<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
                     + pkt.header.ts.tv_usec as u64
             }
         };
-        let slot = ((t % CYCLE_US) / AW_US) as usize;
+        let slot = ((t % CYCLE_US) / SLOT_US) as usize;
         hist.entry(dot11.src.to_string()).or_insert([0; 16])[slot.min(15)] += 1;
     }
 
@@ -1233,7 +1237,7 @@ fn phase<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
 /// number that decides whether it is usable is the SPREAD, not the phase.
 fn follow<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
     use libawdl::election::ElectionParamsV2;
-    use libawdl::follow::{Cluster, AW_US};
+    use libawdl::follow::Cluster;
     use libawdl::sync::SyncParams;
 
     let mut cl = Cluster::new();
@@ -1270,17 +1274,20 @@ fn follow<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
     }
     println!("slots:   {:?} of 16", cl.master_slots);
     println!("anchors: {} frames from the master", cl.clock.observations());
+    let slot_us = cl.clock.slot_us();
     match (cl.clock.phase_us(), cl.clock.spread_us()) {
         (Some(p), Some(spread)) => {
-            println!("phase:   {p} us into the cycle");
+            println!("phase:   {p} us into a {} us cycle", cl.clock.cycle());
+            // Against the SLOT, which is presence_mode availability windows. Quoting it
+            // against a single window overstates the error fourfold.
             println!(
-                "spread:  {spread} us  ({:.1}% of a {AW_US} us window)",
-                100.0 * spread as f64 / AW_US as f64
+                "spread:  {spread} us  ({:.1}% of a {slot_us} us slot)",
+                100.0 * spread as f64 / slot_us as f64
             );
             // Aim at the window's CENTRE and the margin is half a window either side, so
             // what has to fit is half the spread. Say the arithmetic rather than a verdict.
             let half = spread / 2;
-            let margin = AW_US / 2;
+            let margin = slot_us / 2;
             if cl.clock.is_usable() {
                 println!(
                     "VERDICT: usable — half the spread is {half} us against {margin} us of margin"

@@ -1946,26 +1946,63 @@ and it is the one a naive implementation picks.
   correctly but carries its own `aw_counter`, which may not have converged; averaging it in
   blurs the thing being measured.
 
-### One thing reading OWL raised, and how it was settled
+### ★ The thing reading OWL actually caught: our cycle was four times too short
 
-OWL synchronises on **extended** AWs — `presence_mode * aw_period` — and masks the low two
-bits of `aw_counter`. Apple frames carry `presence_mode: 4`. If a channel-sequence slot spans
-four Availability Windows rather than one, a 16-slot cycle is **1024 TU**, not 256, and every
-phase fold in this project is wrong by a factor of four.
+OWL synchronises on **extended** AWs — `presence_mode * aw_period` — and its slot index is
+`awdl_sync_current_eaw(...) % AWDL_CHANSEQ_LENGTH`. Apple frames carry `presence_mode: 4`.
+So a channel-sequence slot is **four availability windows, 64 TU**, and a 16-slot cycle is
+**1024 TU ≈ 1.05 s** — not the 262144 µs this project had used everywhere.
 
-**Tested, and it is not.** Folding each sender's frame arrivals onto both candidate cycles
-and comparing how concentrated the result is, 256 TU wins for every device:
+An earlier version of this section tested that and concluded OWL's grouping did *not* imply a
+longer cycle. **That test was wrong**: it compared concentration at two periods using sixteen
+buckets for both, so the bucket *width* differed fourfold and the two numbers were not
+comparable. A replacement using equal bucket widths was also inconclusive, because
+peak-to-mean scales with bucket count.
+
+**Settled from field values instead, where no timing is involved at all.** Each frame carries
+both its `aw_counter` and the schedule its sender advertises, so the correct indexing is
+whichever puts a device's own frames inside its own advertised slots:
 
 ```text
-  02:3b:e8:75:9c:03  presence_mode=4  conc@256TU=0.668  conc@1024TU=0.616
-  2a:f3:94:4d:96:79  presence_mode=4  conc@256TU=0.719  conc@1024TU=0.520
-  d2:75:0e:61:4c:e2  presence_mode=4  conc@256TU=0.798  conc@1024TU=0.562
+  sender             frames   aw%16 hits   (aw/presence_mode)%16   slots
+  02:3b:e8:75:9c:03     596          34%                    100%   [2, 8, 10]
+  2a:f3:94:4d:96:79     166          39%                    100%   [0, 2, 8, 10]
+  8a:c3:f7:4b:ce:de     194          43%                    100%   [0, 2, 8, 10]
+  be:35:be:c9:05:1f     276          34%                    100%   [0, 2, 8, 10]
+  d2:75:0e:61:4c:e2     165          35%                    100%   [2, 8, 10]
 ```
 
-Seven senders, three captures, no exceptions. So `presence_mode` governs something other
-than slot width — plausibly how many consecutive windows a node attends within a slot — and
-the 262144 µs cycle used throughout this project is right. Recorded because the question was
-a real one and the answer was not obvious from the code alone.
+**100% against a 25% chance level, five devices, 1397 frames, no exceptions.** OWL is right
+and this project was wrong.
+
+### What it was costing us
+
+Stepping one slot per availability window walks the cycle **four times too fast**, so
+"transmit in slots 2, 8 and 10" landed somewhere different every cycle. Every transmit trial
+in findings 34-39 was aiming at a schedule it could not hit — which is a far better
+explanation of why peers ignored us than any of the five candidates those findings
+eliminated, and it was invisible from the outside because the frames themselves were correct.
+
+Folding on the true period also makes the measurements agree with the physics. Apple devices
+in `two-iphones-awdl`, which looked like three loosely-related nodes at 3/16 slots, are four
+slots each with **84-96% shared airtime** where the aliased fold reported 68-85%:
+
+```text
+  02:3b:e8:75:9c:03  [......▅▂......▅▁]   4/16 slots
+  8a:c3:f7:4b:ce:de  [......▅▃......▅▂]   4/16 slots
+  be:35:be:c9:05:1f  [......▅▁......▅▁]   4/16 slots
+```
+
+And clock recovery is much better than finding 40 first reported, because the spread was
+being quoted against a single window rather than a slot: **5.9%, 7.9%, 12.8% and 18.9% of a
+65536 µs slot** across four captures, against 32768 µs of margin when aiming at a slot centre.
+
+### The lesson, stated plainly
+
+Two heuristics on timing data gave confident wrong answers; one look at what the frames say
+about themselves settled it in a line. **When the protocol carries a field that answers the
+question, use the field.** That is the second time in this document the same mistake appears
+— the first was reaching for timing when `aw_remaining` was sitting in the frame.
 
 ### What this unblocks
 

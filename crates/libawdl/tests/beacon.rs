@@ -4,7 +4,7 @@ mod fixture_frame;
 
 use libawdl::{
     action::{ActionFrame, SUBTYPE_MIF, SUBTYPE_PSF},
-    beacon::{Beacon, AW_US},
+    beacon::{Beacon, AW_US, CYCLE_US, SLOT_US},
     dot11::{Dot11, Mac, BROADCAST},
     radiotap::Radiotap,
     sync::SyncParams,
@@ -241,7 +241,11 @@ fn the_beacon_can_align_to_the_windows_it_advertises() {
     let b = Beacon::new(ADDR, 149, "QA");
     assert_eq!(b.advertised_slots(), vec![2, 8, 10], "no association, so slot 0 is empty");
 
-    let aw = u64::from(AW_US);
+    // A SLOT, not an availability window: a slot is four of them. Getting this wrong walks
+    // the cycle four times too fast, which is what the beacon did before OWL was read.
+    let aw = u64::from(SLOT_US);
+    assert_eq!(SLOT_US, 4 * AW_US);
+    assert_eq!(CYCLE_US, 16 * SLOT_US);
     // Inside an advertised window: transmit now.
     assert_eq!(b.us_until_next_advertised_window(2 * aw), 0);
     assert_eq!(b.us_until_next_advertised_window(2 * aw + 500), 0);
@@ -286,9 +290,9 @@ fn the_breadth_control_is_honest_about_where_it_transmits() {
 
         // Every wait lands inside a window we advertise -- transmit set == advertised set.
         for i in 0..16u64 {
-            let now = i * u64::from(AW_US) + 123;
+            let now = i * u64::from(SLOT_US) + 123;
             let wait = b.us_until_next_advertised_window(now);
-            let landed = ((now + wait) % (16 * u64::from(AW_US)) / u64::from(AW_US)) as usize;
+            let landed = ((now + wait) % u64::from(CYCLE_US) / u64::from(SLOT_US)) as usize;
             assert!(slots.contains(&landed), "n={n}: from {i} we land in {landed}, not in {slots:?}");
         }
 

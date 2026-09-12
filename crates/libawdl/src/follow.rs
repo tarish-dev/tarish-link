@@ -30,8 +30,41 @@ use crate::sync::{SyncParams, TU_US};
 
 /// Availability Window, microseconds. 16 TU, as every captured frame agrees.
 pub const AW_US: u64 = 16 * TU_US as u64;
-/// A full sixteen-window cycle.
-pub const CYCLE_US: u64 = 16 * AW_US;
+
+/// How many Availability Windows make one channel-sequence slot.
+///
+/// **A slot is an EXTENDED Availability Window, not a single one**, and this project had it
+/// wrong until OWL's `schedule.c` was read properly: its slot index is
+/// `awdl_sync_current_eaw(...) % AWDL_CHANSEQ_LENGTH`, where an EAW is
+/// `presence_mode * aw_period`.
+///
+/// Settled from the frames themselves rather than from timing, which is what makes it
+/// certain. Each frame carries both its `aw_counter` and the schedule its sender
+/// advertises, so the right indexing is the one that puts a device's own frames inside its
+/// own advertised slots:
+///
+/// ```text
+///   sender             frames   aw%16 hits   (aw/pm)%16   slots
+///   02:3b:e8:75:9c:03     596          34%         100%   [2, 8, 10]
+///   2a:f3:94:4d:96:79     166          39%         100%   [0, 2, 8, 10]
+///   be:35:be:c9:05:1f     276          34%         100%   [0, 2, 8, 10]
+/// ```
+///
+/// 100% against a 25% chance level, five devices, 1397 frames, no exceptions.
+///
+/// Every captured device advertises `presence_mode: 4`. It is taken from the frame rather
+/// than assumed, because it is a field and not a constant.
+pub const DEFAULT_PRESENCE_MODE: u8 = 4;
+
+/// One channel-sequence slot: `presence_mode` availability windows.
+pub fn eaw_us(presence_mode: u8) -> u64 {
+    u64::from(presence_mode.max(1)) * AW_US
+}
+
+/// A full sixteen-slot cycle: 1024 TU at presence mode 4, about 1.05 seconds.
+pub fn cycle_us(presence_mode: u8) -> u64 {
+    16 * eaw_us(presence_mode)
+}
 
 /// One observation: a frame arrived, and it said where in the schedule its sender was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +75,8 @@ pub struct Sighting {
     pub counter: u16,
     /// `aw_remaining` from the frame, in TU.
     pub remaining_tu: u16,
+    /// `presence_mode` from the same frame: how many AWs make a slot.
+    pub presence_mode: u8,
 }
 
 impl Sighting {
@@ -53,29 +88,53 @@ impl Sighting {
     }
 
     /// Which slot of sixteen the sender was in.
+    ///
+    /// Divided by `presence_mode` first, because a slot is an extended AW. See
+    /// [`DEFAULT_PRESENCE_MODE`] for how that was settled.
     pub fn slot(&self) -> usize {
-        usize::from(self.counter % 16)
+        usize::from(self.counter / u16::from(self.presence_mode.max(1))) % 16
     }
 
-    /// Where the cycle containing this window began, on our clock.
+    /// How far into the current SLOT the sender was, in microseconds.
     ///
-    /// The window ends at `window_end_us`; it is slot `slot()` of the cycle, so the cycle
-    /// started `(slot + 1)` windows earlier.
+    /// `aw_remaining` counts down within an availability window, and a slot holds
+    /// `presence_mode` of them, so the position in the slot needs the window index too.
+    pub fn into_slot_us(&self) -> u64 {
+        let pm = u64::from(self.presence_mode.max(1));
+        let aw_in_slot = u64::from(self.counter) % pm;
+        let into_aw = AW_US.saturating_sub(u64::from(self.remaining_tu) * u64::from(TU_US));
+        aw_in_slot * AW_US + into_aw
+    }
+
+    /// Where the cycle containing this frame began, on our clock.
     pub fn cycle_origin_us(&self) -> u64 {
-        self.window_end_us().saturating_sub((self.slot() as u64 + 1) * AW_US)
+        let slot_start = self.arrived_us.saturating_sub(self.into_slot_us());
+        slot_start.saturating_sub(self.slot() as u64 * eaw_us(self.presence_mode))
     }
 }
 
 /// An estimate of a cluster's cycle phase, built from many sightings.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterClock {
-    /// `cycle_origin_us mod CYCLE_US` for each sighting, newest last.
+    /// `cycle_origin_us mod cycle` for each sighting, newest last.
     offsets: Vec<u64>,
+    /// The presence mode the cluster advertises; sets the slot and cycle lengths.
+    presence_mode: u8,
 }
 
 impl ClusterClock {
     pub fn new() -> ClusterClock {
-        ClusterClock { offsets: Vec::new() }
+        ClusterClock { offsets: Vec::new(), presence_mode: DEFAULT_PRESENCE_MODE }
+    }
+
+    /// One channel-sequence slot, microseconds.
+    pub fn slot_us(&self) -> u64 {
+        eaw_us(self.presence_mode)
+    }
+
+    /// A full sixteen-slot cycle, microseconds.
+    pub fn cycle(&self) -> u64 {
+        cycle_us(self.presence_mode)
     }
 
     /// How many sightings are backing the estimate.
@@ -89,7 +148,14 @@ impl ClusterClock {
     /// averaged against its own past forever.
     pub fn observe(&mut self, s: Sighting) {
         const KEEP: usize = 64;
-        self.offsets.push(s.cycle_origin_us() % CYCLE_US);
+        // A changed presence mode changes the cycle length, so old offsets are measured
+        // against a different ruler and cannot be averaged with new ones.
+        if s.presence_mode.max(1) != self.presence_mode {
+            self.presence_mode = s.presence_mode.max(1);
+            self.offsets.clear();
+        }
+        let cycle = self.cycle();
+        self.offsets.push(s.cycle_origin_us() % cycle);
         if self.offsets.len() > KEEP {
             let excess = self.offsets.len() - KEEP;
             self.offsets.drain(..excess);
@@ -109,14 +175,15 @@ impl ClusterClock {
         // Try each observation as the cut point for unwrapping the ring, and keep the
         // rotation with the least spread. With a few dozen points this is trivially cheap
         // and avoids the trigonometry.
+        let cycle = self.cycle();
         let mut best: Option<(u64, u64)> = None; // (spread, phase)
         for cut in &self.offsets {
             let mut rotated: Vec<u64> =
-                self.offsets.iter().map(|o| (o + CYCLE_US - cut) % CYCLE_US).collect();
+                self.offsets.iter().map(|o| (o + cycle - cut) % cycle).collect();
             rotated.sort_unstable();
             let spread = rotated[rotated.len() - 1] - rotated[0];
             let median = rotated[rotated.len() / 2];
-            let phase = (median + cut) % CYCLE_US;
+            let phase = (median + cut) % cycle;
             if best.is_none_or(|(s, _)| spread < s) {
                 best = Some((spread, phase));
             }
@@ -133,10 +200,11 @@ impl ClusterClock {
         if self.offsets.len() < 2 {
             return None;
         }
+        let cycle = self.cycle();
         let mut best = u64::MAX;
         for cut in &self.offsets {
             let mut rotated: Vec<u64> =
-                self.offsets.iter().map(|o| (o + CYCLE_US - cut) % CYCLE_US).collect();
+                self.offsets.iter().map(|o| (o + cycle - cut) % cycle).collect();
             rotated.sort_unstable();
             best = best.min(rotated[rotated.len() - 1] - rotated[0]);
         }
@@ -156,7 +224,8 @@ impl ClusterClock {
     /// 16.4 ms window: a third of a window, which the old bar rejected and which lands
     /// comfortably inside the right window when aimed at its middle.
     pub fn is_usable(&self) -> bool {
-        self.observations() >= 4 && self.spread_us().is_some_and(|s| s / 2 < AW_US / 2)
+        let half_slot = self.slot_us() / 2;
+        self.observations() >= 4 && self.spread_us().is_some_and(|s| s / 2 < half_slot)
     }
 
     /// Microseconds from `now_us` until the MIDDLE of the cluster's slot `slot`.
@@ -165,24 +234,22 @@ impl ClusterClock {
     /// transmits. The boundary is the worst place to aim: it is where half the estimate's
     /// error puts you in the wrong window. The middle is the furthest point from both.
     pub fn us_until_slot_centre(&self, now_us: u64, slot: usize) -> Option<u64> {
-        let phase = self.phase_us()?;
-        let target = (phase + (slot as u64 % 16) * AW_US + AW_US / 2) % CYCLE_US;
-        let pos = now_us % CYCLE_US;
-        Some((target + CYCLE_US - pos) % CYCLE_US)
+        let (phase, cycle, sl) = (self.phase_us()?, self.cycle(), self.slot_us());
+        let target = (phase + (slot as u64 % 16) * sl + sl / 2) % cycle;
+        Some((target + cycle - (now_us % cycle)) % cycle)
     }
 
     /// Microseconds from `now_us` until the cluster's slot `slot` next begins.
     pub fn us_until_slot(&self, now_us: u64, slot: usize) -> Option<u64> {
-        let phase = self.phase_us()?;
-        let target = (phase + (slot as u64 % 16) * AW_US) % CYCLE_US;
-        let pos = now_us % CYCLE_US;
-        Some((target + CYCLE_US - pos) % CYCLE_US)
+        let (phase, cycle, sl) = (self.phase_us()?, self.cycle(), self.slot_us());
+        let target = (phase + (slot as u64 % 16) * sl) % cycle;
+        Some((target + cycle - (now_us % cycle)) % cycle)
     }
 
     /// Which cluster slot `now_us` falls in, if the phase is known.
     pub fn slot_at(&self, now_us: u64) -> Option<usize> {
-        let phase = self.phase_us()?;
-        Some((((now_us + CYCLE_US - phase) % CYCLE_US) / AW_US) as usize)
+        let (phase, cycle, sl) = (self.phase_us()?, self.cycle(), self.slot_us());
+        Some((((now_us + cycle - phase) % cycle) / sl) as usize)
     }
 }
 
@@ -241,6 +308,7 @@ impl Cluster {
                 arrived_us,
                 counter: sync.aw_counter,
                 remaining_tu: sync.aw_remaining,
+                presence_mode: sync.presence_mode,
             });
         }
     }

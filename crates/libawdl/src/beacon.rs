@@ -57,6 +57,22 @@ use crate::{
 /// From the wire, not the paper — `aw_period` reads 16 in all 18157 captured frames.
 pub const AW_US: u32 = 16 * TU_US;
 
+/// One channel-sequence SLOT in microseconds: `presence_mode` availability windows.
+///
+/// **A slot is not an availability window**, and this crate transmitted as though it were
+/// until OWL's `schedule.c` was read. Settled from the frames: `(aw_counter /
+/// presence_mode) % 16` puts every captured Apple device inside its own advertised slots,
+/// 100% against a 25% chance level; `aw_counter % 16` scores 34-43%. See
+/// `libawdl::follow::DEFAULT_PRESENCE_MODE`.
+///
+/// The consequence for a transmitter is not subtle: stepping a slot per availability
+/// window walks the cycle **four times too fast**, so "transmit in slots 2, 8 and 10"
+/// lands somewhere different every cycle.
+pub const SLOT_US: u32 = 4 * AW_US;
+
+/// A full sixteen-slot cycle: 1024 TU, about 1.05 seconds.
+pub const CYCLE_US: u32 = 16 * SLOT_US;
+
 /// A metric that loses to any real Apple device: 65, which is what `libmosey` advertises.
 ///
 /// "I am here and I do not want the job." The right default until the schedule we advertise
@@ -199,8 +215,18 @@ impl Beacon {
     }
 
     /// Availability Windows elapsed at `now_us`, counted from our own epoch.
+    ///
+    /// Still counted in AWs, not slots: `aw_counter` is an availability-window counter and
+    /// a peer divides it by `presence_mode` to get the slot. Emitting a slot index here
+    /// would put us in slot `n/4` of our own schedule as far as every receiver is
+    /// concerned.
     pub fn aws_at(now_us: u64) -> u32 {
         (now_us / u64::from(AW_US)) as u32
+    }
+
+    /// Which channel-sequence slot `now_us` falls in, on our own cycle.
+    pub fn slot_at(now_us: u64) -> usize {
+        ((now_us % u64::from(CYCLE_US)) / u64::from(SLOT_US)) as usize
     }
 
     /// Microseconds left in the current Availability Window at `now_us`.
@@ -372,18 +398,18 @@ impl Beacon {
     pub fn us_until_next_advertised_window(&self, now_us: u64) -> u64 {
         let slots = self.advertised_slots();
         if slots.is_empty() {
-            return u64::from(AW_US);
+            return u64::from(SLOT_US);
         }
-        let aw = u64::from(AW_US);
-        let cycle = aw * 16;
+        // A SLOT, not an availability window. See SLOT_US.
+        let slot = u64::from(SLOT_US);
+        let cycle = u64::from(CYCLE_US);
         let pos = now_us % cycle;
-        let here = (pos / aw) as usize;
+        let here = (pos / slot) as usize;
         if slots.contains(&here) {
             return 0;
         }
-        // The next advertised slot in this cycle, or the first one in the next.
         let next = slots.iter().copied().find(|s| *s > here).unwrap_or(slots[0] + 16);
-        (next as u64) * aw - pos
+        (next as u64) * slot - pos
     }
 
     /// Count one frame out. Timing no longer lives here — it comes from the clock.
