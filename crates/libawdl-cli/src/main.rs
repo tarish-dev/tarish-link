@@ -20,6 +20,7 @@ use libawdl::{
     radiotap::Radiotap,
     election::{ElectionParams, ElectionParamsV2},
     service,
+    state::{Arpa, DataPathState, Version},
     sync::{ChannelSequence, SyncParams},
     tlv::Stop,
 };
@@ -267,6 +268,9 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
     // records the edge rather than two separate tallies that have to be guessed at.
     let mut follows: BTreeMap<(String, String), u64> = BTreeMap::new();
     let mut services: BTreeMap<String, u64> = BTreeMap::new();
+    let mut assoc: BTreeMap<String, u64> = BTreeMap::new();
+    let mut hostnames: BTreeMap<String, u64> = BTreeMap::new();
+    let mut versions: BTreeMap<String, u64> = BTreeMap::new();
     let mut instances: BTreeMap<String, u64> = BTreeMap::new();
 
     while let Ok(pkt) = cap.next_packet() {
@@ -329,6 +333,32 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
                                 }
                                 _ => {}
                             }
+                        }
+                    }
+                    // Tag 12 names the access point directly -- an independent source
+                    // for the association that slot 0 of the channel sequence implies.
+                    if t.tag == 12 {
+                        if let Some(d) = DataPathState::parse(t.value) {
+                            let k = match (d.infra_bssid, d.infra_channel) {
+                                (Some(b), Some(ch)) => format!(
+                                    "associated to {} on channel {ch}",
+                                    libawdl::dot11::Mac(b)
+                                ),
+                                _ => "not associated".to_string(),
+                            };
+                            *assoc.entry(k).or_default() += 1;
+                        }
+                    }
+                    if t.tag == 16 {
+                        if let Some(a) = Arpa::parse(t.value) {
+                            *hostnames.entry(a.name).or_default() += 1;
+                        }
+                    }
+                    if t.tag == 21 {
+                        if let Some(v) = Version::parse(t.value) {
+                            *versions
+                                .entry(format!("v{}.{} {}", v.major, v.minor, v.class_name()))
+                                .or_default() += 1;
                         }
                     }
                     if t.tag == 24 {
@@ -415,6 +445,24 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
         eprintln!("election (per sender: best metric, best counter, frames claiming master / following):");
         for (who, (metric, counter, master_n, follow_n)) in &claims {
             eprintln!("  {who}  metric {metric:<12} counter {counter:<8} master {master_n:<5} following {follow_n}");
+        }
+    }
+    if !assoc.is_empty() {
+        eprintln!("infrastructure association (from Data Path State, tag 12):");
+        for (k, n) in &assoc {
+            eprintln!("  {k:<46} {n}");
+        }
+    }
+    if !hostnames.is_empty() {
+        eprintln!("host names (Arpa, tag 16):");
+        for (k, n) in &hostnames {
+            eprintln!("  {k:<30} {n}");
+        }
+    }
+    if !versions.is_empty() {
+        eprintln!("peer versions (tag 21):");
+        for (k, n) in &versions {
+            eprintln!("  {k:<24} {n}");
         }
     }
     if !services.is_empty() {

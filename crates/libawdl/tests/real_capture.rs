@@ -268,3 +268,71 @@ fn compressed_labels_expand_and_null_contributes_nothing() {
     assert_eq!(name, "test.local");
     assert_eq!(used, buf.len());
 }
+
+/// Data Path State names the access point's channel — independently of slot 0.
+///
+/// Cross-checked with `tshark -V` on `assoc-connected.pcap`: `Infrastructure Channel: 104`
+/// in 166 frames and `0` in 165, with `Infrastructure BSSID: 00:00:00:00:00:00` in all 331.
+#[test]
+fn data_path_state_discloses_the_ap_channel_but_zeroes_its_bssid() {
+    use libawdl::state::{flag, DataPathState};
+
+    // flags: INFRA_BSSID | INFRA_ADDRESS, then BSSID(6) + channel(2), then address(6).
+    let mut v = Vec::new();
+    v.extend_from_slice(&(flag::INFRA_BSSID | flag::INFRA_ADDRESS).to_le_bytes());
+    v.extend_from_slice(&[0u8; 6]); // BSSID, zeroed as Apple sends it
+    v.extend_from_slice(&104u16.to_le_bytes());
+    v.extend_from_slice(&[0x2a, 0xf3, 0x94, 0x4d, 0x96, 0x79]);
+
+    let s = DataPathState::parse(&v).expect("parses");
+    assert!(s.is_associated(), "the INFRA_BSSID bit is itself the association signal");
+    assert_eq!(s.infra_channel, Some(104));
+    assert_eq!(
+        s.infra_bssid,
+        Some([0u8; 6]),
+        "Apple zeroes the BSSID -- the channel is disclosed because a peer needs it for \
+         scheduling, the network identity is not"
+    );
+    assert_eq!(s.infra_address, Some([0x2a, 0xf3, 0x94, 0x4d, 0x96, 0x79]));
+}
+
+/// Field order in Data Path State is NOT bit order.
+///
+/// Country (0x0100) and social channel (0x0200) precede the infrastructure fields
+/// (0x0001, 0x0002) on the wire. Walking the bits numerically reads everything after the
+/// first set bit from the wrong offset — and produces plausible values, not an error.
+#[test]
+fn data_path_state_field_order_is_not_bit_order() {
+    use libawdl::state::{flag, DataPathState};
+
+    let mut v = Vec::new();
+    v.extend_from_slice(&(flag::COUNTRY | flag::INFRA_BSSID).to_le_bytes());
+    v.extend_from_slice(b"QA\0"); // country comes FIRST despite its higher bit
+    v.extend_from_slice(&[0u8; 6]);
+    v.extend_from_slice(&149u16.to_le_bytes());
+
+    let s = DataPathState::parse(&v).unwrap();
+    assert_eq!(s.country.as_deref(), Some("QA"));
+    assert_eq!(
+        s.infra_channel,
+        Some(149),
+        "if the country block were read after the infra block, this would be 0x0000 or junk"
+    );
+}
+
+/// Version and Arpa, the two small tags.
+#[test]
+fn version_packs_nibbles_and_arpa_carries_the_host_name() {
+    use libawdl::state::{Arpa, Version};
+
+    let v = Version::parse(&[0x10, 0x02]).expect("parses");
+    assert_eq!((v.major, v.minor), (1, 0), "0x10 is 1.0, not 16");
+    assert_eq!(v.class_name(), "iOS");
+
+    // flags byte, then a compressed name ending at the `local` dictionary code.
+    let mut a = vec![0x00, 0x07];
+    a.extend_from_slice(b"tarish1");
+    a.extend_from_slice(&[0xC0, 0x0C]);
+    let arpa = Arpa::parse(&a).expect("parses");
+    assert_eq!(arpa.name, "tarish1.local");
+}
