@@ -1,0 +1,263 @@
+//! Recovering the cluster's clock from the frames it sends.
+//!
+//! # The realisation this is built on
+//!
+//! A node that wants to join an AWDL cluster has to know **when the cluster's Availability
+//! Windows start**. The obvious way is the radio's TSF, and the obvious problem is that the
+//! adapter this project runs on reports no TSFT at all — 0 of 801 frames in every capture in
+//! `captures/`.
+//!
+//! It does not need to. **The peers tell us.** Synchronization Parameters carries
+//! `aw_remaining`, the TU left in the sender's current window, and `aw_counter`, which
+//! window it is. A frame that arrives at our time `t` saying "6 TU left in window 4291"
+//! places that window's boundary at `t + 6 TU` on *our* clock, and identifies it.
+//!
+//! That is what the field is for. This crate's own parser has said so since the first week:
+//! *"the field a joining node uses to work out where in the schedule it has arrived"*. It
+//! took until the transmitter existed to notice it was the answer to the timing problem
+//! rather than a curiosity.
+//!
+//! # What this is not
+//!
+//! It is not as good as a MAC TSF. Every estimate carries the error between when the frame
+//! was on the air and when the host timestamped it — for a USB adapter, milliseconds of
+//! jitter against a 16384 µs window. So this **tracks** rather than **locks**: it takes many
+//! observations and keeps the median, and it reports its own spread so a caller can tell a
+//! usable estimate from a guess.
+
+use crate::election::ElectionParamsV2;
+use crate::sync::{SyncParams, TU_US};
+
+/// Availability Window, microseconds. 16 TU, as every captured frame agrees.
+pub const AW_US: u64 = 16 * TU_US as u64;
+/// A full sixteen-window cycle.
+pub const CYCLE_US: u64 = 16 * AW_US;
+
+/// One observation: a frame arrived, and it said where in the schedule its sender was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sighting {
+    /// When we timestamped it, on our own monotonic clock.
+    pub arrived_us: u64,
+    /// `aw_counter` from the frame.
+    pub counter: u16,
+    /// `aw_remaining` from the frame, in TU.
+    pub remaining_tu: u16,
+}
+
+impl Sighting {
+    /// The moment the sender's current window ENDS, expressed on our clock.
+    ///
+    /// This is the whole trick in one line. Everything else here is averaging it.
+    pub fn window_end_us(&self) -> u64 {
+        self.arrived_us + u64::from(self.remaining_tu) * u64::from(TU_US)
+    }
+
+    /// Which slot of sixteen the sender was in.
+    pub fn slot(&self) -> usize {
+        usize::from(self.counter % 16)
+    }
+
+    /// Where the cycle containing this window began, on our clock.
+    ///
+    /// The window ends at `window_end_us`; it is slot `slot()` of the cycle, so the cycle
+    /// started `(slot + 1)` windows earlier.
+    pub fn cycle_origin_us(&self) -> u64 {
+        self.window_end_us().saturating_sub((self.slot() as u64 + 1) * AW_US)
+    }
+}
+
+/// An estimate of a cluster's cycle phase, built from many sightings.
+#[derive(Debug, Clone, Default)]
+pub struct ClusterClock {
+    /// `cycle_origin_us mod CYCLE_US` for each sighting, newest last.
+    offsets: Vec<u64>,
+}
+
+impl ClusterClock {
+    pub fn new() -> ClusterClock {
+        ClusterClock { offsets: Vec::new() }
+    }
+
+    /// How many sightings are backing the estimate.
+    pub fn observations(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// Fold in one sighting.
+    ///
+    /// Keeps a bounded history so a cluster that re-anchors is followed rather than
+    /// averaged against its own past forever.
+    pub fn observe(&mut self, s: Sighting) {
+        const KEEP: usize = 64;
+        self.offsets.push(s.cycle_origin_us() % CYCLE_US);
+        if self.offsets.len() > KEEP {
+            let excess = self.offsets.len() - KEEP;
+            self.offsets.drain(..excess);
+        }
+    }
+
+    /// The estimated phase: where in our clock the cluster's cycle begins, modulo a cycle.
+    ///
+    /// **Circular median, not mean.** The values live on a ring, so a cluster whose true
+    /// phase sits near zero produces observations at both 10 µs and 262100 µs, and an
+    /// arithmetic mean of those lands at the opposite side of the cycle — maximally wrong,
+    /// and wrong in a way that looks like a plausible number.
+    pub fn phase_us(&self) -> Option<u64> {
+        if self.offsets.is_empty() {
+            return None;
+        }
+        // Try each observation as the cut point for unwrapping the ring, and keep the
+        // rotation with the least spread. With a few dozen points this is trivially cheap
+        // and avoids the trigonometry.
+        let mut best: Option<(u64, u64)> = None; // (spread, phase)
+        for cut in &self.offsets {
+            let mut rotated: Vec<u64> =
+                self.offsets.iter().map(|o| (o + CYCLE_US - cut) % CYCLE_US).collect();
+            rotated.sort_unstable();
+            let spread = rotated[rotated.len() - 1] - rotated[0];
+            let median = rotated[rotated.len() / 2];
+            let phase = (median + cut) % CYCLE_US;
+            if best.is_none_or(|(s, _)| spread < s) {
+                best = Some((spread, phase));
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// How tightly the sightings agree, in microseconds.
+    ///
+    /// **Report this, do not hide it.** A USB adapter timestamps frames when they reach the
+    /// kernel, not when they were on the air, so a spread approaching a whole window means
+    /// the estimate is noise wearing a number's clothes.
+    pub fn spread_us(&self) -> Option<u64> {
+        if self.offsets.len() < 2 {
+            return None;
+        }
+        let mut best = u64::MAX;
+        for cut in &self.offsets {
+            let mut rotated: Vec<u64> =
+                self.offsets.iter().map(|o| (o + CYCLE_US - cut) % CYCLE_US).collect();
+            rotated.sort_unstable();
+            best = best.min(rotated[rotated.len() - 1] - rotated[0]);
+        }
+        Some(best)
+    }
+
+    /// Whether the estimate is tight enough to act on.
+    ///
+    /// **The tolerance depends on where you aim, and an earlier version of this got it
+    /// wrong.** It required a quarter window, which is the right bar for aiming at a slot
+    /// *boundary*: miss by more and you land in the neighbour. But there is no reason to
+    /// aim at a boundary. Aim at the window's **centre** and the margin is half a window
+    /// either side — so an estimate is usable when half its spread fits inside that.
+    ///
+    /// It matters in practice rather than in principle. A real Apple cluster, measured
+    /// through a USB adapter's host timestamps, gives a spread of about 5.1 ms against a
+    /// 16.4 ms window: a third of a window, which the old bar rejected and which lands
+    /// comfortably inside the right window when aimed at its middle.
+    pub fn is_usable(&self) -> bool {
+        self.observations() >= 4 && self.spread_us().is_some_and(|s| s / 2 < AW_US / 2)
+    }
+
+    /// Microseconds from `now_us` until the MIDDLE of the cluster's slot `slot`.
+    ///
+    /// Prefer this to [`us_until_slot`](Self::us_until_slot) for anything that actually
+    /// transmits. The boundary is the worst place to aim: it is where half the estimate's
+    /// error puts you in the wrong window. The middle is the furthest point from both.
+    pub fn us_until_slot_centre(&self, now_us: u64, slot: usize) -> Option<u64> {
+        let phase = self.phase_us()?;
+        let target = (phase + (slot as u64 % 16) * AW_US + AW_US / 2) % CYCLE_US;
+        let pos = now_us % CYCLE_US;
+        Some((target + CYCLE_US - pos) % CYCLE_US)
+    }
+
+    /// Microseconds from `now_us` until the cluster's slot `slot` next begins.
+    pub fn us_until_slot(&self, now_us: u64, slot: usize) -> Option<u64> {
+        let phase = self.phase_us()?;
+        let target = (phase + (slot as u64 % 16) * AW_US) % CYCLE_US;
+        let pos = now_us % CYCLE_US;
+        Some((target + CYCLE_US - pos) % CYCLE_US)
+    }
+
+    /// Which cluster slot `now_us` falls in, if the phase is known.
+    pub fn slot_at(&self, now_us: u64) -> Option<usize> {
+        let phase = self.phase_us()?;
+        Some((((now_us + CYCLE_US - phase) % CYCLE_US) / AW_US) as usize)
+    }
+}
+
+/// What we have learned about a cluster by listening to it.
+#[derive(Debug, Clone, Default)]
+pub struct Cluster {
+    /// The address every node names as master, if they agree.
+    pub master: Option<[u8; 6]>,
+    /// The master's advertised metric — what we would have to beat.
+    pub master_metric: Option<u32>,
+    /// The slots the master says it occupies.
+    pub master_slots: Vec<usize>,
+    pub clock: ClusterClock,
+}
+
+impl Cluster {
+    pub fn new() -> Cluster {
+        Cluster::default()
+    }
+
+    /// Fold in one received frame.
+    ///
+    /// `sync` and `election` come from the same frame; passing parts of different frames
+    /// would attribute one node's schedule to another's clock.
+    pub fn observe(
+        &mut self,
+        arrived_us: u64,
+        src: [u8; 6],
+        sync: &SyncParams,
+        election: Option<&ElectionParamsV2>,
+    ) {
+        if let Some(e) = election {
+            // Follow the cluster's own opinion of who is master rather than picking the
+            // loudest sender: a node at distance 2 still names the root correctly.
+            self.master = Some(e.master);
+            if e.master == src {
+                self.master_metric = Some(e.self_metric);
+            } else if e.master_metric != 0 {
+                self.master_metric = Some(e.master_metric);
+            }
+        }
+
+        // Only the master's own frames anchor the clock. A follower's aw_counter is its own
+        // and may not have converged, so averaging it in would blur the very thing we want.
+        if self.master == Some(src) {
+            if let Some(seq) = &sync.channel_sequence {
+                self.master_slots = seq
+                    .channels
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| **c != 0)
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+            self.clock.observe(Sighting {
+                arrived_us,
+                counter: sync.aw_counter,
+                remaining_tu: sync.aw_remaining,
+            });
+        }
+    }
+
+    /// When the next window the MASTER occupies begins, on our clock.
+    ///
+    /// This is the point of the whole module: transmit here and we are on the air at a
+    /// moment the cluster is demonstrably awake, rather than at a phase decided by when our
+    /// process happened to start.
+    pub fn us_until_master_window(&self, now_us: u64) -> Option<u64> {
+        if !self.clock.is_usable() || self.master_slots.is_empty() {
+            return None;
+        }
+        // The centre, not the boundary: see ClusterClock::us_until_slot_centre.
+        self.master_slots
+            .iter()
+            .filter_map(|s| self.clock.us_until_slot_centre(now_us, *s))
+            .min()
+    }
+}

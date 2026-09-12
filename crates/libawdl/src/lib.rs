@@ -31,6 +31,7 @@
 pub mod action;
 pub mod beacon;
 pub mod coverage;
+pub mod follow;
 pub mod data;
 pub mod dot11;
 pub mod election;

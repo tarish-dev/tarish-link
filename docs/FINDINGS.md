@@ -1863,6 +1863,70 @@ before its beacon exited, leaving two transmitters on one interface; and a wait 
 on `pgrep -f` that matched its own command line and never finished. The measurements that
 survive are the ones taken after each fix.
 
+## 40. ★ The cluster's clock is recoverable WITHOUT a TSF — the peers tell us
+
+Every timing problem in findings 34-39 traced back to the same thing: we transmit at a phase
+decided by when our process started, because the adapter reports **no TSFT at all** — 0 of
+801 frames in every capture. The obvious conclusion was that synchronisation needs different
+hardware.
+
+It does not. **The peers hand us their clock in every frame.**
+
+Synchronization Parameters carries `aw_remaining`, the TU left in the sender's current
+window, and `aw_counter`, which window it is. A frame arriving at our time `t` saying *"6 TU
+left in window 4291"* places that window's boundary at `t + 6 TU` **on our own clock**, and
+names it. Enough of those and the cluster's cycle phase falls out.
+
+That is precisely what the field is for. This crate's parser has described it since the first
+week — *"the field a joining node uses to work out where in the schedule it has arrived"* —
+and it took building a transmitter that could not aim to notice the description was the
+answer.
+
+### It works on real Apple clusters
+
+`awdl follow` recovers the master, its advertised slots and the cycle phase from captures
+taken with no special setup:
+
+| capture | anchors | spread | as a fraction of a 16384 µs window |
+|---|---|---|---|
+| `6ghz-A-ch53` | — | 3864 µs | 24% |
+| `two-iphones-awdl` | 64 | 5153 µs | 31% |
+| `dual-awdl` | — | 8358 µs | 51% |
+| `assoc-connected` | — | 12401 µs | 76% |
+
+It also independently reproduces Apple's schedule — `slots: [2, 8, 10] of 16` — from timing
+data alone, which is a decent check that the recovery is reading what it thinks it is.
+
+### Aim at the centre, not the boundary
+
+An earlier version of `is_usable` demanded a spread under a quarter window and rejected every
+real cluster above. **That bar was wrong**, and the tool's own output made it obvious: a
+quarter window is the tolerance for aiming at a *boundary*, where half the error puts you in
+the neighbouring slot. Aim at the window's **middle** and the margin is half a window either
+side, so what must fit is *half* the spread. For the Apple cluster above that is 2576 µs
+against 8192 µs of margin — comfortable.
+
+So the rule is: **never aim at a slot boundary.** It is the single worst target in the cycle
+and it is the one a naive implementation picks.
+
+### Two traps worth keeping
+
+- **The phase lives on a ring, so the average of a set of observations is not their centre.**
+  A cluster whose phase sits near zero produces values at both 10 µs and 262100 µs; their
+  arithmetic mean is half a cycle away — maximally wrong, and a plausible-looking number.
+  `ClusterClock` takes a circular median and `tests/follow.rs` pins the case.
+- **Only the master's own frames may anchor the clock.** A follower names the master
+  correctly but carries its own `aw_counter`, which may not have converged; averaging it in
+  blurs the thing being measured.
+
+### What this unblocks
+
+Everything findings 36-39 could not answer. A node that knows the cluster's phase can
+transmit inside the windows the cluster actually attends rather than at an arbitrary offset —
+which is the honest version of the "breadth" accident of trial E, and needs no extra airtime.
+`Cluster::us_until_master_window` returns the target; wiring it into the beacon is the next
+step, and it is small.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

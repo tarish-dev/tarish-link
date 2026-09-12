@@ -555,6 +555,7 @@ fn usage() -> ! {
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
+    eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
     eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
@@ -614,6 +615,10 @@ fn main() {
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok()),
             );
+        }
+        "follow" => {
+            let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
+            follow(cap);
         }
         "phase" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
@@ -1214,5 +1219,81 @@ fn phase<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
                 .sum();
             println!("  {} vs {}  shared airtime {:.0}%", keys[i], keys[j], overlap * 100.0);
         }
+    }
+}
+
+/// Recover a cluster's cycle phase from the frames it sends, without a TSF.
+///
+/// The adapter reports no TSFT, so the obvious route to synchronisation is closed. It does
+/// not matter: `aw_remaining` says how far into its window the sender was, and `aw_counter`
+/// says which window — so each frame places a window boundary on OUR clock and identifies
+/// it. See `libawdl::follow`.
+///
+/// Run against a capture to check the estimate converges before trusting it live. The
+/// number that decides whether it is usable is the SPREAD, not the phase.
+fn follow<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
+    use libawdl::election::ElectionParamsV2;
+    use libawdl::follow::{Cluster, AW_US};
+    use libawdl::sync::SyncParams;
+
+    let mut cl = Cluster::new();
+    let mut t0 = 0u64;
+    let mut frames = 0u64;
+
+    while let Ok(pkt) = cap.next_packet() {
+        let t = (pkt.header.ts.tv_sec as u64).wrapping_mul(1_000_000)
+            + pkt.header.ts.tv_usec as u64;
+        if t0 == 0 {
+            t0 = t;
+        }
+        let Seen::Awdl { dot11, af, .. } = classify(pkt.data) else { continue };
+        frames += 1;
+        let (mut sync, mut elect) = (None, None);
+        for tlv in af.tlvs() {
+            match tlv.tag {
+                4 => sync = SyncParams::parse(tlv.value),
+                24 => elect = ElectionParamsV2::parse(tlv.value),
+                _ => {}
+            }
+        }
+        let Some(sync) = sync else { continue };
+        cl.observe(t - t0, dot11.src.0, &sync, elect.as_ref());
+    }
+
+    println!("{frames} AWDL frames");
+    match cl.master {
+        Some(m) => println!("master:  {} (metric {:?})", libawdl::dot11::Mac(m), cl.master_metric),
+        None => {
+            println!("no master identified");
+            return;
+        }
+    }
+    println!("slots:   {:?} of 16", cl.master_slots);
+    println!("anchors: {} frames from the master", cl.clock.observations());
+    match (cl.clock.phase_us(), cl.clock.spread_us()) {
+        (Some(p), Some(spread)) => {
+            println!("phase:   {p} us into the cycle");
+            println!(
+                "spread:  {spread} us  ({:.1}% of a {AW_US} us window)",
+                100.0 * spread as f64 / AW_US as f64
+            );
+            // Aim at the window's CENTRE and the margin is half a window either side, so
+            // what has to fit is half the spread. Say the arithmetic rather than a verdict.
+            let half = spread / 2;
+            let margin = AW_US / 2;
+            if cl.clock.is_usable() {
+                println!(
+                    "VERDICT: usable — half the spread is {half} us against {margin} us of margin"
+                );
+                println!("         (aim at the window's centre; the boundary is the worst target)");
+            } else {
+                println!(
+                    "VERDICT: NOT usable — half the spread is {half} us, over {margin} us of margin,"
+                );
+                println!("         so a transmission aimed at a window can land outside it.");
+                println!("         Host timestamps on a USB adapter are the likely limit.");
+            }
+        }
+        _ => println!("not enough anchors for a phase"),
     }
 }
