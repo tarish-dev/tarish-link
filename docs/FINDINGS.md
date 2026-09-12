@@ -1464,7 +1464,11 @@ This is already understood in the daemon, which says the record "cannot be gener
 extracted from a real Apple device, and expires yearly" and omits it deliberately. What is
 missing is not knowledge but a **hook**.
 
-### The feature this implies
+### The feature this implies — DEFERRED by the operator, 2026-09-12
+
+**Not being built now.** The decision is that "Everyone" mode is fine for the majority of
+people, which it is: AirDrop works today in both directions with no identity at all. What
+follows is the design, recorded so it does not have to be rediscovered — not a task.
 
 An optional, user-supplied identity. Absent, everything behaves exactly as it does today —
 ephemeral key, Everyone mode, no record. Present, the daemon sends the record and can be
