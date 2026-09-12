@@ -556,7 +556,7 @@ fn usage() -> ! {
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -614,6 +614,7 @@ fn main() {
                 args.iter().position(|a| a == "--windows")
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok()),
+                args.iter().any(|a| a == "--follow"),
             );
         }
         "follow" => {
@@ -981,7 +982,7 @@ fn coverage(files: &[String]) {
 /// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1007,6 +1008,11 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     };
 
     let mut b = Beacon::new(addr, channel, "QA");
+    // Listening as well as transmitting. Everything before this aimed at OUR cycle, whose
+    // phase is decided by when the process started; a cluster already on the air has its
+    // own, and it tells us what it is in every frame. See libawdl::follow.
+    let mut cluster = libawdl::follow::Cluster::new();
+    let mut adopted = false;
     if compete {
         b.metric = libawdl::beacon::METRIC_COMPETE;
     }
@@ -1043,7 +1049,11 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     if legacy {
         eprintln!("  --legacy-timing: aw_remaining pinned to 0. EXPERIMENTAL CONTROL ONLY.");
     }
-    eprintln!("  not synchronised to any peer's TSF; self-consistent from a monotonic clock");
+    if follow {
+        eprintln!("  --follow: listening for a cluster and adopting its window phase");
+    } else {
+        eprintln!("  not synchronised to any peer; self-consistent from a monotonic clock");
+    }
 
     // Transmit inside the windows we ADVERTISE, rather than on a fixed period.
     //
@@ -1054,10 +1064,51 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         b.advertised_slots());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     let (mut sent_mif, mut sent_psf, mut failed) = (0u64, 0u64, 0u64);
+    let mut last_tx_us = 0u64;
     let mut n = 0u32;
     let mut first_error: Option<String> = None;
 
     while std::time::Instant::now() < deadline {
+        // LISTEN FIRST. A frame from the cluster carries aw_counter and aw_remaining, which
+        // place a slot boundary on our own clock -- so a short receive before each decision
+        // is what turns "our phase" into "theirs". The timeout is deliberately small: this
+        // is a poll between transmissions, not a receive loop.
+        if follow {
+            // A SHORT poll, and the reason is arithmetic. We stamp a frame when `rx`
+            // returns, not when it reached the antenna, so the poll interval is injected
+            // straight into every anchor as quantisation. At 20 ms against a 65 ms slot
+            // that was most of a slot of self-inflicted jitter, and the measured spread
+            // went from 3.8-12.4 ms offline to 65 ms live.
+            //
+            // The real fix is SO_TIMESTAMP -- ask the kernel when the frame arrived rather
+            // than asking the clock when we noticed. This is the cheap approximation.
+            if let Ok(Some(rx)) = radio.rx(2) {
+                let now_us = epoch.elapsed().as_micros() as u64;
+                if let Some((src, sync, elect)) = parse_awdl(&rx.bytes) {
+                    // Never synchronise to ourselves. Monitor mode hands our own
+                    // transmissions straight back, and adopting them would lock the
+                    // estimate to the phase we are trying to replace.
+                    if src != addr {
+                        cluster.observe(now_us, src, &sync, elect.as_ref());
+                    }
+                }
+            }
+            // Re-evaluated every pass, not latched. An earlier version set this once and
+            // kept aiming with an estimate that had since degraded from 0 to 156 ms of
+            // spread -- worse than not following at all, because it was confident.
+            let usable = cluster.clock.is_usable();
+            if usable != adopted {
+                adopted = usable;
+                eprintln!(
+                    "  {} cluster clock: master {:?}, slots {:?}, spread {:?} us",
+                    if usable { "ADOPTED" } else { "DROPPED (estimate degraded)" },
+                    cluster.master.map(libawdl::dot11::Mac),
+                    cluster.master_slots,
+                    cluster.clock.spread_us()
+                );
+            }
+        }
+
         // Only transmit INSIDE a window we advertise.
         //
         // The first version of this loop sent unconditionally at the top and then waited,
@@ -1066,12 +1117,29 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         // in `awdl phase` as adjacent pairs, and the frame rate was double what it should
         // have been. Waiting FIRST is the whole fix.
         let now_us = epoch.elapsed().as_micros() as u64;
-        let wait = b.us_until_next_advertised_window(now_us);
+        // Aim at a window the CLUSTER attends when we know where those are; fall back to
+        // our own advertised schedule when we do not. `us_until_master_window` already
+        // targets slot centres, which is the only sane place to aim.
+        let wait = match cluster.us_until_master_window(now_us) {
+            Some(w) if follow && adopted => w,
+            _ => b.us_until_next_advertised_window(now_us),
+        };
         if wait > 0 {
-            std::thread::sleep(std::time::Duration::from_micros(wait));
+            // Sleep in short hops so reception continues while we wait, rather than going
+            // deaf for most of a cycle.
+            // Hop in short steps for the same reason: a long sleep is a long deaf spell,
+            // and the next frame's timestamp is only as good as how promptly we read it.
+            let hop = wait.min(3_000);
+            std::thread::sleep(std::time::Duration::from_micros(hop));
             continue;
         }
         let now_us = epoch.elapsed().as_micros() as u64;
+        // One frame per visit to a window. Without this the centre-aimed target stays
+        // satisfied for the whole window and the loop spins inside it.
+        if follow && last_tx_us > 0 && now_us.saturating_sub(last_tx_us) < u64::from(libawdl::beacon::SLOT_US) / 2 {
+            std::thread::sleep(std::time::Duration::from_micros(3_000));
+            continue;
+        }
         let is_mif = psf_per_mif == 0 || n % (psf_per_mif + 1) == 0;
         let frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
         match radio.tx(&frame, TxParams::default()) {
@@ -1087,19 +1155,33 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         }
         b.advance();
         n += 1;
-        // Pace within the window. `per_window` frames fit in one 16 TU window; the next
-        // iteration's wait carries us to the following advertised one.
+        last_tx_us = epoch.elapsed().as_micros() as u64;
+        // Pace by the interval we ADVERTISE. `action_frame_period` is the PSF interval --
+        // OWL sets the field from its own psf_interval and paces by it, and every Apple
+        // frame carries 110 TU. Emitting the number and sending at some other rate
+        // misdescribes us to every receiver, which this loop did until FINDINGS 42.
+        //
+        // `per_window` still divides it, as an experimental control only.
         //
         // This knob exists as an EXPERIMENTAL CONTROL, not a tuning parameter. Trial E
         // won an election at 22.5 frames/s while trial F lost one at 11.2 with the same
         // alignment and metric, so rate and window-count were confounded. Holding the
         // windows correct and raising only the rate is what separates them.
         std::thread::sleep(std::time::Duration::from_micros(
-            u64::from(libawdl::beacon::AW_US) / u64::from(per_window.max(1)),
+            b.psf_interval_us() / u64::from(per_window.max(1)),
         ));
     }
 
     eprintln!("\nsent {sent_mif} MIF, {sent_psf} PSF, {failed} failed");
+    if follow {
+        eprintln!(
+            "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, adopted={adopted}",
+            cluster.clock.observations(),
+            cluster.master.map(libawdl::dot11::Mac),
+            cluster.clock.phase_us(),
+            cluster.clock.spread_us()
+        );
+    }
     if let Some(e) = first_error {
         eprintln!("first error: {e}");
         eprintln!("EAGAIN here means another vif on the same phy is up, not a full buffer.");
@@ -1303,4 +1385,31 @@ fn follow<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
         }
         _ => println!("not enough anchors for a phase"),
     }
+}
+
+/// Pull the two TLVs the clock needs out of a received frame.
+///
+/// Returns the sender as well, because a sighting is only meaningful attributed — and
+/// because our own frames come straight back on a monitor interface and must be dropped.
+fn parse_awdl(
+    bytes: &[u8],
+) -> Option<([u8; 6], libawdl::sync::SyncParams, Option<libawdl::election::ElectionParamsV2>)> {
+    use libawdl::{action::ActionFrame, dot11::Dot11, election::ElectionParamsV2, radiotap::Radiotap,
+                  sync::SyncParams, tlv};
+    let rt = Radiotap::parse(bytes)?;
+    let body = rt.payload(bytes)?;
+    let d = Dot11::parse(body)?;
+    if !d.is_action() {
+        return None;
+    }
+    let af = ActionFrame::parse(body.get(d.body_offset..)?)?;
+    let (mut sync, mut elect) = (None, None);
+    for t in tlv::Tlvs::new(af.tagged) {
+        match t.tag {
+            4 => sync = SyncParams::parse(t.value),
+            24 => elect = ElectionParamsV2::parse(t.value),
+            _ => {}
+        }
+    }
+    Some((d.src.0, sync?, elect))
 }

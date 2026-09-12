@@ -2169,6 +2169,52 @@ it), and that a slot is one availability window (its `schedule.c` says otherwise
 before claiming anything is new.** It is on the research Pi at `~/owl`, it is 4278 lines, and
 reading it costs less than one wrong experiment.
 
+## 43. ★ libawdl synchronises to a live Apple cluster
+
+`awdl beacon --follow` listens, recovers the cluster's window phase from the frames it hears,
+and transmits inside **the cluster's** windows instead of its own. On hardware:
+
+```text
+  ADOPTED cluster clock: master ee:93:7f:74:d7:33, slots [0, 1, 2, 8, 9, 10], spread 3091 us
+```
+
+3091 µs against a 65536 µs slot — **4.7%** — held for a whole seventy-second run without
+dropping. The node identified a real Apple master, read its advertised schedule off the air,
+and aimed at it. That is the first time anything in this project has been synchronised to
+something it did not itself define.
+
+### Two bugs on the way, both mine, both instructive
+
+**Averaging hid drift.** The first version took a circular median over 64 anchors. It adopted
+at 0 µs of spread and degraded to **156 ms** — more than two slots — across seventy seconds,
+then kept transmitting with a confident, useless estimate because `adopted` was latched once
+and never re-checked.
+
+OWL does not average. `awdl_sync_update_last` re-anchors on **every** frame from the master,
+which is drift-free by construction. A median is robust to jitter and blind to drift; the two
+failure modes want opposite treatments. The resolution is to take the phase from the newest
+anchor and use the history only to judge *health* — so jitter shows up in the spread while
+drift cannot accumulate into the estimate. `median_phase_us` is kept alongside, because a
+disagreement between it and `phase_us` larger than the spread is exactly the signature of
+drift.
+
+**And most of the jitter was self-inflicted.** The same clusters measured 3.8-12.4 µs-scale
+spreads offline and **65-72 ms** live. The difference was not the radio: the loop polled with
+a 20 ms receive timeout and stamped each frame when `rx` returned, so the poll interval went
+straight into every anchor as quantisation — most of a slot of noise we were adding
+ourselves. Dropping the poll to 2 ms took the spread from 65 ms to **3091 µs, a 21-fold
+improvement**, and brought the live figure back in line with the offline one.
+
+The real fix is `SO_TIMESTAMP`: ask the kernel *when the frame arrived* rather than asking the
+clock *when we noticed*. The short poll is an approximation and is marked as one.
+
+### What is still not shown
+
+No peer adopted **us** in this run, and that was not the experiment — the point was whether we
+could adopt *them*. Whether transmitting inside a cluster's own windows changes how it
+responds is the next question, and it is now askable for the first time, because every
+earlier trial was aiming at a schedule it could not hit.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

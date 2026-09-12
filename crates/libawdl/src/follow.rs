@@ -162,13 +162,32 @@ impl ClusterClock {
         }
     }
 
-    /// The estimated phase: where in our clock the cluster's cycle begins, modulo a cycle.
+    /// The estimated phase: where in our clock the cycle begins, modulo a cycle.
+    ///
+    /// **The newest sighting wins.** OWL's `awdl_sync_update_last` re-anchors on every
+    /// frame from the master and averages nothing, and a run on hardware showed why: a
+    /// median over 64 samples started at 0 µs of spread and degraded to 156 ms across
+    /// seventy seconds — far wider than a 65 ms slot. Two clocks drift, so an estimate
+    /// built from a minute of history is an estimate of where the cluster *was*.
+    ///
+    /// The history is kept, but for **health rather than for the estimate**: the spread of
+    /// recent anchors says whether the last one can be trusted. That separation is the
+    /// point — a median is robust to jitter and blind to drift, and this way jitter shows
+    /// up in [`spread_us`](Self::spread_us) while drift cannot accumulate into the phase.
+    pub fn phase_us(&self) -> Option<u64> {
+        self.offsets.last().copied()
+    }
+
+    /// The phase a circular median of the whole history would give.
+    ///
+    /// Kept because it is the right estimate for a *static* offset and a useful contrast
+    /// when diagnosing: if this and [`phase_us`](Self::phase_us) disagree by more than the
+    /// spread, the two clocks are drifting rather than merely jittering.
     ///
     /// **Circular median, not mean.** The values live on a ring, so a cluster whose true
-    /// phase sits near zero produces observations at both 10 µs and 262100 µs, and an
-    /// arithmetic mean of those lands at the opposite side of the cycle — maximally wrong,
-    /// and wrong in a way that looks like a plausible number.
-    pub fn phase_us(&self) -> Option<u64> {
+    /// phase sits near zero produces observations at both ends, and an arithmetic mean of
+    /// those lands half a cycle away — maximally wrong, and plausible-looking.
+    pub fn median_phase_us(&self) -> Option<u64> {
         if self.offsets.is_empty() {
             return None;
         }
@@ -200,11 +219,17 @@ impl ClusterClock {
         if self.offsets.len() < 2 {
             return None;
         }
+        // **Recent anchors only.** Drift makes a long history spread wide by construction,
+        // so measuring all of it reports the clocks diverging as though it were noise. Eight
+        // is a few seconds of frames from an active master.
+        const RECENT: usize = 8;
+        let recent: Vec<u64> =
+            self.offsets.iter().rev().take(RECENT).copied().collect();
         let cycle = self.cycle();
         let mut best = u64::MAX;
-        for cut in &self.offsets {
+        for cut in &recent {
             let mut rotated: Vec<u64> =
-                self.offsets.iter().map(|o| (o + cycle - cut) % cycle).collect();
+                recent.iter().map(|o| (o + cycle - cut) % cycle).collect();
             rotated.sort_unstable();
             best = best.min(rotated[rotated.len() - 1] - rotated[0]);
         }

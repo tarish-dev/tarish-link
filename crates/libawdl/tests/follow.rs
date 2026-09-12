@@ -202,3 +202,49 @@ fn position_in_a_slot_spans_all_four_windows() {
     let c = Sighting { arrived_us: 0, counter: 11, remaining_tu: 1, presence_mode: PM };
     assert_eq!(c.into_slot_us(), 3 * aw + aw - 1024);
 }
+
+/// Drift must not accumulate into the phase.
+///
+/// A median over a long history is robust to jitter and blind to drift. On hardware that
+/// showed up as an estimate starting at 0 µs of spread and degrading to 156 ms over
+/// seventy seconds — wider than a whole 65 ms slot, and confidently wrong. OWL re-anchors
+/// on every frame from the master and averages nothing; so do we.
+#[test]
+fn the_phase_follows_a_drifting_cluster() {
+    let mut c = ClusterClock::new();
+    // A cluster whose phase creeps by 2 ms per observation: two clocks running apart.
+    let drift = 2_000u64;
+    for k in 0..40u64 {
+        c.observe(Sighting {
+            arrived_us: k * CYCLE + k * drift,
+            counter: 0,
+            remaining_tu: 16,
+            presence_mode: PM,
+        });
+    }
+    let phase = c.phase_us().expect("a phase");
+    let latest = (39 * drift) % CYCLE;
+    assert_eq!(phase, latest, "the newest anchor decides, not the history");
+
+    // The median of the whole run lags far behind, which is exactly the failure.
+    let median = c.median_phase_us().unwrap();
+    assert!(median < latest, "a median over a drifting series trails it");
+    assert!(latest - median > 10 * drift, "and by a lot: {median} vs {latest}");
+
+    // Health is judged on RECENT anchors, so steady drift stays usable rather than
+    // reporting the whole run's divergence as noise.
+    assert!(c.spread_us().unwrap() < SLOT_US, "recent anchors are close together");
+    assert!(c.is_usable(), "a tracked drift is still a usable estimate");
+}
+
+/// A genuinely erratic cluster is still refused.
+#[test]
+fn jitter_wider_than_a_slot_is_still_rejected() {
+    let mut c = ClusterClock::new();
+    for k in 0..12u64 {
+        // Alternating far apart: not drift, noise.
+        let jump = if k % 2 == 0 { 0 } else { SLOT_US * 3 };
+        c.observe(Sighting { arrived_us: jump, counter: 0, remaining_tu: 16, presence_mode: PM });
+    }
+    assert!(!c.is_usable(), "spread {:?} should be rejected", c.spread_us());
+}
