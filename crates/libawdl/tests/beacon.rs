@@ -200,3 +200,33 @@ fn the_window_fields_are_self_consistent() {
     assert_eq!(Beacon::aws_at(t), 3);
     assert_eq!(Beacon::aw_remaining_us(t), AW_US - 5000);
 }
+
+/// The experimental control reproduces the original defect exactly.
+///
+/// It exists so the question "was the broken timing what made Apple devices follow us"
+/// can be answered by running both conditions against the SAME peers, rather than by
+/// comparing two runs that differed in who was in the room.
+#[test]
+fn legacy_timing_reproduces_the_original_defect() {
+    let mut b = Beacon::new(ADDR, 149, "QA");
+    b.legacy_timing = true;
+
+    let remaining_at = |b: &Beacon, us: u64| -> u16 {
+        let f = b.mif(us);
+        let af = ActionFrame::parse(&f[24..]).unwrap();
+        SyncParams::parse(af.tlvs().find(|t| t.tag == 4).unwrap().value).unwrap().aw_remaining
+    };
+
+    // The defect: one value, forever, whatever the clock says.
+    for i in 0..32u64 {
+        assert_eq!(remaining_at(&b, i * 997), 0, "legacy mode pins aw_remaining to 0");
+    }
+    // And the corrected path still sweeps, so the flag is the only difference.
+    let good = Beacon::new(ADDR, 149, "QA");
+    let mut seen = std::collections::BTreeSet::new();
+    for i in 0..64u64 {
+        seen.insert(remaining_at(&good, i * u64::from(AW_US) / 16));
+    }
+    assert!(seen.len() > 8, "the default must still move: {seen:?}");
+    assert!(!good.legacy_timing, "and must never default to the defect");
+}

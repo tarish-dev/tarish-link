@@ -65,6 +65,11 @@ pub const METRIC_DECLINE: u32 = 65;
 
 /// A metric observed to beat real Apple devices, which sat at 510-530.
 ///
+/// **Apple's metrics are not fixed, so this constant goes stale.** In one room on one
+/// evening, devices advertised 510, 515, 530, 537 and 539 — and an iPhone at 539 outranked
+/// this value the same day it was chosen. Treat it as a starting point and override it when
+/// the peers in the room say otherwise; the CLI takes `--metric N` for exactly that.
+///
 /// **Only correct on a radio that can anchor transmissions to a TSF.** See
 /// [`Beacon::metric`] for what happened the first time this was the default.
 pub const METRIC_COMPETE: u32 = 530;
@@ -111,6 +116,17 @@ pub struct Beacon {
     /// the radio is the only correct source. The default mirrors a captured Apple value —
     /// LDPC, 40 MHz, short GI at both widths, two spatial streams.
     pub ht: HtCapabilities,
+    /// **Reproduce the timing defect of the first transmit run, on purpose.**
+    ///
+    /// `aw_remaining` becomes 0 in every frame and `aw_counter` follows the frame count
+    /// rather than the clock, which is what the beacon did before finding 35. It exists
+    /// only as an experimental control: the question of whether that defect is what made
+    /// Apple devices follow us cannot be answered by comparing two runs with different
+    /// peers present, and answering it needs the broken condition reproducible on demand.
+    ///
+    /// **Never set this for anything but an experiment.** It puts a field on the air that
+    /// tells every peer our availability window is ending, continuously.
+    pub legacy_timing: bool,
 }
 
 impl Beacon {
@@ -134,6 +150,7 @@ impl Beacon {
                 rx_mcs_bitmap: 0xffff,
                 trailing: vec![0, 0],
             },
+            legacy_timing: false,
         }
     }
 
@@ -170,7 +187,11 @@ impl Beacon {
             // was what this sent on the first transmit run: a joining node reads this to
             // work out where in the schedule it has arrived, and "my window ends now",
             // every frame, forever, is not something it can align to.
-            aw_remaining: (Self::aw_remaining_us(now_us) / TU_US) as u16,
+            aw_remaining: if self.legacy_timing {
+                0
+            } else {
+                (Self::aw_remaining_us(now_us) / TU_US) as u16
+            },
             ext_min: 3,
             ext_max_multicast: 3,
             ext_max_unicast: 3,
@@ -182,7 +203,12 @@ impl Beacon {
             // if every frame goes out exactly one window apart, which no scheduler
             // guarantees -- and a counter that drifts from its own clock is a counter a
             // follower cannot use.
-            aw_counter: (Self::aws_at(now_us) & 0xffff) as u16,
+            aw_counter: if self.legacy_timing {
+                // 16 windows per frame, assumed rather than measured -- the original bug.
+                self.sent.wrapping_mul(16)
+            } else {
+                (Self::aws_at(now_us) & 0xffff) as u16
+            },
             ap_beacon_alignment_delta: 0,
             channel_sequence: Some(self.schedule()),
             trailing: [0, 0],

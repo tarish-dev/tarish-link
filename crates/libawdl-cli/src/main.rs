@@ -554,7 +554,7 @@ fn usage() -> ! {
     eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -601,6 +601,10 @@ fn main() {
                 args.get(5).and_then(|s| s.parse().ok()).unwrap_or(30),
                 args.get(6).and_then(|s| s.parse().ok()).unwrap_or(2),
                 args.iter().any(|a| a == "--compete"),
+                args.iter().any(|a| a == "--legacy-timing"),
+                args.iter().position(|a| a == "--metric")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse().ok()),
             );
         }
         "coverage" => {
@@ -960,7 +964,7 @@ fn coverage(files: &[String]) {
 /// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -989,6 +993,17 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     if compete {
         b.metric = libawdl::beacon::METRIC_COMPETE;
     }
+    // --metric N overrides both. Apple's metrics are NOT fixed: devices have been observed
+    // at 510, 515, 530, 537 and 539 in one room, so a constant compiled in here goes stale
+    // the moment a newer phone walks in. METRIC_COMPETE was calibrated at 510-530 and was
+    // already being outranked by an iPhone at 539 the same evening.
+    if let Some(m) = metric {
+        b.metric = m;
+    }
+    if legacy {
+        // An experimental control. See Beacon::legacy_timing.
+        b.legacy_timing = true;
+    }
     // Our epoch. Every timing field in the frame is derived from this one monotonic
     // reading, which is what makes them agree with each other -- a master's timing has to
     // be self-consistent, and does not have to agree with anybody else's.
@@ -997,10 +1012,17 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     eprintln!(
         "  metric {} — {}",
         b.metric,
-        if compete { "COMPETING: a peer must follow us or beat us" } else { "declining the election" }
+        if b.metric >= libawdl::beacon::METRIC_COMPETE {
+            "competing: above the values Apple devices were seen advertising"
+        } else {
+            "declining the election"
+        }
     );
     eprintln!("  MIF {} bytes, PSF {} bytes, 1 MIF per {psf_per_mif} PSF", b.mif(0).len(), b.psf(0).len());
-    eprintln!("  THE TIMING IS NOT SYNCHRONISED. See the fn comment.");
+    if legacy {
+        eprintln!("  --legacy-timing: aw_remaining pinned to 0. EXPERIMENTAL CONTROL ONLY.");
+    }
+    eprintln!("  not synchronised to any peer's TSF; self-consistent from a monotonic clock");
 
     // One availability window is 16 TU. Sending every 16 windows is well under Apple's
     // action-frame period and keeps us from flooding a channel we share.

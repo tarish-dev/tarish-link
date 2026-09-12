@@ -1638,6 +1638,60 @@ nobody has done. Until then the honest statement is that our frames transmit and
 on — finding 34 proves that with a two-hop tree — and that **what decides whether a peer
 follows us is not yet understood**.
 
+## 36. Being elected is NOT reproducible on demand — and it is neither the metric nor the timing
+
+Finding 34 records three Apple devices electing our node master on the first transmission.
+That happened and the evidence is unambiguous — a two-hop tree relaying our metric and
+tenure counter. **It has not been reproduced since**, and five controlled trials against a
+fixed peer set say why it is not simply a matter of asking louder.
+
+The peers, unchanged throughout: an iPhone (`6e:b5`, v10.0 iOS, metric **539**) and a
+MacBook (`ea:8e`, v10.0 macOS, metric **510**, following the iPhone).
+
+| trial | our config | outcome |
+|---|---|---|
+| A1 | metric 530, clock timing | iPhone master, Mac follows it, we are an island |
+| B | metric 530, **`--legacy-timing`** | identical |
+| A2 | metric 530, clock timing | identical |
+| C | metric 65 (decline) | identical |
+| **D** | **metric 600 — above every peer present** | **identical** |
+
+All five are distinct captures, verified by hash and size. So:
+
+- **Not the metric.** 600 beat every advertised value in the room and changed nothing. 65
+  and 530 behaved the same as 600, which also means the negative control could not
+  discriminate — an experiment worth noticing as uninformative rather than reporting as a
+  result.
+- **Not the timing mode.** Deliberately reproducing the original `aw_remaining = 0` defect
+  in trial B produced no difference either. The tempting story from finding 35 — that
+  fixing the timing cost us the election — is **refuted**.
+
+### What is left, and not chosen between
+
+Two candidates, neither tested:
+
+1. **They cannot hear us reliably.** We transmit on a wall-clock timer, so our frames land
+   in a peer's Availability Windows only by coincidence. The iPhone and MacBook are
+   synchronised to *each other*, so their listening windows coincide and ours do not.
+2. **An established cluster resists switching.** In finding 34 the devices may have been in
+   a forming state; here a master and its follower were already locked together. AWDL may
+   well have hysteresis, and abandoning a master for any louder stranger would be a poor
+   design.
+
+Both fit. Deciding between them needs evidence that a peer *received* a frame of ours
+without acting on it, which no capture of the air can show — the cluster's own logs would.
+
+### What this does not undo
+
+The frames are right. Finding 34 proved that in a way a negative cannot retract: a device
+two hops away carried our metric and our tenure counter, values it could only hold by
+parsing our frame and believing it. **Being elected is evidence of correctness; not being
+elected is not evidence against it.**
+
+What changes is the claim's strength. "libawdl can be elected master" is true and
+demonstrated once. "libawdl will be elected master" is **not** supported, and the deciding
+variable is still unidentified.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
