@@ -9,29 +9,32 @@ mod fixture_election;
 
 use libawdl::coverage::{is_decoded, of_tlv};
 
-/// Synchronization Parameters: three-quarters named, and the missing quarter is specific.
+/// Synchronization Parameters, once the Legacy qualifier is decoded.
+///
+/// It was 21 opaque bytes of 73. Sixteen of those were the qualifier byte on each slot,
+/// recovered by pairing tag 4 against tag 18 in the same frame, which leaves five: the
+/// flags word, byte 28, and the two trailing bytes.
 #[test]
-fn sync_params_are_not_fully_understood() {
+fn sync_params_have_five_opaque_bytes_left() {
     let c = of_tlv(4, fixture_sync::APPLE_ASSOCIATED);
     assert_eq!(c.total(), 73);
-    // flags(2) + byte 28(1) + trailing(2) + sixteen Legacy qualifier bytes.
-    assert_eq!(c.opaque, 21, "and every one of them round-trips regardless");
-    assert!(c.percent_named() > 70.0 && c.percent_named() < 75.0, "{}", c.percent_named());
+    assert_eq!(c.opaque, 5, "the flags word, byte 28, and the trailing pair");
+    assert_eq!(c.named, 68);
 
-    // The same schedule in the other encoding hides less: an operating class is a value
-    // we can choose, a Legacy flags byte is not.
     let op = of_tlv(18, fixture_sync::APPLE_TAG18);
-    assert_eq!(op.opaque, 0, "OpClass qualifiers are operating classes, which we can name");
+    assert_eq!(op.opaque, 0, "OpClass qualifiers are operating classes");
 }
 
-/// Election v2 is the worst of the tags we do parse.
+/// Election v2, once the counters are decoded as a tenure as master.
+///
+/// It was 22 opaque bytes of 40. The two counters account for eight of them, leaving the
+/// second address — whose role is undocumented — and the eight reserved bytes.
 #[test]
-fn election_v2_is_less_than_half_named() {
+fn election_v2_has_fourteen_opaque_bytes_left() {
     let c = of_tlv(24, fixture_election::APPLE_ELECTION_V2);
     assert_eq!(c.total(), 40);
-    assert_eq!(c.named, 18, "master, distance, and the two metrics");
-    assert_eq!(c.opaque, 22, "the second address, both counters, and eight reserved bytes");
-    assert!(c.percent_named() < 50.0);
+    assert_eq!(c.named, 26, "master, distance, both metrics, both counters");
+    assert_eq!(c.opaque, 14, "the second address and eight reserved bytes");
 }
 
 /// The tags with no decoder at all. Naming them here means adding one is a visible change.

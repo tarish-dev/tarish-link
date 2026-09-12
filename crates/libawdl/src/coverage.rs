@@ -62,7 +62,20 @@ fn channel_sequence(v: &[u8]) -> Coverage {
     c.named += slots; // the channel numbers themselves
     match seq.encoding {
         ChanEncoding::OpClass => c.named += slots,
-        ChanEncoding::Legacy => c.opaque += slots,
+        ChanEncoding::Legacy => {
+            // Named per slot, not wholesale: the qualifier is decoded for the four values
+            // seen on the wire and is honestly unknown for any other, so a capture
+            // containing an 80 MHz or 6 GHz Legacy slot will show up here as opaque
+            // instead of being silently absorbed.
+            use crate::sync::LegacyQualifier;
+            for i in 0..slots {
+                let q = LegacyQualifier::from(seq.qualifiers.get(i).copied().unwrap_or(0));
+                match q {
+                    LegacyQualifier::Other(_) => c.opaque += 1,
+                    _ => c.named += 1,
+                }
+            }
+        }
         ChanEncoding::ChannelNumber => {}
         ChanEncoding::Unknown(_) => c.opaque += slots,
     }
@@ -118,14 +131,15 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             Coverage { named: 18, opaque: len - 18 }
         }
 
-        // Election Parameters v2. The counters are NOT named: their observed values are
-        // inconsistent between devices in one capture and we cannot say what a correct
-        // one would be. Nor is the second address, whose role is undocumented.
+        // Election Parameters v2. The counters ARE named now: a tenure in units of 192
+        // AWs, and the master's own relayed. That leaves the second address, whose role is
+        // undocumented, and the eight reserved bytes.
         24 => {
             if len < 40 {
                 return all_opaque;
             }
-            Coverage { named: 18, opaque: len - 18 }
+            // master 6, distance 4, both metrics 8, both counters 8.
+            Coverage { named: 26, opaque: len - 26 }
         }
 
         // Data Path State: the bitmap and the fields it selects are named; the extended
@@ -168,13 +182,21 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
         // Version: packed nibbles and a device class we have a table for.
         21 => Coverage { named: len, opaque: 0 },
 
-        // 802.11 Container: the element headers are named, the bodies are radio
-        // capability bits we pass through without decoding.
+        // 802.11 Container: standard elements. A VHT Capabilities body is fully decoded
+        // from IEEE 802.11-2020 -- not reverse engineered -- so it counts as named. Any
+        // other element is carried without being read.
         17 => {
-            use crate::state::Ieee80211Container;
+            use crate::state::{Ieee80211Container, VhtCapabilities, ELEM_VHT_CAPABILITIES};
             let Some(c) = Ieee80211Container::parse(v) else { return all_opaque };
-            let headers = c.elements.len() * 2;
-            Coverage { named: headers, opaque: len - headers }
+            let mut cov = Coverage { named: c.elements.len() * 2, opaque: 0 };
+            for (id, body) in &c.elements {
+                if *id == ELEM_VHT_CAPABILITIES && VhtCapabilities::parse(body).is_some() {
+                    cov.named += body.len();
+                } else {
+                    cov.opaque += body.len();
+                }
+            }
+            cov
         }
 
         // The 6 GHz tags. Both are a class/channel pair -- which we can name and choose --

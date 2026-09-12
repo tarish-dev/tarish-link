@@ -143,3 +143,69 @@ fn the_container_holds_a_vht_capabilities_element() {
     // An element whose length runs past the end is refused, not trimmed.
     assert!(Ieee80211Container::parse(&[0xbf, 0x40, 0x00]).is_none());
 }
+
+/// The container's element body is a published 802.11 structure, and it decodes cleanly.
+///
+/// This one is not reverse engineering — it is reading the standard and confirming AWDL
+/// carries the element verbatim. The check that it IS verbatim is the round trip.
+#[test]
+fn the_vht_capabilities_body_decodes_per_the_standard() {
+    use libawdl::state::{Ieee80211Container, McsSupport, VhtCapabilities};
+
+    let c = Ieee80211Container::parse(APPLE_CONTAINER).unwrap();
+    let body = c.vht_capabilities().expect("carries one");
+    let v = VhtCapabilities::parse(body).expect("12 bytes decode");
+
+    assert_eq!(v.info, 0x0380_0032);
+    assert_eq!(v.max_mpdu_octets(), Some(11454));
+    assert_eq!(v.channel_widths(), "20/40/80", "neither 160 nor 80+80");
+    assert!(v.rx_ldpc());
+    assert!(v.short_gi_80());
+    assert!(!v.short_gi_160());
+    assert!(!v.tx_stbc());
+    assert_eq!(v.rx_stbc_streams(), 0);
+    assert!(!v.su_beamformer(), "this device does not beamform for others");
+    assert!(!v.su_beamformee());
+    assert_eq!(v.max_ampdu_exponent(), 7);
+    assert_eq!(v.max_ampdu_octets(), 1_048_575);
+
+    // Two spatial streams, MCS 0-9 on each, nothing beyond.
+    assert_eq!(v.rx_mcs_map, 0xfffa);
+    assert_eq!(VhtCapabilities::spatial_streams(v.rx_mcs_map), 2);
+    assert_eq!(VhtCapabilities::mcs_for(v.rx_mcs_map, 1), McsSupport::Upto9);
+    assert_eq!(VhtCapabilities::mcs_for(v.rx_mcs_map, 2), McsSupport::Upto9);
+    assert_eq!(VhtCapabilities::mcs_for(v.rx_mcs_map, 3), McsSupport::NotSupported);
+    assert_eq!(v.tx_mcs_map, v.rx_mcs_map, "symmetric, as phones usually are");
+
+    // And it is carried verbatim: re-encoding gives the captured bytes back.
+    assert_eq!(&v.encode()[..], body);
+}
+
+/// The v2 counters are a tenure, not a clock — which is why their values looked incoherent.
+///
+/// Measured two ways in `captures/run-b-ch6.pcap`: a master's counter advanced 569→579
+/// while a follower watching it reproduced every one of those values in `master_counter`,
+/// and that follower's OWN counter sat at 68364 without moving for the whole 28 seconds.
+#[test]
+fn the_v2_counters_are_a_tenure_as_master() {
+    use libawdl::election::{ElectionParamsV2, AW_PER_COUNTER_TICK};
+
+    assert_eq!(AW_PER_COUNTER_TICK, 192, "twelve sixteen-slot cycles");
+
+    // 192 AWs of 16 TU is 3.145728 s, which is the interval the captures show.
+    let secs = f64::from(AW_PER_COUNTER_TICK) * 16.0 * 1024.0 / 1e6;
+    assert!((secs - 3.145728).abs() < 1e-6, "{secs}");
+
+    // A node that has held the job for exactly one period has advanced by one.
+    assert_eq!(ElectionParamsV2::counter_after(569, 192), 570);
+    // And for less than a period, by none: the step is on the boundary.
+    assert_eq!(ElectionParamsV2::counter_after(569, 191), 569);
+    assert_eq!(ElectionParamsV2::counter_after(569, 192 * 10), 579, "the observed 569->579");
+
+    // Naming ourselves means both counters carry the same value, because the field always
+    // carries the counter of whoever is named.
+    let addr = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let e = ElectionParamsV2::claiming(addr, 530, 7);
+    assert_eq!(e.master_counter, e.self_counter);
+    assert_eq!(e.master, addr);
+}

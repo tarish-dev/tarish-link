@@ -176,6 +176,84 @@ impl SyncParams {
     }
 }
 
+/// What the qualifier byte of a **Legacy** channel-sequence slot means.
+///
+/// Derived from captures rather than a specification, and derivable at all only because a
+/// frame states its schedule twice: tag 4 embeds it in Legacy encoding while tag 18
+/// repeats it in OpClass encoding. Pairing the two, slot by slot, over 62189 occupied
+/// slots gives the whole observed mapping:
+///
+/// ```text
+///   qualifier   Legacy channel   tag 18 control channel   opclass   count
+///   0x1d        151, 46          149, 44                  128       44319
+///   0x1e        102, 151         104, 153                 128        3782
+///   0x2b        6                6                        81       14088
+///   0x00        0 (absent)       0                        0        142547
+/// ```
+///
+/// **The Legacy list does not carry a channel you can tune to.** It carries the centre of
+/// the 40 MHz pair, and the qualifier says which half the control channel is:
+/// `0x1d` means two below, `0x1e` two above, `0x2b` means a 20 MHz channel that is its own
+/// centre. A peer advertising 151 is listening on 149 or 153, and a node that tunes to 151
+/// meets nobody — which is a failure with no error anywhere, just an empty channel.
+///
+/// **What is measured and what is not.** The mapping above is measured. A bit-level split
+/// into band, bandwidth and control-position fields fits these three values neatly —
+/// `0x1d`/`0x1e` share their high bits and differ in the low two — but three values cannot
+/// determine three fields, so that reading is not asserted here. `Other` exists because
+/// 80 MHz and 6 GHz slots have never appeared in a Legacy list in any capture, and a
+/// qualifier we have not seen must not be guessed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyQualifier {
+    /// The slot is empty.
+    Absent,
+    /// 20 MHz: the channel in the list is the control channel.
+    Width20,
+    /// 40 MHz, control channel two below the listed centre.
+    Width40Lower,
+    /// 40 MHz, control channel two above the listed centre.
+    Width40Upper,
+    /// Seen on the wire, and not one of the four above.
+    Other(u8),
+}
+
+impl LegacyQualifier {
+    pub fn from(v: u8) -> LegacyQualifier {
+        match v {
+            0x00 => LegacyQualifier::Absent,
+            0x2b => LegacyQualifier::Width20,
+            0x1d => LegacyQualifier::Width40Lower,
+            0x1e => LegacyQualifier::Width40Upper,
+            other => LegacyQualifier::Other(other),
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            LegacyQualifier::Absent => 0x00,
+            LegacyQualifier::Width20 => 0x2b,
+            LegacyQualifier::Width40Lower => 0x1d,
+            LegacyQualifier::Width40Upper => 0x1e,
+            LegacyQualifier::Other(v) => v,
+        }
+    }
+
+    /// The channel a radio should actually tune to, given the number in the Legacy list.
+    ///
+    /// `None` when the slot is empty or the qualifier is one we have not seen — an
+    /// unknown qualifier means an unknown offset, and returning the centre as though it
+    /// were the control channel would be worse than admitting we do not know.
+    pub fn control_channel(self, listed: u8) -> Option<u8> {
+        match self {
+            LegacyQualifier::Absent => None,
+            LegacyQualifier::Width20 => Some(listed),
+            LegacyQualifier::Width40Lower => listed.checked_sub(2),
+            LegacyQualifier::Width40Upper => listed.checked_add(2),
+            LegacyQualifier::Other(_) => None,
+        }
+    }
+}
+
 /// The operating class a channel belongs to, as Apple writes it in tag 18.
 ///
 /// Only the values actually observed: 81 for 2.4 GHz and 128 for the 80 MHz 5 GHz
@@ -383,6 +461,32 @@ impl ChannelSequence {
             qualifiers: channels.iter().map(|c| opclass_for(*c)).collect(),
             channels,
         }
+    }
+
+    /// The channels a radio can actually tune to, slot by slot.
+    ///
+    /// **Use this, not [`channels`](Self::channels), for anything that acts on the
+    /// schedule.** Under `OpClass` the two are the same. Under `Legacy` they are not: the
+    /// list carries 40 MHz centres, so `channels` reports 151 where the peer is really
+    /// listening on 149. `None` means the slot is empty, or the qualifier is one we cannot
+    /// interpret — both of which mean "do not schedule anything here".
+    pub fn control_channels(&self) -> Vec<Option<u8>> {
+        self.channels
+            .iter()
+            .enumerate()
+            .map(|(i, chan)| {
+                if *chan == 0 {
+                    return None;
+                }
+                match self.encoding {
+                    ChanEncoding::Legacy => {
+                        let q = LegacyQualifier::from(self.qualifiers.get(i).copied().unwrap_or(0));
+                        q.control_channel(*chan)
+                    }
+                    _ => Some(*chan),
+                }
+            })
+            .collect()
     }
 
     /// Slots where the node is present at all. Channel 0 means absent.

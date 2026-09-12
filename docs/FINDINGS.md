@@ -1076,6 +1076,83 @@ means every capture-derived claim had an unexamined error term. It is parsed now
 answer is reassuring: **zero BADFCS frames across all 7054**, so nothing previously
 concluded rests on corrupt input. Worth having asked.
 
+## 21. The Legacy channel list is not channels — it is 40 MHz centres
+
+A frame states its schedule **twice**: tag 4 embeds it in Legacy encoding, tag 18 repeats
+it in OpClass encoding. That redundancy is what makes the undecoded Legacy qualifier byte
+recoverable without any new captures — pair the two lists slot by slot and the qualifier is
+sitting next to its own answer.
+
+Over 62189 occupied slots, the entire observed mapping:
+
+| qualifier | Legacy channel | tag 18 control channel | opclass | count |
+|---|---|---|---|---|
+| `0x1d` | 151, 46 | 149, 44 | 128 | 44319 |
+| `0x1e` | 102, 151 | 104, 153 | 128 | 3782 |
+| `0x2b` | 6 | 6 | 81 | 14088 |
+| `0x00` | absent | absent | 0 | 142547 |
+
+**The Legacy list carries the centre of the 40 MHz pair, not a channel anyone tunes to.**
+`0x1d` means the control channel is two below, `0x1e` two above, `0x2b` means a 20 MHz
+channel that is its own centre.
+
+### Why this one matters more than its byte count
+
+A peer advertising 151 is listening on **149 or 153**. Tuning to 151 meets nobody, and
+nothing anywhere reports an error — the radio sits on an empty channel and the peer looks
+unreachable. `ChannelSequence::control_channels()` resolves it; `channels` is the raw list
+and should not be acted on directly.
+
+### What is measured and what is not
+
+The mapping is measured. A bit-level split into band / bandwidth / control-position fits
+these three values neatly — `0x1d` and `0x1e` share their high bits and differ in the low
+two — but **three values cannot determine three fields**, so that reading is not asserted.
+80 MHz and 6 GHz slots have never appeared in a Legacy list, so `LegacyQualifier::Other`
+returns no channel rather than guessing an offset.
+
+## 22. Election v2's counters are a tenure as master, not a clock
+
+Their values looked incoherent — 68364 next to 5 in one capture — which is why an earlier
+version of this file called their meaning unresolved and declined to guess. Measured, they
+are simple.
+
+**`self_counter` counts how long this node has been master, in units of 192 Availability
+Windows.** It advances by exactly one, only while the node claims mastership. One Apple
+device's AW counter at successive increments read 15434, 15625, 15817, 16009 — 191, 192,
+192 — and the capture timestamps put the interval at 3.15 s across nine consecutive
+increments. 192 AWs of 16 TU is **3.145728 s**, and 192 is twelve complete sixteen-slot
+cycles.
+
+**`master_counter` is the counter of whoever the node names as master, relayed.** A
+follower reproduced its master's 569, 570, 571, 572 exactly, one frame behind each change,
+while its own counter sat frozen at 68364 for the full 28 seconds it followed.
+
+So the incoherent values were never incoherent: a device that has been master for hours
+reports a large number and one that just took the job reports a small one.
+
+### What this does not change
+
+It is still not the election's ordering term — see finding 9 and `beats`, where a node with
+a counter 112 times larger yielded to one with a higher metric. Knowing what the counter
+means makes it *emittable*, which is the point: a node can now advertise a correct tenure
+instead of copying a number off an Apple device.
+
+## 23. Tag 17 is not an AWDL format
+
+The IEEE 802.11 Container carries a standard **VHT Capabilities element** — `0xbf`, twelve
+bytes — verbatim. It is the one field in this whole protocol that did not need reverse
+engineering, only recognising: IEEE 802.11-2020 §9.4.2.157 specifies it completely.
+
+The captured Apple value decodes as a two-stream 80 MHz phone: maximum MPDU 11454, widths
+20/40/80 with neither 160 nor 80+80, Rx LDPC, short GI at 80 MHz, A-MPDU exponent 7, and
+MCS 0–9 on two spatial streams in both directions.
+
+**The consequence for transmitting is the whole reason to care.** These bits describe the
+radio, so they have to come from the radio — `libawdl-hal` — and not from a table copied
+out of an Apple frame. Announcing capabilities the hardware does not have is an invitation
+to a peer to use them.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

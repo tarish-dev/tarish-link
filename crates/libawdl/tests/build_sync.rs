@@ -185,3 +185,61 @@ fn duration_follows_the_destination() {
     assert_eq!(management_header(BROADCAST, src, 0)[2..4], [0, 0]);
     assert_eq!(management_header(Mac([0x8a; 6]), src, 0)[2..4], [48, 0]);
 }
+
+/// The Legacy list carries 40 MHz CENTRES, and the qualifier says which half is the
+/// control channel. Resolving it must reproduce tag 18 exactly, slot for slot.
+///
+/// This is the whole derivation in one assertion: the two encodings describe the same
+/// schedule, so if the qualifier is decoded correctly they agree, and if it is not they
+/// differ by two on every 40 MHz slot — which is a channel nobody is listening on.
+#[test]
+fn resolving_legacy_centres_reproduces_the_opclass_list() {
+    use libawdl::sync::LegacyQualifier;
+
+    let legacy = SyncParams::parse(APPLE_ASSOCIATED).unwrap().channel_sequence.unwrap();
+    let opclass = ChannelSequence::parse(APPLE_TAG18).unwrap();
+    assert_eq!(legacy.encoding, ChanEncoding::Legacy);
+    assert_eq!(opclass.encoding, ChanEncoding::OpClass);
+
+    // The raw lists DISAGREE, which is the point.
+    assert_ne!(legacy.channels, opclass.channels, "151 vs 149, 102 vs 104");
+
+    // Resolved, they agree.
+    let resolved = legacy.control_channels();
+    let expected: Vec<Option<u8>> =
+        opclass.channels.iter().map(|c| if *c == 0 { None } else { Some(*c) }).collect();
+    assert_eq!(resolved, expected, "the same schedule, once the centres are resolved");
+
+    // And specifically:
+    assert_eq!(legacy.channels[0], 102, "the Legacy list says 102");
+    assert_eq!(resolved[0], Some(104), "the radio must tune to 104");
+    assert_eq!(legacy.channels[2], 151);
+    assert_eq!(resolved[2], Some(149), "and to 149, not 151");
+    assert_eq!(resolved[8], Some(6), "channel 6 is 20 MHz and is its own centre");
+
+    assert_eq!(LegacyQualifier::from(0x1e), LegacyQualifier::Width40Upper);
+    assert_eq!(LegacyQualifier::from(0x1d), LegacyQualifier::Width40Lower);
+    assert_eq!(LegacyQualifier::from(0x2b), LegacyQualifier::Width20);
+}
+
+/// A qualifier we have never seen yields no channel rather than a plausible wrong one.
+#[test]
+fn an_unseen_qualifier_is_refused_not_guessed() {
+    use libawdl::sync::LegacyQualifier;
+
+    let q = LegacyQualifier::from(0x77);
+    assert_eq!(q, LegacyQualifier::Other(0x77));
+    assert_eq!(q.control_channel(149), None, "an unknown offset is not an offset of zero");
+    assert_eq!(q.to_u8(), 0x77, "and it still round-trips");
+}
+
+/// OpClass sequences need no resolution — the list is already control channels.
+#[test]
+fn opclass_channels_pass_through_unchanged() {
+    let s = ChannelSequence::apple_shaped(149, Some(104));
+    let resolved = s.control_channels();
+    assert_eq!(resolved[0], Some(104));
+    assert_eq!(resolved[2], Some(149));
+    assert_eq!(resolved[8], Some(6));
+    assert_eq!(resolved[1], None, "an empty slot resolves to nothing");
+}

@@ -320,6 +320,156 @@ impl Ieee80211Container {
     }
 }
 
+/// The body of a VHT Capabilities element, decoded per IEEE 802.11-2020 §9.4.2.157.
+///
+/// Unlike almost everything else in this crate, **this one is not reverse engineered** —
+/// it is a published format, and AWDL carries it verbatim rather than inventing its own.
+/// That is worth stating because it changes what the bytes are for: they describe the
+/// radio, so on transmit they must come from the radio and not from a table copied out of
+/// an Apple frame. Announcing capabilities the hardware does not have invites a peer to
+/// use them.
+///
+/// The captured Apple value decodes as a two-stream 80 MHz phone:
+///
+/// ```text
+///   32 00 80 03   max MPDU 11454, 20/40/80 MHz, Rx LDPC, short GI 80, A-MPDU exp 7
+///   fa ff 00 00   Rx: MCS 0-9 on 2 spatial streams, none beyond
+///   fa ff 00 00   Tx: the same
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VhtCapabilities {
+    pub info: u32,
+    pub rx_mcs_map: u16,
+    pub rx_highest_mbps: u16,
+    pub tx_mcs_map: u16,
+    pub tx_highest_mbps: u16,
+}
+
+/// What a two-bit entry in a VHT-MCS map means for one spatial stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McsSupport {
+    Upto7,
+    Upto8,
+    Upto9,
+    NotSupported,
+}
+
+impl VhtCapabilities {
+    pub const LEN: usize = 12;
+
+    pub fn parse(v: &[u8]) -> Option<VhtCapabilities> {
+        if v.len() < Self::LEN {
+            return None;
+        }
+        Some(VhtCapabilities {
+            info: le::u32(v, 0)?,
+            rx_mcs_map: le::u16(v, 4)?,
+            rx_highest_mbps: le::u16(v, 6)?,
+            tx_mcs_map: le::u16(v, 8)?,
+            tx_highest_mbps: le::u16(v, 10)?,
+        })
+    }
+
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut o = [0u8; Self::LEN];
+        o[0..4].copy_from_slice(&self.info.to_le_bytes());
+        o[4..6].copy_from_slice(&self.rx_mcs_map.to_le_bytes());
+        o[6..8].copy_from_slice(&self.rx_highest_mbps.to_le_bytes());
+        o[8..10].copy_from_slice(&self.tx_mcs_map.to_le_bytes());
+        o[10..12].copy_from_slice(&self.tx_highest_mbps.to_le_bytes());
+        o
+    }
+
+    fn bits(&self, lo: u32, n: u32) -> u32 {
+        (self.info >> lo) & ((1 << n) - 1)
+    }
+
+    /// Maximum MPDU length in octets. B0-B1.
+    pub fn max_mpdu_octets(&self) -> Option<u32> {
+        match self.bits(0, 2) {
+            0 => Some(3895),
+            1 => Some(7991),
+            2 => Some(11454),
+            _ => None, // 3 is reserved
+        }
+    }
+
+    /// Supported channel widths, as text. B2-B3.
+    ///
+    /// Note what this does NOT say: 80 MHz support is implied by the element existing at
+    /// all, so value 0 means "20, 40 and 80", not "20 and 40".
+    pub fn channel_widths(&self) -> &'static str {
+        match self.bits(2, 2) {
+            0 => "20/40/80",
+            1 => "20/40/80/160",
+            2 => "20/40/80/160/80+80",
+            _ => "reserved",
+        }
+    }
+
+    /// B4.
+    pub fn rx_ldpc(&self) -> bool {
+        self.bits(4, 1) == 1
+    }
+    /// B5.
+    pub fn short_gi_80(&self) -> bool {
+        self.bits(5, 1) == 1
+    }
+    /// B6.
+    pub fn short_gi_160(&self) -> bool {
+        self.bits(6, 1) == 1
+    }
+    /// B7.
+    pub fn tx_stbc(&self) -> bool {
+        self.bits(7, 1) == 1
+    }
+    /// B8-B10: how many spatial streams STBC reception is supported on.
+    pub fn rx_stbc_streams(&self) -> u32 {
+        self.bits(8, 3)
+    }
+    /// B11.
+    pub fn su_beamformer(&self) -> bool {
+        self.bits(11, 1) == 1
+    }
+    /// B12.
+    pub fn su_beamformee(&self) -> bool {
+        self.bits(12, 1) == 1
+    }
+    /// B19.
+    pub fn mu_beamformer(&self) -> bool {
+        self.bits(19, 1) == 1
+    }
+    /// B20.
+    pub fn mu_beamformee(&self) -> bool {
+        self.bits(20, 1) == 1
+    }
+    /// B23-B25, as the exponent itself. The length is `2^(13 + exp) - 1` octets.
+    pub fn max_ampdu_exponent(&self) -> u32 {
+        self.bits(23, 3)
+    }
+    pub fn max_ampdu_octets(&self) -> u32 {
+        (1u32 << (13 + self.max_ampdu_exponent())) - 1
+    }
+
+    /// What one spatial stream supports, from a VHT-MCS map. `stream` is 1-based.
+    pub fn mcs_for(map: u16, stream: u8) -> McsSupport {
+        if !(1..=8).contains(&stream) {
+            return McsSupport::NotSupported;
+        }
+        match (map >> (2 * (stream - 1))) & 0b11 {
+            0 => McsSupport::Upto7,
+            1 => McsSupport::Upto8,
+            2 => McsSupport::Upto9,
+            _ => McsSupport::NotSupported,
+        }
+    }
+
+    /// How many spatial streams the map actually supports.
+    pub fn spatial_streams(map: u16) -> u8 {
+        (1..=8u8).filter(|s| Self::mcs_for(map, *s) != McsSupport::NotSupported).count() as u8
+    }
+}
+
 // -------------------------------------------------------------- tags 32, 33 ---
 //
 // These two appear in no published table. Wireshark's tag enumeration ends at 24 and
