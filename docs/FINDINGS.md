@@ -2215,6 +2215,81 @@ could adopt *them*. Whether transmitting inside a cluster's own windows changes 
 responds is the next question, and it is now askable for the first time, because every
 earlier trial was aiming at a schedule it could not hit.
 
+## 44. ★ SETTLED: the election is decided by METRIC, not by counter
+
+The question FINDINGS 42 called the most important open one in the project. Answered with a
+designed experiment and a control, which is the first time tonight that a hypothesis was
+tested rather than inferred.
+
+### Why it needed an experiment
+
+OWL's `awdl_election_compare_master` is **counter first, metric second**. This crate's
+`beats()` is metric-first. Finding 9 claimed a capture settled it, but that capture compared
+`self_metric` and `self_counter` while OWL compares `master_counter` and `master_metric` — so
+it never tested OWL's rule, and the divergence was an accident rather than a decision.
+
+No capture held could settle it either: all of them begin with the devices already
+synchronised, so a joining node's independent claim was never recorded.
+
+### The design
+
+We control our own metric and counter, so the two rules can be forced to predict **opposite**
+outcomes. Both probes ran against the same room, with the operator taking two iPhones from
+AirDrop-off to Everyone so they would join from cold.
+
+| probe | our metric | our counter | metric-first predicts | counter-first predicts | **observed** |
+|---|---|---|---|---|---|
+| **A** | 600 (highest) | 1-16 (lowest) | they follow us | they ignore us | **three followed** |
+| **B** | 50 (lowest) | 99999 (highest) | they ignore us | they follow us | **none followed** |
+
+### Probe A, with the peers' own advertised values
+
+```text
+  sender               self_metric   self_counter      distance
+  00:c0:ca:b0:60:4c    600           1..16             0          us
+  de:d3:77:dd:f0:9f    510           72471..72474      0,1,2      followed us
+  f6:30:bd:2d:9c:45    540           3287              1,2        followed us
+  da:da:16:dd:96:92     65           111               0,1        followed us
+```
+
+`de:d3` carried a counter **4500 times larger than ours** and a lower metric, and adopted us
+anyway. It was observed at distance 0 — claiming itself — so at that moment its
+`master_counter` *was* 72471, which is OWL's own field. The rule is refuted on its own terms.
+
+The transition was caught too, which is what the cold start was for: `de:d3` named itself in
+10 frames and then named us in 138.
+
+### Probe B, the control
+
+```text
+  00:c0:ca:b0:60:4c  ->  (itself)           140    us: metric 50, counter 99999
+  da:da:16:dd:96:92  ->  f6:30:bd:2d:9c:45  109
+  de:d3:77:dd:f0:9f  ->  f6:30:bd:2d:9c:45  120
+  f6:30:bd:2d:9c:45  ->  (itself)           447
+```
+
+The same three devices, the same room, minutes apart: with the highest counter in the room
+and the lowest metric, **not one of them followed us**. They organised around an Apple device
+instead.
+
+### The conclusion
+
+**Metric decides. The counter is not the primary key, and probably not a key at all.**
+`ElectionParamsV2::beats` is correct as written, and the divergence from OWL is now a measured
+one rather than an oversight. Finding 9 reached the right answer from weaker evidence.
+
+What this does **not** say is that OWL is wrong as software — it interoperates, and a
+counter-first rule still picks a master when every node agrees. It says Apple does not order
+the election that way, so an implementation that wants to *win* against Apple devices must
+compete on metric.
+
+### And a note on method
+
+This is the cleanest experiment in this document and the only one with a real control. The
+five candidates eliminated in findings 36-39 were each tested by changing one thing and
+watching; this changed one thing and **also ran the converse**, which is what turns "the
+outcome differed" into "the variable is responsible". The difference cost one extra run.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

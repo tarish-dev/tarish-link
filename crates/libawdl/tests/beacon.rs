@@ -339,3 +339,38 @@ fn adopting_a_peer_that_already_follows_us_would_cycle() {
     assert!(!ElectionParamsV2::would_cycle(them, me));
     assert_eq!(ElectionParamsV2::MAX_TREE_HEIGHT, 10);
 }
+
+/// The counter and the metric can be made to disagree, which is the whole point.
+///
+/// OWL orders the election counter-first; this crate orders it metric-first; and no capture
+/// held distinguishes them, because they all begin with the devices already synchronised.
+/// A probe that advertises the highest metric with the lowest counter makes the two rules
+/// predict opposite outcomes, so a peer joining from cold answers by which way it goes.
+#[test]
+fn a_probe_can_make_counter_and_metric_disagree() {
+    use libawdl::beacon::{METRIC_COMPETE, METRIC_DECLINE};
+    use libawdl::election::ElectionParamsV2;
+
+    let mut high_metric_low_counter = Beacon::new(ADDR, 149, "QA");
+    high_metric_low_counter.metric = 600;
+    high_metric_low_counter.tenure_base = 0;
+
+    let mut low_metric_high_counter = Beacon::new(ADDR, 149, "QA");
+    low_metric_high_counter.metric = 50;
+    low_metric_high_counter.tenure_base = 99_999;
+
+    let read = |b: &Beacon| -> (u32, u32) {
+        let f = b.mif(0);
+        let af = ActionFrame::parse(&f[24..]).unwrap();
+        let e = ElectionParamsV2::parse(af.tlvs().find(|t| t.tag == 24).unwrap().value).unwrap();
+        (e.self_metric, e.self_counter)
+    };
+
+    let (m_a, c_a) = read(&high_metric_low_counter);
+    let (m_b, c_b) = read(&low_metric_high_counter);
+    assert!(m_a > m_b && c_a < c_b, "the two probes must rank oppositely on the two fields");
+    assert!(m_a > 539, "probe A must out-metric the highest Apple value observed");
+    assert!(m_b < METRIC_DECLINE, "probe B must lose on metric to everything");
+    assert!(c_b > 68_364, "probe B must out-count the highest Apple value observed");
+    assert_eq!(METRIC_COMPETE, 530);
+}

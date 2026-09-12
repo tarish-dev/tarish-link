@@ -275,7 +275,17 @@ impl ElectionParamsV2 {
     /// Address breaks a metric tie. That part is still inferred rather than observed —
     /// no capture so far has contained two nodes with equal metrics.
     ///
-    /// # ⚠ THIS DIVERGES FROM OWL, AND OWL MAY BE RIGHT
+    /// # This diverges from OWL, and the divergence is MEASURED — see FINDINGS 44
+    ///
+    /// Two probes against the same room, minutes apart, with two iPhones joining from cold:
+    /// advertising the highest metric with the **lowest** counter brought three Apple
+    /// devices over to us — one of them carrying a counter 4500 times larger than ours —
+    /// and advertising the lowest metric with the **highest** counter brought none. Metric
+    /// decides; the counter does not.
+    ///
+    /// Keep this function metric-first. The note below records what OWL does and why the
+    /// earlier evidence did not test it.
+    ///
     ///
     /// OWL's `awdl_election_compare_master` is **counter first, metric second**:
     ///
@@ -290,10 +300,9 @@ impl ElectionParamsV2 {
     /// OWL's rule** and this implementation is an undecided divergence rather than a
     /// considered one.
     ///
-    /// It cannot be resolved from the captures held: in the run behind finding 9 the losing
-    /// device was already following when the capture began, so its independent election
-    /// state was never seen. Settling it needs a capture of a device **joining** a cluster.
-    /// See FINDINGS 42.
+    /// That is why it needed an experiment rather than another capture: every capture held
+    /// begins with the devices already synchronised, so a joining node's independent claim
+    /// was never recorded. Two cold joins settled it.
     ///
     /// It also ignores three things OWL does and this crate does not: refusing a peer that
     /// names us as its own sync master (cycle prevention), refusing one that would make the

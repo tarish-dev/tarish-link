@@ -556,7 +556,7 @@ fn usage() -> ! {
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -615,6 +615,9 @@ fn main() {
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok()),
                 args.iter().any(|a| a == "--follow"),
+                args.iter().position(|a| a == "--tenure")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse().ok()),
             );
         }
         "follow" => {
@@ -982,7 +985,7 @@ fn coverage(files: &[String]) {
 /// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1023,6 +1026,16 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     if let Some(m) = metric {
         b.metric = m;
     }
+    if let Some(t) = tenure {
+        // Sets where our election COUNTER starts. It exists to make the counter and the
+        // metric disagree on purpose: OWL orders the election counter-first and this crate
+        // orders it metric-first, and no capture held tests the difference because every
+        // one begins with the devices already synchronised. Advertising a high metric with
+        // a low counter (or the reverse) makes the two rules predict opposite outcomes,
+        // so a peer joining from cold answers the question by which way it goes.
+        // See FINDINGS 42.
+        b.tenure_base = t;
+    }
     if let Some(w) = windows {
         // An experimental control. See Beacon::windows.
         b.windows = Some(w);
@@ -1036,6 +1049,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     // be self-consistent, and does not have to agree with anybody else's.
     let epoch = std::time::Instant::now();
     eprintln!("beaconing as {} on channel {channel} for {secs}s", libawdl::dot11::Mac(addr));
+    eprintln!("  election counter starts at {}", b.tenure_base);
     eprintln!(
         "  metric {} — {}",
         b.metric,
