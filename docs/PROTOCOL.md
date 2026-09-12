@@ -37,6 +37,20 @@ document with a real control". It had a converse. That is not a control.
 6. **A result that does not replicate against a different device set is not a result.**
    Finding 44 survived a converse and died to a replication.
 
+7. **Verify the manipulation took, in the capture, before reading the outcome.** Rule 2 is
+   about the starting state; this is about whether the thing you did actually changed it.
+   For a "forming" cell the check is `awdl timeline <cap>`: the peers must be **silent in
+   the opening buckets** and then transition in — the `..*` signature. Peers talking in
+   bucket 1 are settled peers, no matter what was done to the phones beforehand. Four
+   consecutive FL runs were void on exactly this, and the fourth looked like a clean result
+   refuting a hypothesis. See finding 46.
+
+8. **Establish the condition DURING the capture, never before it.** Two iPhones re-form a
+   cluster in **under ten seconds**, and the harness needs about that long between starting
+   the beacon and attaching `tcpdump`. So any toggle performed before the run has already
+   expired when the first frame lands. Open the capture first, then have the operator act
+   into it.
+
 ## The harness
 
 `scratchpad/trial.sh` — `LABEL=X FLAGS="..." ./trial.sh`. Four failure modes are designed

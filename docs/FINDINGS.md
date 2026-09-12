@@ -2366,6 +2366,86 @@ neither held fixed nor measured.
 The operator's instinct to repeat is what caught it. A result that does not replicate against
 a different device set was never a result.
 
+## 46. ★ The 2×2, completed — and the forming window is under ten seconds
+
+The design in `docs/PROTOCOL.md` was run to completion: four cells, one variable per
+comparison, the outcome measure pre-registered as **≥20 frames from a non-us sender naming
+our address as master**.
+
+| cell | peers | our metric | cluster-state predicts | metric predicts | observed |
+|---|---|---|---|---|---|
+| FH | forming | 600 | adopt | adopt | **ADOPT** — 329 frames |
+| FL | forming | 50 | adopt | refuse | **refuse** — 0 |
+| SL | settled | 50 | refuse | refuse | **refuse** — 0 |
+| SH | settled | 600 | refuse | adopt | **REFUSE** — 0 |
+
+Read naively that table refutes both hypotheses at once, and for about ninety seconds
+that is what this document said. It is wrong, and the thing that caught it was checking
+whether the manipulation had actually taken.
+
+### FL never delivered the forming condition — `awdl timeline` says so
+
+The manipulation for "forming" is the operator switching AirDrop off and back on, so that
+the peers join a room in which we are already transmitting as master. Whether that worked
+is not a matter of trusting the procedure; it is visible in the capture.
+
+```
+FH   00:c0:ca:b0:60:4c  MMMMMMMMMM      <- us, master throughout
+     82:da:96:76:6a:62  ..*fffffff      <- SILENT for 10s, then arrives and follows
+     da:da:16:dd:96:92  ..*MMMMMMM      <- silent, then arrives
+
+FL   00:c0:ca:b0:60:4c  MMMMMMMMMM...   <- us
+     3e:67:df:44:e8:5d  ffffffffff...   <- already following from bucket 1
+     da:da:16:dd:96:92  MMMMMMMMMM...   <- already master from bucket 1
+```
+
+**FH is the only cell in which the peers were forming.** In FL — as in SL and SH — the
+cluster is established before the capture opens. So FL is void, for the fourth time, and
+it says nothing about cluster state.
+
+The difference from the previous three voids is that this one is *measured*. The peers
+were genuinely restarted: `3e:67:df:44:e8:5d` is a fresh address, where every other cell
+saw `82:da:96:76:6a:62`. AWDL addresses rotate per session, so a new address is proof the
+phone brought AWDL down and back up. It simply finished doing so before we were looking.
+
+### The measurement that came out of the failure
+
+**Two iPhones re-establish master and follower in under ten seconds.** The harness needs
+about that long between starting the beacon and attaching `tcpdump` — the interface is
+recreated, then a 4 s settle, then capture. Any toggle performed *before* the run is
+therefore always too early: the room is settled again by the time the first frame lands.
+
+That is why four attempts in a row produced either an empty room or a settled one, and no
+amount of widening the window fixed it — the window was never the problem, its starting
+point was.
+
+**The fix is to toggle mid-capture, not before it.** And the validity check is free: a
+forming cell must show the peers *silent in the first buckets*, the `..*` signature above.
+A cell whose peers are talking in bucket 1 is not a forming cell, whatever was done to the
+phones beforehand.
+
+### What survives
+
+**The metric hypothesis stays refuted.** SH is untouched by any of this: settled peers, our
+metric 600 — the highest in the room by a wide margin — and not one frame naming us. That
+now sits on eight runs across metrics from 50 to 600 against settled peers, with zero
+adoptions in any of them.
+
+**The cluster-state hypothesis is neither confirmed nor refuted.** It survives contact with
+FH, SL and SH; the cell that would discriminate it from a simpler rule has not been run.
+
+### The sharper hypothesis, for the next run to attack
+
+Every adoption on record — FH, `tx-first`, `PROBE_A` — has the same shape: **a device
+entering a room adopts whoever is already claiming master there, and a device already in a
+cluster does not re-elect, whatever it hears.** That is stronger than "cluster state
+matters" and it predicts FL's outcome either way, which is exactly why FL has to be run
+properly to tell them apart.
+
+Until then, the operational consequence is unchanged and is the useful part: **to be
+adopted, be transmitting before the peer arrives.** Losing an election we never get to
+contest is not a defect in `beats()`.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
