@@ -1703,10 +1703,18 @@ sixteen windows.
 
 | run | our shared airtime with Apple peers | followed? |
 |---|---|---|
-| `tx-first` | **4%, 12%, 12%** | **yes, all three** |
-| `trial-D` | **32%, 56%** | **no** |
+| `tx-first` | 9%, 15%, 16% | **yes, all three** |
+| `trial-D` | 37%, 50% | no |
+| `trial-E` | 36%, **62%** | **yes, both** |
+| `trial-FIX` | **66%** (follower), 18% (not) | one of two |
 
-More overlap, less influence. Whatever decides this, it is not whether they can hear us.
+More overlap, less influence — and more overlap, more influence, depending on the run.
+Whatever decides this, it is not whether they can hear us.
+
+> **The figures above were recomputed after finding 41.** The originals — 4%, 12%, 12% and
+> 32%, 56% — were folded onto a 262144 µs cycle that is four times too short, so they
+> aliased four channel-sequence slots together and were meaningless as overlap. The
+> conclusion survives the correction unchanged: the ordering is still not there.
 
 ### The instrument, and why its answer is trustworthy here
 
@@ -2011,6 +2019,58 @@ transmit inside the windows the cluster actually attends rather than at an arbit
 which is the honest version of the "breadth" accident of trial E, and needs no extra airtime.
 `Cluster::us_until_master_window` returns the target; wiring it into the beacon is the next
 step, and it is small.
+
+## 41. The timing fix, verified on the air
+
+Finding 40's correction — that a channel-sequence slot is four availability windows — was
+settled from field values. This is the check that it holds when transmitting.
+
+**Before**, aiming at "slots 2, 8 and 10" while stepping one slot per availability window,
+the beacon smeared across four to six slots of sixteen and never the advertised ones:
+
+```text
+  trial-D   [.........▂▅▅▂...]   4/16
+  trial-E   [▃▃▃......▃▃....▃]   6/16
+```
+
+**After**, with a slot correctly treated as 64 TU:
+
+```text
+  trial-FIX [▅.....▅.▅.......]   3/16, and they are the three we advertise
+```
+
+Three slots, exactly the advertised `[2, 8, 10]`, holding across a 50-second capture. The
+schedule we announce and the schedule we keep are now the same thing, which they had never
+been in any earlier trial.
+
+### And a peer followed
+
+```text
+  00:c0:ca:b0:60:4c  ->  (itself)            560     us
+  3a:2b:df:c4:69:a6  ->  00:c0:ca:b0:60:4c   107     an Apple device, following us
+  3a:2b:df:c4:69:a6  ->  6e:b5:ac:3f:d7:c6     2
+  6e:b5:ac:3f:d7:c6  ->  (itself)              5
+```
+
+One of the two Apple devices present adopted us; the other did not. **That is better than
+the nine consecutive failures of findings 36-39 and it is not a clean result**, so it is
+recorded as one success rather than as a capability.
+
+### What this does and does not settle
+
+It **does** establish that the timing model is now right in practice as well as on paper,
+and that a transmitter which keeps its advertised schedule can be adopted by a real Apple
+device.
+
+It **does not** identify what decides adoption. The recomputed overlap figures above show
+peers following us at 9% shared airtime and at 66%, and ignoring us at 18% and at 50%. Five
+candidates were eliminated in findings 36-39 and the timing error was a sixth confound
+running underneath all of them — but removing it has not produced a rule, only a better
+success rate on a sample of one.
+
+The honest next step is still **reception**: `libawdl::follow` can now recover a cluster's
+phase correctly, and a beacon that transmits in *the cluster's* windows rather than its own
+is a different experiment from any run so far.
 
 ## Open, not yet investigated
 
