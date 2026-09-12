@@ -161,3 +161,125 @@ impl DataPathState {
         self.flags & flag::INFRA_BSSID != 0
     }
 }
+
+// -------------------------------------------------------------- tags 32, 33 ---
+//
+// These two appear in no published table. Wireshark's tag enumeration ends at 24 and
+// reports them unnamed; the 2018 paper does not mention them. What follows was derived
+// from captures, and the reasoning is given so it can be challenged.
+
+/// 802.11 operating classes for 6 GHz. 134 is 6 GHz at 160 MHz.
+pub const OPCLASS_6GHZ: std::ops::RangeInclusive<u8> = 131..=136;
+
+pub fn opclass_band(c: u8) -> &'static str {
+    match c {
+        81 | 83 | 84 => "2.4 GHz",
+        115..=130 => "5 GHz",
+        131..=136 => "6 GHz",
+        _ => "?",
+    }
+}
+
+/// A channel with the operating class that gives it meaning.
+///
+/// A bare channel number is ambiguous across bands — 53 exists in 6 GHz and nowhere
+/// useful otherwise — so the class travels with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassChannel {
+    pub channel: u8,
+    pub opclass: u8,
+}
+
+impl ClassChannel {
+    pub fn band(&self) -> &'static str {
+        opclass_band(self.opclass)
+    }
+    pub fn is_6ghz(&self) -> bool {
+        OPCLASS_6GHZ.contains(&self.opclass)
+    }
+}
+
+/// Tag 32 — a single class/channel, with surrounding bytes not yet understood.
+///
+/// **Evidence for the reading.** Across 18 captures every value has this shape:
+///
+/// ```text
+///   00 00 | 86 00 | CC 00 | 04 08 02 | XX XX | 00 00
+///           ^^^^^   ^^^^^
+///           opclass channel, both little-endian u16
+/// ```
+///
+/// The class byte is **always 0x86 = 134**, which is 802.11's operating class for 6 GHz at
+/// 160 MHz. The channel byte takes 0x35 (53), 0x55 (85) and 0x11 (17) — all valid 6 GHz
+/// channel numbers, and 53 is exactly what the Mac in these captures reports for itself
+/// (`Channel: 53 (6GHz, 160MHz)`).
+///
+/// `04 08 02` is constant and unexplained. The two bytes before the trailing zeros vary
+/// (`83 8a`, `01 00`, `c1 c0`, `c0 c0`, `db da`) and are left undecoded rather than named
+/// speculatively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SixGhzInfo {
+    pub channel: ClassChannel,
+    /// Everything after the class/channel pair, kept raw.
+    pub trailing: Vec<u8>,
+}
+
+impl SixGhzInfo {
+    pub const LEN: usize = 13;
+
+    pub fn parse(v: &[u8]) -> Option<SixGhzInfo> {
+        if v.len() < Self::LEN {
+            return None;
+        }
+        let opclass = le::u16(v, 2)? as u8;
+        let channel = le::u16(v, 4)? as u8;
+        Some(SixGhzInfo {
+            channel: ClassChannel { channel, opclass },
+            trailing: v.get(6..)?.to_vec(),
+        })
+    }
+}
+
+/// Tag 33 — class/channel pairs, in the same byte order the channel sequence uses.
+///
+/// ```text
+///   01 00 00 00 | CC OO | 01 | CC OO | XX | 00 00 00 00
+///                 ^^^^^        ^^^^^
+///                 channel then opclass, as OpClass encoding does it
+/// ```
+///
+/// Both pairs have been identical in every capture, which is why it reads as one channel
+/// stated twice rather than two different ones. A value of `00 00` for the first pair with
+/// `11 86` for the second has also been seen, so they are not required to match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SixGhzChannels {
+    pub first: Option<ClassChannel>,
+    pub second: Option<ClassChannel>,
+    pub trailing: Vec<u8>,
+}
+
+impl SixGhzChannels {
+    pub const LEN: usize = 14;
+
+    pub fn parse(v: &[u8]) -> Option<SixGhzChannels> {
+        if v.len() < Self::LEN {
+            return None;
+        }
+        // Channel first, class second -- the opposite of tag 32, and the same as the
+        // channel sequence's OpClass form. Reading either as the other yields a
+        // plausible channel number and the wrong band.
+        let pair = |off: usize| -> Option<ClassChannel> {
+            let channel = le::u8(v, off)?;
+            let opclass = le::u8(v, off + 1)?;
+            if channel == 0 && opclass == 0 {
+                return None;
+            }
+            Some(ClassChannel { channel, opclass })
+        };
+        Some(SixGhzChannels {
+            first: pair(4),
+            second: pair(7),
+            trailing: v.get(9..)?.to_vec(),
+        })
+    }
+}

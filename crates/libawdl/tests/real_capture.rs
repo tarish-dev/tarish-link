@@ -336,3 +336,47 @@ fn version_packs_nibbles_and_arpa_carries_the_host_name() {
     let arpa = Arpa::parse(&a).expect("parses");
     assert_eq!(arpa.name, "tarish1.local");
 }
+
+/// Tags 32 and 33 carry 6 GHz channels — decoded from captures, not from any published
+/// table.
+///
+/// Wireshark's tag enumeration ends at 24 and reports both unnamed. The reading rests on
+/// three things: the class byte is always 0x86 = 134, which is 802.11's operating class for
+/// 6 GHz at 160 MHz; the channel byte takes only 53, 85 and 17, all valid 6 GHz channels;
+/// and 53 is exactly what the Mac in these captures reports for itself
+/// (`Channel: 53 (6GHz, 160MHz)`).
+#[test]
+fn the_undocumented_tags_carry_six_gigahertz_channels() {
+    use libawdl::state::{SixGhzChannels, SixGhzInfo};
+
+    // A verbatim tag 32 value from captures/assoc-connected.pcap.
+    let t32 = [0x00, 0x00, 0x86, 0x00, 0x35, 0x00, 0x04, 0x08, 0x02, 0x83, 0x8a, 0x00, 0x00];
+    let i = SixGhzInfo::parse(&t32).expect("13 bytes, parses");
+    assert_eq!(i.channel.channel, 53);
+    assert_eq!(i.channel.opclass, 134);
+    assert_eq!(i.channel.band(), "6 GHz");
+    assert!(i.channel.is_6ghz());
+
+    // A verbatim tag 33 value from the same capture.
+    let t33 = [
+        0x01, 0x00, 0x00, 0x00, 0x35, 0x86, 0x01, 0x35, 0x86, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let c = SixGhzChannels::parse(&t33).expect("14 bytes, parses");
+    // CHANNEL FIRST here, class second -- the opposite order to tag 32, and the same as
+    // the channel sequence's OpClass form. Swapped, 0x86 reads as channel 134 and 0x35 as
+    // class 53, which is a plausible channel number in the wrong band.
+    assert_eq!(c.first.map(|p| (p.channel, p.opclass)), Some((53, 134)));
+    assert_eq!(c.second.map(|p| (p.channel, p.opclass)), Some((53, 134)));
+    assert_eq!(
+        c.first, c.second,
+        "both pairs have been identical in every capture — one channel stated twice"
+    );
+
+    // An all-zero pair means absent, not channel 0.
+    let absent = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x11, 0x86, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let a = SixGhzChannels::parse(&absent).unwrap();
+    assert_eq!(a.first, None, "00 00 is absent");
+    assert_eq!(a.second.map(|p| p.channel), Some(17), "17 is a valid 6 GHz channel");
+}

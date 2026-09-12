@@ -862,10 +862,14 @@ Neither. The machine reports:
 Channel: 53 (6GHz, 160MHz)    PHY Mode: 802.11be    Signal: -37 dBm
 ```
 
-**It is associated on 6 GHz.** Every operating class observed in an AWDL channel sequence
-is 2.4 GHz (`0x51`) or 5 GHz (`0x80`); nothing encodes a 6 GHz channel. So the association
-has no representation available, and slot 0 falls back to 6 as it would with no association
-at all.
+**It is associated on 6 GHz.** Every operating class observed in an AWDL *channel sequence*
+is 2.4 GHz (`0x51`) or 5 GHz (`0x80`); nothing there encodes a 6 GHz channel. So slot 0
+falls back to 6 as it would with no association at all.
+
+> **Partly corrected by finding 22.** 6 GHz is not unrepresented in the protocol — it is
+> carried in tags 32 and 33, which had no published meaning when this was written. What
+> remains true is that it does not appear in the *channel sequence*, so slot 0 cannot show
+> it and the association-slot test needs a 5 GHz network.
 
 ### Two bands are invisible here, for different reasons
 

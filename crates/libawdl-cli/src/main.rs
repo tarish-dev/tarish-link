@@ -20,7 +20,7 @@ use libawdl::{
     radiotap::Radiotap,
     election::{ElectionParams, ElectionParamsV2},
     service,
-    state::{Arpa, DataPathState, Version},
+    state::{Arpa, DataPathState, SixGhzChannels, SixGhzInfo, Version},
     sync::{ChannelSequence, SyncParams},
     tlv::Stop,
 };
@@ -271,6 +271,7 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
     let mut assoc: BTreeMap<String, u64> = BTreeMap::new();
     let mut hostnames: BTreeMap<String, u64> = BTreeMap::new();
     let mut versions: BTreeMap<String, u64> = BTreeMap::new();
+    let mut sixghz: BTreeMap<String, u64> = BTreeMap::new();
     let mut instances: BTreeMap<String, u64> = BTreeMap::new();
 
     while let Ok(pkt) = cap.next_packet() {
@@ -358,6 +359,29 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
                         if let Some(v) = Version::parse(t.value) {
                             *versions
                                 .entry(format!("v{}.{} {}", v.major, v.minor, v.class_name()))
+                                .or_default() += 1;
+                        }
+                    }
+                    if t.tag == 32 {
+                        if let Some(i) = SixGhzInfo::parse(t.value) {
+                            *sixghz
+                                .entry(format!(
+                                    "tag32 channel {} class {} ({})",
+                                    i.channel.channel,
+                                    i.channel.opclass,
+                                    i.channel.band()
+                                ))
+                                .or_default() += 1;
+                        }
+                    }
+                    if t.tag == 33 {
+                        if let Some(c) = SixGhzChannels::parse(t.value) {
+                            let d = |p: Option<libawdl::state::ClassChannel>| match p {
+                                Some(c) => format!("{} ({})", c.channel, c.band()),
+                                None => "-".into(),
+                            };
+                            *sixghz
+                                .entry(format!("tag33 {} / {}", d(c.first), d(c.second)))
                                 .or_default() += 1;
                         }
                     }
@@ -457,6 +481,12 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
         eprintln!("host names (Arpa, tag 16):");
         for (k, n) in &hostnames {
             eprintln!("  {k:<30} {n}");
+        }
+    }
+    if !sixghz.is_empty() {
+        eprintln!("6 GHz advertisement (tags 32/33 — undocumented, decoded from captures):");
+        for (k, n) in &sixghz {
+            eprintln!("  {k:<44} {n}");
         }
     }
     if !versions.is_empty() {
