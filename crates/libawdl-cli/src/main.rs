@@ -555,7 +555,7 @@ fn usage() -> ! {
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -606,6 +606,10 @@ fn main() {
                 args.iter().position(|a| a == "--metric")
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok()),
+                args.iter().position(|a| a == "--per-window")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1),
             );
         }
         "phase" => {
@@ -969,7 +973,7 @@ fn coverage(files: &[String]) {
 /// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1029,20 +1033,32 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     }
     eprintln!("  not synchronised to any peer's TSF; self-consistent from a monotonic clock");
 
-    // One availability window is 16 TU. Sending every 16 windows is well under Apple's
-    // action-frame period and keeps us from flooding a channel we share.
-    const WINDOWS_PER_FRAME: u32 = 16;
-    let period = std::time::Duration::from_micros(
-        u64::from(WINDOWS_PER_FRAME) * 16 * u64::from(libawdl::sync::TU_US),
-    );
+    // Transmit inside the windows we ADVERTISE, rather than on a fixed period.
+    //
+    // The old loop slept exactly one cycle between frames, which pinned us to whatever
+    // phase the process started on -- measured on the air as 3 of 16 slots, none of them
+    // the ones we announce. `awdl phase` is the check.
+    eprintln!("  transmitting in advertised slots {:?} of 16, {per_window} frame(s) per window",
+        b.advertised_slots());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     let (mut sent_mif, mut sent_psf, mut failed) = (0u64, 0u64, 0u64);
     let mut n = 0u32;
     let mut first_error: Option<String> = None;
 
     while std::time::Instant::now() < deadline {
-        // A real monotonic reading, so aw_counter, aw_remaining and target_tx_time all
-        // describe the same instant. On a radio that reports TSF this should be the TSF.
+        // Only transmit INSIDE a window we advertise.
+        //
+        // The first version of this loop sent unconditionally at the top and then waited,
+        // which fired in slot 2, slept one window, and fired again in slot 3 -- a slot we
+        // do not advertise. Half of every run's frames were in the wrong windows, visible
+        // in `awdl phase` as adjacent pairs, and the frame rate was double what it should
+        // have been. Waiting FIRST is the whole fix.
+        let now_us = epoch.elapsed().as_micros() as u64;
+        let wait = b.us_until_next_advertised_window(now_us);
+        if wait > 0 {
+            std::thread::sleep(std::time::Duration::from_micros(wait));
+            continue;
+        }
         let now_us = epoch.elapsed().as_micros() as u64;
         let is_mif = psf_per_mif == 0 || n % (psf_per_mif + 1) == 0;
         let frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
@@ -1059,7 +1075,16 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         }
         b.advance();
         n += 1;
-        std::thread::sleep(period);
+        // Pace within the window. `per_window` frames fit in one 16 TU window; the next
+        // iteration's wait carries us to the following advertised one.
+        //
+        // This knob exists as an EXPERIMENTAL CONTROL, not a tuning parameter. Trial E
+        // won an election at 22.5 frames/s while trial F lost one at 11.2 with the same
+        // alignment and metric, so rate and window-count were confounded. Holding the
+        // windows correct and raising only the rate is what separates them.
+        std::thread::sleep(std::time::Duration::from_micros(
+            u64::from(libawdl::beacon::AW_US) / u64::from(per_window.max(1)),
+        ));
     }
 
     eprintln!("\nsent {sent_mif} MIF, {sent_psf} PSF, {failed} failed");

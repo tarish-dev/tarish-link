@@ -230,3 +230,42 @@ fn legacy_timing_reproduces_the_original_defect() {
     assert!(seen.len() > 8, "the default must still move: {seen:?}");
     assert!(!good.legacy_timing, "and must never default to the defect");
 }
+
+/// We must transmit in the windows we advertise, not on an arbitrary phase.
+///
+/// Measured on the air, the old beacon occupied 3 of 16 slots and none of them were the
+/// slots it announced — it transmitted every sixteen windows, which is exactly one cycle,
+/// so the phase was whatever the start time happened to be.
+#[test]
+fn the_beacon_can_align_to_the_windows_it_advertises() {
+    let b = Beacon::new(ADDR, 149, "QA");
+    assert_eq!(b.advertised_slots(), vec![2, 8, 10], "no association, so slot 0 is empty");
+
+    let aw = u64::from(AW_US);
+    // Inside an advertised window: transmit now.
+    assert_eq!(b.us_until_next_advertised_window(2 * aw), 0);
+    assert_eq!(b.us_until_next_advertised_window(2 * aw + 500), 0);
+    assert_eq!(b.us_until_next_advertised_window(8 * aw + aw / 2), 0);
+    // Outside one: wait for the next.
+    assert_eq!(b.us_until_next_advertised_window(0), 2 * aw, "slot 0 empty, next is 2");
+    assert_eq!(b.us_until_next_advertised_window(3 * aw), 5 * aw, "3 -> 8");
+    assert_eq!(b.us_until_next_advertised_window(9 * aw), aw, "9 -> 10");
+    // Past the last one, wrap into the next cycle.
+    assert_eq!(b.us_until_next_advertised_window(11 * aw), 7 * aw, "11 -> 18 == 2 of next");
+    assert_eq!(b.us_until_next_advertised_window(15 * aw), 3 * aw);
+
+    // With an association, slot 0 is occupied and becomes a transmit window too.
+    let mut assoc = Beacon::new(ADDR, 149, "QA");
+    assoc.assoc_channel = Some(104);
+    assert_eq!(assoc.advertised_slots(), vec![0, 2, 8, 10]);
+    assert_eq!(assoc.us_until_next_advertised_window(0), 0, "slot 0 is ours now");
+    assert_eq!(assoc.us_until_next_advertised_window(15 * aw), aw, "15 -> 0 of next");
+
+    // Every wait lands us inside an advertised window, from anywhere in the cycle.
+    for i in 0..16u64 {
+        let now = i * aw + 77;
+        let wait = b.us_until_next_advertised_window(now);
+        let landed = ((now + wait) % (16 * aw) / aw) as usize;
+        assert!(b.advertised_slots().contains(&landed), "from slot {i} we land in {landed}");
+    }
+}

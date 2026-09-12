@@ -306,6 +306,47 @@ impl Beacon {
         self.frame(SUBTYPE_PSF, now_us)
     }
 
+    /// The slots we advertise as occupied, in order.
+    pub fn advertised_slots(&self) -> Vec<usize> {
+        self.schedule()
+            .channels
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c != 0)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Microseconds from `now_us` until the start of the next window we advertise.
+    ///
+    /// **This is what makes the schedule we announce and the schedule we keep the same
+    /// thing.** Before this existed the beacon transmitted every sixteen windows — exactly
+    /// one cycle — which meant it sat on one arbitrary phase for a whole run, decided by
+    /// when the process happened to start, while announcing slots 0, 2, 8 and 10. Measured
+    /// on the air it occupied 3 of 16 slots, none of them the advertised ones.
+    ///
+    /// Needs no TSF and no peer: a master is its own reference, and this aligns us to our
+    /// own cycle rather than to anybody else's.
+    ///
+    /// Returns 0 if we are already inside an advertised window, so a caller loops rather
+    /// than sleeping through the window it was waiting for.
+    pub fn us_until_next_advertised_window(&self, now_us: u64) -> u64 {
+        let slots = self.advertised_slots();
+        if slots.is_empty() {
+            return u64::from(AW_US);
+        }
+        let aw = u64::from(AW_US);
+        let cycle = aw * 16;
+        let pos = now_us % cycle;
+        let here = (pos / aw) as usize;
+        if slots.contains(&here) {
+            return 0;
+        }
+        // The next advertised slot in this cycle, or the first one in the next.
+        let next = slots.iter().copied().find(|s| *s > here).unwrap_or(slots[0] + 16);
+        (next as u64) * aw - pos
+    }
+
     /// Count one frame out. Timing no longer lives here — it comes from the clock.
     pub fn advance(&mut self) {
         self.sent = self.sent.wrapping_add(1);

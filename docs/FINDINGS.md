@@ -1746,6 +1746,63 @@ is that **our phase has nothing to do with the schedule we advertise.** We annou
 2, 8 and 10 and then transmit wherever the start time put us. Fixing that needs no TSF and no
 peer — our own cycle is our own reference — and it is the next change worth making.
 
+## 38. ★ What decides whether Apple follows us is WINDOW BREADTH, not metric, timing or rate
+
+Findings 36 and 37 eliminated the metric, the timing mode, and audibility-by-overlap. Four
+more trials against the same fixed peer set — an iPhone at metric 539 and a MacBook at 510 —
+isolate the variable that is left.
+
+| trial | frames | windows we occupy | rate | followed? |
+|---|---|---|---|---|
+| D | 206 | 4/16 | 3.7/s | no |
+| **E** | **1236** | **6/16** | **22.5/s** | **YES, both devices** |
+| F | 618 | 3/16 | 11.2/s | no |
+| **G** | **1236** | **3/16** | **22.5/s** | **no** |
+
+**E and G have identical frame rates and opposite outcomes**, which rules out rate. E and F
+share alignment and differ in both, G separates them. The only property E has that no other
+trial has is **breadth: six of sixteen windows rather than three or four.**
+
+### Why E had six, and why it was an accident
+
+Trial E's beacon transmitted at the top of its loop and waited afterwards, so it fired in an
+advertised window, slept one window, and fired again in the window *after* — which it does
+not advertise. Half its frames were in the wrong place, visible in `awdl phase` as adjacent
+pairs. **That bug is what won the election**, and fixing it in trial F and G lost it again.
+
+### The rule this suggests
+
+We must be present in windows where the peer is **listening**, and we do not know which
+those are. Covering more of the cycle intersects more of them. That fits every trial
+including the ones that looked contradictory:
+
+```text
+  tx-first   peers spread across 12-16/16, us at 3/16   -> they were listening everywhere, followed
+  D          peers narrow (Mac 7/16), us 4/16           -> missed
+  E          us 6/16                                     -> hit
+  F, G       us 3/16, rate irrelevant                    -> missed
+```
+
+It also explains why the shared-airtime figure of finding 37 did not predict anything: that
+measures overlap in **transmission**, and what matters is overlap with **reception**. A node
+transmits in a few windows and may listen in more.
+
+**This is a hypothesis from five trials with one success, not a finding.** The decisive test
+is a sweep: occupy 3, 6, 9 and 12 windows at a fixed rate and see whether being followed
+tracks breadth monotonically. `--per-window` and the advertised-slot machinery already make
+that a one-line change.
+
+### The uncomfortable part
+
+If breadth is what works, the honest reading is that **we succeed by being present more of
+the time than we claim to be** — which is the opposite of a correct AWDL node, and costs
+airtime on a shared channel. A real implementation earns the same result by synchronising:
+knowing the master's TSF tells you exactly which windows the peers attend, so three windows
+in the right places beat six in arbitrary ones.
+
+So this is a measurement of what works, and simultaneously an argument for the TSF path
+rather than a substitute for it.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
