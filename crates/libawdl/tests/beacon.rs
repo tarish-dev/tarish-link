@@ -1,0 +1,149 @@
+//! The beacon, checked against the same real frame the parser was built on.
+
+mod fixture_frame;
+
+use libawdl::{
+    action::{ActionFrame, SUBTYPE_MIF, SUBTYPE_PSF},
+    beacon::Beacon,
+    dot11::{Dot11, Mac, BROADCAST},
+    radiotap::Radiotap,
+    sync::SyncParams,
+};
+
+const ADDR: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+#[test]
+fn a_beacon_frame_parses_as_awdl_through_our_own_reader() {
+    let b = Beacon::new(ADDR, 149, "QA");
+    let f = b.mif(0x1234_5678);
+
+    let d = Dot11::parse(&f).expect("802.11 header");
+    assert!(d.is_action());
+    assert_eq!(d.dst, BROADCAST);
+    assert_eq!(d.src, Mac(ADDR));
+    assert_eq!(d.bssid, Mac(libawdl::action::BSSID));
+
+    let af = ActionFrame::parse(&f[24..]).expect("recognised as AWDL");
+    assert_eq!(af.fixed.subtype, SUBTYPE_MIF);
+    assert_eq!(af.fixed.target_tx_time, 0x1234_5678);
+    let tags: Vec<u8> = af.tlvs().map(|t| t.tag).collect();
+    assert_eq!(tags, vec![4, 5, 18, 24, 12, 7, 17, 21, 16, 2]);
+}
+
+/// Our frame carries every tag an Apple device sends except the four we know about.
+#[test]
+fn the_beacon_omits_only_the_tags_we_cannot_fill() {
+    use std::collections::BTreeSet;
+    let rt = Radiotap::parse(fixture_frame::FRAME).unwrap();
+    let real = rt.payload(fixture_frame::FRAME).unwrap();
+    let theirs: BTreeSet<u8> = ActionFrame::parse(&real[24..]).unwrap().tlvs().map(|t| t.tag).collect();
+
+    let f = Beacon::new(ADDR, 149, "QA").mif(0);
+    let ours: BTreeSet<u8> = ActionFrame::parse(&f[24..]).unwrap().tlvs().map(|t| t.tag).collect();
+
+    let missing: Vec<u8> = theirs.difference(&ours).copied().collect();
+    assert_eq!(missing, vec![6, 32, 33], "tag 7 is filled now; 6 and the 6 GHz pair are not");
+}
+
+/// PSF and MIF differ by identity, not by weight — which is what the captures show, and
+/// not what an earlier version of the beacon assumed.
+///
+/// Apple's mean PSF is 329 bytes against a 626-byte MIF, and the tags it drops are exactly
+/// Arpa and Service Response. A PSF that carried only sync and election would be half the
+/// size of a real one and would be announcing far less state than a peer expects.
+#[test]
+fn a_psf_carries_the_state_set_without_the_identity() {
+    let b = Beacon::new(ADDR, 149, "QA");
+    let (psf_bytes, mif_bytes) = (b.psf(0), b.mif(0));
+    let psf = ActionFrame::parse(&psf_bytes[24..]).unwrap();
+    let mif = ActionFrame::parse(&mif_bytes[24..]).unwrap();
+    assert_eq!(psf.fixed.subtype, SUBTYPE_PSF);
+
+    let ptags: Vec<u8> = psf.tlvs().map(|t| t.tag).collect();
+    let mtags: Vec<u8> = mif.tlvs().map(|t| t.tag).collect();
+    assert_eq!(ptags, vec![4, 5, 18, 24, 12, 7, 17, 21], "the measured PSF set, less tag 6");
+    assert_eq!(mtags, vec![4, 5, 18, 24, 12, 7, 17, 21, 16, 2], "plus Arpa and services");
+
+    // Smaller, but nothing like half: the state set dominates both.
+    assert!(psf_bytes.len() < mif_bytes.len());
+    assert!(psf_bytes.len() * 2 > mif_bytes.len(), "a PSF is most of a MIF, not a fraction");
+}
+
+/// The association is stated in two places and they must agree, because a peer that finds
+/// them disagreeing has no way to tell which is right.
+#[test]
+fn the_association_channel_agrees_between_the_schedule_and_data_path_state() {
+    use libawdl::state::DataPathState;
+    let mut b = Beacon::new(ADDR, 149, "QA");
+    b.assoc_channel = Some(104);
+    let f = b.mif(0);
+    let af = ActionFrame::parse(&f[24..]).unwrap();
+
+    let sync = af.tlvs().find(|t| t.tag == 4).and_then(|t| SyncParams::parse(t.value)).unwrap();
+    let slot0 = sync.channel_sequence.unwrap().control_channels()[0];
+    let dps = af.tlvs().find(|t| t.tag == 12).and_then(|t| DataPathState::parse(t.value)).unwrap();
+
+    assert_eq!(slot0, Some(104), "slot 0 is the association");
+    assert_eq!(dps.infra_channel, Some(104), "and so is Data Path State");
+    assert!(dps.is_associated());
+
+    // With no association, slot 0 is empty and Data Path State says so too.
+    let alone = Beacon::new(ADDR, 149, "QA").mif(0);
+    let af2 = ActionFrame::parse(&alone[24..]).unwrap();
+    let s2 = af2.tlvs().find(|t| t.tag == 4).and_then(|t| SyncParams::parse(t.value)).unwrap();
+    assert_eq!(s2.channel_sequence.unwrap().control_channels()[0], None);
+    let d2 = af2.tlvs().find(|t| t.tag == 12).and_then(|t| DataPathState::parse(t.value)).unwrap();
+    assert!(!d2.is_associated());
+}
+
+/// The counters move, and the tenure ticks on the 192-window boundary rather than smoothly.
+#[test]
+fn the_counters_advance_the_way_apple_devices_do() {
+    use libawdl::election::ElectionParamsV2;
+    let mut b = Beacon::new(ADDR, 149, "QA");
+
+    let tenure_of = |b: &Beacon| {
+        let f = b.mif(0);
+        let af = ActionFrame::parse(&f[24..]).unwrap();
+        ElectionParamsV2::parse(af.tlvs().find(|t| t.tag == 24).unwrap().value).unwrap().self_counter
+    };
+
+    assert_eq!(tenure_of(&b), 0);
+    b.advance(191);
+    assert_eq!(tenure_of(&b), 0, "not a tick yet — the step is on the boundary");
+    b.advance(1);
+    assert_eq!(tenure_of(&b), 1, "192 windows is one tick");
+    assert_eq!(b.sent, 2, "and two frames have gone out");
+
+    // tx_counter reaches the frame as written.
+    let f = b.mif(0);
+    let af = ActionFrame::parse(&f[24..]).unwrap();
+    let sync = SyncParams::parse(af.tlvs().find(|t| t.tag == 4).unwrap().value).unwrap();
+    assert_eq!(sync.tx_counter, 2);
+}
+
+/// We default to losing the election, on purpose.
+///
+/// The first transmit run defaulted to 530 and won: two iPhones and a MacBook elected our
+/// node master, one of them two hops out. The frames were right; the timing was not, and
+/// three Apple devices ended up synchronised to a wall-clock timer. Until this crate can
+/// anchor to a TSF, the correct claim is that we do not want the job.
+#[test]
+fn the_default_metric_loses_to_a_real_apple_device() {
+    use libawdl::beacon::{METRIC_COMPETE, METRIC_DECLINE};
+    use libawdl::election::ElectionParamsV2;
+
+    let b = Beacon::new(ADDR, 149, "QA");
+    assert_eq!(b.metric, METRIC_DECLINE);
+    assert!(METRIC_DECLINE < 510, "Apple devices were observed at 510-530");
+
+    let apple = [0xea, 0x8e, 0x0d, 0xcc, 0x09, 0x73];
+    let ours = ElectionParamsV2::claiming(ADDR, b.metric, 0);
+    let theirs = ElectionParamsV2::claiming(apple, 515, 0);
+    assert!(theirs.beats(&ours, apple, ADDR), "a real device must win against the default");
+    assert!(!ours.beats(&theirs, ADDR, apple));
+
+    // And competing is available, deliberately, for a radio that can hold time.
+    let strong = ElectionParamsV2::claiming(ADDR, METRIC_COMPETE, 0);
+    assert!(strong.beats(&theirs, ADDR, apple), "530 beat 515 on hardware");
+}

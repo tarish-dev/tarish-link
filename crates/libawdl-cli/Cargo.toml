@@ -11,4 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 libawdl = { path = "../libawdl" }
+libawdl-hal = { path = "../libawdl-hal" }
 pcap = "2"

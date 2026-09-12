@@ -6,3 +6,6 @@ license.workspace = true
 description = "The contract between an AWDL implementation and the radio underneath it."
 
 [dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

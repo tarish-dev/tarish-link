@@ -554,6 +554,8 @@ fn usage() -> ! {
     eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif]");
+    eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
 
@@ -587,6 +589,18 @@ fn main() {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             let bucket = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
             timeline(cap, bucket);
+        }
+        "beacon" => {
+            if args.len() < 4 {
+                usage();
+            }
+            beacon(
+                &args[2],
+                &args[3],
+                args.get(4).and_then(|s| s.parse().ok()).unwrap_or(149),
+                args.get(5).and_then(|s| s.parse().ok()).unwrap_or(30),
+                args.get(6).and_then(|s| s.parse().ok()).unwrap_or(2),
+            );
         }
         "coverage" => {
             coverage(&args[2..]);
@@ -917,4 +931,105 @@ fn coverage(files: &[String]) {
     println!("Every one of those bytes round-trips exactly. That is a separate claim from");
     println!("understanding them, and it is the weaker one. A zero-length tag (0, SSTH");
     println!("Request) is a presence flag and has no bytes to understand.");
+}
+
+/// Put frames on the air.
+///
+/// ```text
+///   awdl beacon <managed> <monitor> [channel] [seconds] [psf-per-mif]
+///   awdl beacon wlan1 mon0 149 30 2
+/// ```
+///
+/// **This transmits on a shared channel and needs root.** Everything else in this binary
+/// only listens; this is the one subcommand that other people's devices have to deal with.
+/// It is deliberately time-bounded rather than a daemon.
+///
+/// # What it is honest about
+///
+/// The frames are correct as far as we can make them — ten of the thirteen tags Apple
+/// sends, each pinned by byte equality against a captured device. **The timing is not.** A
+/// real node transmits inside its own Availability Windows anchored to the cluster's TSF;
+/// this emits on a wall-clock timer, because the HAL has no TSF read on this hardware. So
+/// we advertise a schedule we do not keep, which is also what OWL does, and the whole point
+/// of running it is to find out how much that costs.
+///
+/// # How to tell whether it worked
+///
+/// Not by whether it "sent" — `send()` succeeding means the driver accepted the bytes. The
+/// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
+/// advertise a metric and an Apple device must either follow us or beat us, and either way
+/// **its own frames change**. Capture alongside and look at who it names as master.
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32) {
+    use libawdl::beacon::Beacon;
+    use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
+
+    let mut radio = match Nl80211::new(managed, monitor) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cannot reach the radio: {e:?}");
+            std::process::exit(1);
+        }
+    };
+    // Down first, monitor vif second, channel third. Getting this wrong fails as EAGAIN on
+    // every send with nothing in dmesg -- see rawsock's module note.
+    if let Err(e) = radio.bring_up(channel) {
+        eprintln!("bring_up failed: {e:?}");
+        std::process::exit(1);
+    }
+    let addr = match radio.mac_address() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("no MAC for {monitor}: {e:?}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut b = Beacon::new(addr, channel, "QA");
+    eprintln!("beaconing as {} on channel {channel} for {secs}s", libawdl::dot11::Mac(addr));
+    eprintln!("  metric {} — an Apple peer must follow this or beat it", b.metric);
+    eprintln!("  MIF {} bytes, PSF {} bytes, 1 MIF per {psf_per_mif} PSF", b.mif(0).len(), b.psf(0).len());
+    eprintln!("  THE TIMING IS NOT SYNCHRONISED. See the fn comment.");
+
+    // One availability window is 16 TU. Sending every 16 windows is well under Apple's
+    // action-frame period and keeps us from flooding a channel we share.
+    const WINDOWS_PER_FRAME: u32 = 16;
+    let period = std::time::Duration::from_micros(
+        u64::from(WINDOWS_PER_FRAME) * 16 * u64::from(libawdl::sync::TU_US),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let (mut sent_mif, mut sent_psf, mut failed) = (0u64, 0u64, 0u64);
+    let mut n = 0u32;
+    let mut first_error: Option<String> = None;
+
+    while std::time::Instant::now() < deadline {
+        // target_tx_time should be the radio's TSF. We have no TSF on this backend, so it
+        // is the frame counter scaled to microseconds -- monotonic and honest about being
+        // ours rather than the cluster's. A peer that synchronises to it will be wrong,
+        // which is exactly the limitation this run exists to measure.
+        let t = b.aws.wrapping_mul(16 * libawdl::sync::TU_US);
+        let is_mif = psf_per_mif == 0 || n % (psf_per_mif + 1) == 0;
+        let frame = if is_mif { b.mif(t) } else { b.psf(t) };
+        match radio.tx(&frame, TxParams::default()) {
+            Ok(()) => {
+                if is_mif { sent_mif += 1 } else { sent_psf += 1 }
+            }
+            Err(e) => {
+                failed += 1;
+                if first_error.is_none() {
+                    first_error = Some(format!("{e:?}"));
+                }
+            }
+        }
+        b.advance(WINDOWS_PER_FRAME);
+        n += 1;
+        std::thread::sleep(period);
+    }
+
+    eprintln!("\nsent {sent_mif} MIF, {sent_psf} PSF, {failed} failed");
+    if let Some(e) = first_error {
+        eprintln!("first error: {e}");
+        eprintln!("EAGAIN here means another vif on the same phy is up, not a full buffer.");
+    }
+    eprintln!("tx_counter reached {}, aw_counter {}, tenure {}",
+        b.sent, b.aws & 0xffff, libawdl::election::ElectionParamsV2::counter_after(b.tenure_base, b.aws));
 }

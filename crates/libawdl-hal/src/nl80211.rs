@@ -77,6 +77,74 @@ pub struct Nl80211 {
     /// The managed interface on the same phy, which must be held down.
     pub managed: String,
     pub phy: String,
+    /// Opened on first use rather than in `new`, so constructing this on a machine with
+    /// no such interface -- or without root -- is not an error until someone actually
+    /// tries to touch the air.
+    #[cfg(target_os = "linux")]
+    sock: Option<crate::rawsock::RawSock>,
+}
+
+/// The three radiotap fields that make a received frame usable: TSF, frequency, signal.
+///
+/// Duplicated here rather than depending on `libawdl` because the HAL sits *below* the
+/// protocol crate and must not depend upward. It is a dozen lines and the alternative is
+/// a dependency cycle.
+#[cfg(target_os = "linux")]
+fn libawdl_radiotap(b: &[u8]) -> Option<(Option<u64>, Option<u16>, Option<i8>)> {
+    if b.len() < 8 || b[0] != 0 {
+        return None;
+    }
+    let len = u16::from_le_bytes([b[2], b[3]]) as usize;
+    if len < 8 || len > b.len() {
+        return None;
+    }
+    let present = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+    // A chained presence word means more of them before the field data begins.
+    let mut off = 8;
+    let mut word = present;
+    while word & (1 << 31) != 0 {
+        if off + 4 > len {
+            return None;
+        }
+        word = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
+        off += 4;
+    }
+    // Each field is aligned to its own width. Skipping that works on one driver and
+    // misreads on the next.
+    let align = |cur: &mut usize, to: usize| {
+        let r = *cur % to;
+        if r != 0 {
+            *cur += to - r;
+        }
+    };
+    let (mut tsf, mut freq, mut sig) = (None, None, None);
+    if present & 1 != 0 {
+        align(&mut off, 8);
+        if off + 8 <= len {
+            tsf = Some(u64::from_le_bytes(b[off..off + 8].try_into().ok()?));
+        }
+        off += 8;
+    }
+    if present & (1 << 1) != 0 {
+        off += 1; // flags
+    }
+    if present & (1 << 2) != 0 {
+        off += 1; // rate
+    }
+    if present & (1 << 3) != 0 {
+        align(&mut off, 2);
+        if off + 2 <= len {
+            freq = Some(u16::from_le_bytes([b[off], b[off + 1]]));
+        }
+        off += 4; // frequency + channel flags
+    }
+    if present & (1 << 4) != 0 {
+        off += 2; // FHSS
+    }
+    if present & (1 << 5) != 0 && off < len {
+        sig = Some(b[off] as i8);
+    }
+    Some((tsf, freq, sig))
 }
 
 impl Nl80211 {
@@ -100,6 +168,8 @@ impl Nl80211 {
             phy: Self::phy_of(managed)?,
             managed: managed.to_string(),
             monitor: monitor.to_string(),
+            #[cfg(target_os = "linux")]
+            sock: None,
         })
     }
 
@@ -211,16 +281,52 @@ impl crate::Radio for Nl80211 {
         ))
     }
 
-    fn tx(&mut self, _frame: &[u8], _params: TxParamsAlias) -> Result<()> {
-        // Injection is a data-plane operation and belongs on a raw socket bound to the
-        // monitor interface, not on a process spawn. It is wired up in the capture
-        // tool, which already owns a pcap handle; duplicating that here would mean two
-        // handles on one interface.
-        Err(Error::Unsupported("tx is not wired to this backend yet — see the CLI crate"))
+    /// Transmit through an `AF_PACKET` socket opened lazily on the monitor interface.
+    ///
+    /// `params` is accepted and **not yet applied**: the rate would be set with radiotap
+    /// TX fields, and what an Apple device actually uses for action frames has not been
+    /// measured. Sending at the driver default is honest; sending at a rate we guessed
+    /// and then reporting success would not be. See `TxParams::default`.
+    fn tx(&mut self, frame: &[u8], _params: TxParamsAlias) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            if self.sock.is_none() {
+                self.sock = Some(crate::rawsock::RawSock::open(&self.monitor)?);
+            }
+            return self.sock.as_ref().unwrap().tx(frame);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = frame;
+            Err(Error::Unsupported("injection needs AF_PACKET, which is Linux-only"))
+        }
     }
 
-    fn rx(&mut self, _timeout_ms: u32) -> Result<Option<crate::RxFrame>> {
-        Err(Error::Unsupported("rx is not wired to this backend yet — see the CLI crate"))
+    fn rx(&mut self, timeout_ms: u32) -> Result<Option<crate::RxFrame>> {
+        #[cfg(target_os = "linux")]
+        {
+            if self.sock.is_none() {
+                self.sock = Some(crate::rawsock::RawSock::open(&self.monitor)?);
+            }
+            let sock = self.sock.as_ref().unwrap();
+            sock.set_rx_timeout(timeout_ms)?;
+            let mut buf = vec![0u8; 4096];
+            let Some(n) = sock.rx(&mut buf)? else { return Ok(None) };
+            buf.truncate(n);
+            // Radiotap carries the three things that make a frame usable for timing, and
+            // TSFT is the one that matters most -- a frame without it can be parsed and
+            // cannot be synchronised to.
+            let (tsf, freq, signal) = match libawdl_radiotap(&buf) {
+                Some(t) => t,
+                None => (None, None, None),
+            };
+            Ok(Some(crate::RxFrame { bytes: buf, tsf, freq_mhz: freq, signal_dbm: signal }))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = timeout_ms;
+            Err(Error::Unsupported("capture needs AF_PACKET, which is Linux-only"))
+        }
     }
 }
 

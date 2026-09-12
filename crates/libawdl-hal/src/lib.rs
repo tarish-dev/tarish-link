@@ -52,6 +52,11 @@ pub mod caps;
 /// purpose, so the seam is type-checked on whatever machine the work happens on.
 pub mod nl80211;
 
+/// Injection and capture. Genuinely Linux-only: `AF_PACKET` has no equivalent elsewhere,
+/// so unlike `nl80211` this one is compiled out rather than stubbed.
+#[cfg(target_os = "linux")]
+pub mod rawsock;
+
 pub use caps::{Caps, Tier, TsfPrecision, SOCIAL_CHANNELS};
 
 /// A MAC TSF reading, microseconds, as the radio reports it.

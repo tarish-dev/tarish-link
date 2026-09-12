@@ -1513,6 +1513,76 @@ Apple device would ever offer this flow to a non-Apple peer at all. **The last o
 the one that decides whether any of it matters to Tarish**, and it needs a deliberate test on
 the *personal* iPhone, not the managed one.
 
+## 34. ★ libawdl transmitted, and three Apple devices elected it master
+
+First transmission, 2026-09-12. 60 seconds on channel 149 from a Raspberry Pi with an
+MT7612U, one MIF per two PSFs, frames built entirely by `libawdl::beacon`.
+
+The test was never "did `send()` succeed" — that only means the driver accepted bytes. The
+test was whether a real peer **acts** on them, and the election is the cheapest oracle:
+advertise a metric and an Apple device must either follow or beat it, and either way its own
+frames change.
+
+```text
+who names whom as master:
+  00:c0:ca:b0:60:4c  ->  (itself)             186     us
+  ea:8e:0d:cc:09:73  ->  00:c0:ca:b0:60:4c    115     a MacBook, v10.0 macOS
+  2e:14:bd:cc:e0:04  ->  00:c0:ca:b0:60:4c     47     an iPhone, v10.0 iOS
+  8a:ca:5e:9c:a1:73  ->  00:c0:ca:b0:60:4c     13     an iPhone, v10.0 iOS
+```
+
+### The frame that proves it is not the one we sent
+
+A device naming us in its master field could be many things. This one cannot:
+
+```text
+2e:14:bd:cc:e0:04   v1_dist=2  v2_dist=2
+                    master_metric=530        the exact metric we advertised
+                    master_counter=6         our tenure counter, at that moment
+                    parent=ea:8e:0d:cc:09:73 the MacBook
+```
+
+**A two-hop synchronisation tree rooted at our node.** That device never heard us directly —
+it is carrying our metric and our tenure counter, relayed through the Mac. It could only
+hold those values by parsing our frame, believing it, and propagating it.
+
+It also confirms two decodes from earlier the same day, by having Apple devices act on values
+synthesised from them: the second address really is the next hop (finding 26), and
+`master_counter` really is the master's own counter relayed (finding 22).
+
+### What this does and does not establish
+
+**Does:** the 802.11 header, the vendor-specific action wrapper, the twelve-byte fixed
+header, Synchronization Parameters, both Election tags and the channel sequence are correct
+enough for real Apple devices to parse, evaluate and act on. And the 22% of control-plane
+bytes we cannot name did **not** prevent participation — tags 6, 32 and 33 were absent
+entirely and nothing refused us.
+
+**Does not:** anything about the data path, service discovery, or a transfer. Being elected
+master of a synchronisation cluster is the control plane agreeing we exist. It is not AirDrop.
+
+### The part that is a problem, not a result
+
+**We won an election we cannot serve.** This crate has no TSF read on this hardware, so the
+beacon transmits on a wall-clock timer while advertising a schedule of slots 0, 2, 8 and 10.
+Three Apple devices anchored their synchronisation to a master whose clock is not a clock,
+which can only have degraded their AWDL for that minute.
+
+So the default metric is now [`METRIC_DECLINE`], 65 — what `libmosey` advertises, and a
+claim not to want the job. `METRIC_COMPETE` still exists and is correct on a radio that can
+anchor to a TSF. **Winning is the opt-in, not the default**, and the reason is written where
+someone changing it will read it.
+
+### Loose ends worth noting
+
+- We transmit from the adapter's **burned-in MAC**. Every real AWDL device randomises; ours
+  is a stable hardware identifier broadcast continuously.
+- We advertise **device class 2**, which our own table calls "iOS". We are not iOS.
+  `libmosey` also sends 2, so the value may mean something broader than the name suggests —
+  but our label is at best unverified and at worst a misrepresentation.
+- Our MIF is 317 bytes against Apple's mean of 626, because Apple sends **several** Service
+  Response TLVs per frame and we send one.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

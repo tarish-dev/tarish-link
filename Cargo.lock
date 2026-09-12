@@ -69,12 +69,16 @@ name = "libawdl-cli"
 version = "0.1.0"
 dependencies = [
  "libawdl",
+ "libawdl-hal",
  "pcap",
 ]
 
 [[package]]
 name = "libawdl-hal"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libc"

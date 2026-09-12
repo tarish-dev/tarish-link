@@ -285,9 +285,14 @@ action frame, pinned by taking a captured Apple frame apart and rebuilding it by
   `tests/build_frame.rs` asserts the missing set is exactly `{6, 7, 32, 33}`, so it cannot
   grow unnoticed.
 - **Tags 32/33** — conditional on a 6 GHz association, not unconditionally missing.
-- **The transmitter.** Everything above builds bytes; nothing has yet put one in the air.
-  That is `libawdl-hal`'s side, and it is the next real milestone — it is also what §1's
-  version experiment needs.
+- ~~**The transmitter.**~~ ✅ **Done, and it worked.** `libawdl::beacon` builds the frames,
+  `libawdl-hal`'s `rawsock` injects them, and on the first run **two iPhones and a MacBook
+  elected our node master of their cluster** — one of them two hops out, relaying our metric
+  and tenure counter through the other. See FINDINGS 34.
+
+  The 22% of bytes we cannot name did not prevent participation: tags 6, 32 and 33 were
+  absent entirely and nothing refused us. What remains missing is **timing** — we advertise
+  a schedule and keep a wall-clock timer, so the default metric now declines the election.
 
 Everything above is observable in `captures/`, and every claim in this document can be
 re-derived with `awdl profile`.
