@@ -41,15 +41,41 @@ command's output, so adding captures improves it rather than dating it.
 
 ## The gaps that matter, in order
 
-### 1. Version: everyone but Apple announces v3.4
+### 1. Version: everyone but Apple announces v3.4 — and this is NOT a cheap change
 
 Apple devices announce **v10.0**. Both `libmosey` and OWL announce **v3.4** — the same
 number, which suggests a shared lineage or a value nobody revisited. Six major versions of
 drift, and any version-gated behaviour on the Apple side sees us as ancient.
 
-**`libawdl` should announce what current devices announce**, and this is the cheapest
-single change on the list. Note there are *two* version fields — the action-frame header
-(1.0 everywhere) and tag 21 — so be explicit about which.
+An earlier version of this document called announcing v10.0 "the cheapest single change on
+the list". **That was wrong.** A version number is a capability claim: announce v10.0 and
+Apple may expect behaviour we do not implement, trading a known limitation for an unknown
+failure. It is one field to change and a large surface to be judged against.
+
+> **An open question this raises.** Recent iOS shows a matching code before an AirDrop to a
+> non-contact, once per device pair, and only ever between two Apple devices — never for
+> Tarish and never for stock Quick Share. The operator notes it did not exist years ago, and
+> asks whether the version is the gate: a new flow offered to peers announcing something
+> recent, with older peers left on the legacy path.
+>
+> **Plausible, and untested.** A competing explanation is that the code bootstraps
+> *persistent* trust, which needs a durable identity to bind to — Apple devices carry an
+> Apple-signed validation record and we structurally cannot. That fits the layering better:
+> the code lives in the TLS `/Ask` exchange while tag 21 is a Wi-Fi link-layer field, and
+> gating an application-layer trust decision on a link-layer version would be unusual.
+>
+> The synthesis may be both: a version gate, but on an **AirDrop-layer** version in the
+> plists rather than on tag 21.
+>
+> Stock Quick Share does not separate the hypotheses — Google announces v3.4 *and* holds no
+> Apple validation record, so either would explain its exclusion. What it does show is that
+> a full, well-resourced implementation on the same AWDL version has not cleared the gate
+> either.
+>
+> **The decisive test needs `libawdl` transmitting**, since only then do we control tag 21.
+> Announce v10.0, otherwise unchanged, and see whether the flow changes. That is a good
+> reason to build the transmitter, and a reason not to change the version casually before
+> then.
 
 ### 2. The channel sequence is the big one
 
@@ -121,7 +147,9 @@ Ordered by how much each buys:
    the regional social channel, and be absent the rest of the time. This is the one that
    fixes AWDL/Wi-Fi coexistence and cross-band discovery, and no configuration of
    `libmosey` can do it.
-2. **Announce v10.0.** One field.
+2. **Decide on the version deliberately.** Announcing v10.0 is a capability claim, not a
+   cosmetic field — see §1. It is also the only way to test whether the non-contact code
+   flow is version-gated, so it is worth doing as an *experiment* with a way back.
 3. **Emit Service Response** — already implemented, `service::encode_records`.
 4. **Emit Arpa** with a real host name.
 5. **Advertise a credible metric and a counter that moves.**
