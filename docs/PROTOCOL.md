@@ -1,0 +1,102 @@
+# How to run an AWDL experiment here
+
+Written after two findings in one evening were published and then retracted. Both failures
+were methodological, not technical, and both would have been caught by this page.
+
+## What went wrong, so the rules have reasons
+
+**Finding 38** proposed window breadth from three captures with one success, and a sweep
+refuted it. The observation underneath was real; the mechanism guessed at was not.
+
+**Finding 44** claimed the election is decided by metric, from a probe and its converse. The
+converse ran **after** the probe, and the probe is what made the peers organise — so the
+two arms measured different environments. It was written up as "the only experiment in this
+document with a real control". It had a converse. That is not a control.
+
+## The rules
+
+1. **State the outcome measure before running.** Write down what counts as adoption, in
+   frames, and do not adjust it afterwards. The measure used here: *at least 20 frames from
+   a non-us sender naming our address as master, inside one capture.*
+
+2. **Verify the starting state on the air, not from intent.** "The phones are settled" is a
+   measurement — a pre-capture showing one device following another — not an assumption
+   because they have been on a while. `awdl stats <cap>` before every run.
+
+3. **Reset between runs.** Our own transmission changes the thing being measured. Every cell
+   starts from AirDrop off on all Apple devices, air verified empty of Apple senders, then
+   the condition is established fresh.
+
+4. **Counterbalance the order.** Run conditions in an order that does not align with time, so
+   drift over a session cannot masquerade as an effect.
+
+5. **One variable per comparison, and say what the other variables were.** If the peers'
+   cluster state changed between two runs, the runs are not comparable whatever else was held
+   fixed.
+
+6. **A result that does not replicate against a different device set is not a result.**
+   Finding 44 survived a converse and died to a replication.
+
+## The harness
+
+`scratchpad/trial.sh` — `LABEL=X FLAGS="..." ./trial.sh`. Four failure modes are designed
+out of it, each of which produced a confident wrong answer before it was:
+
+- a capture attached before `bring_up` recreates `mon0`, which then captures on a dead
+  interface
+- a failed capture leaving the previous run's file for `scp`, so four runs reported
+  byte-identical results
+- an ssh returning before its beacon exits, leaving two transmitters on one radio
+- a wait loop on `pgrep -f` matching its own command line
+
+Always print the capture's **hash and size** next to its result. Identical hashes across runs
+mean the harness failed, not that the protocol is deterministic.
+
+## The open questions, and the design that settles them
+
+### Q1. Does peer cluster state decide adoption, or does our metric?
+
+Every adoption so far happened while peers were forming or joining; every refusal was against
+a settled cluster; and our metric spanned 65 to 600 on both sides of that line. But metric and
+state have never been varied independently.
+
+**A 2x2, four runs, each from a clean reset:**
+
+| cell | peers | our metric | cluster-state hypothesis predicts | metric hypothesis predicts |
+|---|---|---|---|---|
+| **FH** | forming | 600 | adopt | adopt |
+| **FL** | forming | 50 | **adopt** | refuse |
+| **SH** | settled | 600 | **refuse** | adopt |
+| **SL** | settled | 50 | refuse | refuse |
+
+The two hypotheses disagree in **FL** and **SH**. Those two cells are the experiment; FH and
+SL are the sanity corners.
+
+- *forming*: AirDrop off everywhere, air verified clean, our beacon started, **then** AirDrop
+  switched on — so the peers join a channel we are already on.
+- *settled*: AirDrop on, wait 60 s, verify on the air that one device follows another,
+  **then** start our beacon.
+
+Order: **SL, FH, SH, FL** — the two decisive cells sit third and fourth, and the two
+hypotheses' predictions alternate, so neither can be produced by drift.
+
+### Q2. Does the election comparison matter at all?
+
+Only answerable if Q1 says metric matters. If cluster state decides, then a joining node
+plausibly adopts whatever it hears without comparing, and `beats()` governs nothing we can
+observe from outside — which would be worth knowing.
+
+Counter-first is already refuted independently: a device carrying a counter 4500 times ours,
+at distance 0 so that value was its own `master_counter`, adopted us anyway.
+
+### Q3. What does a settled cluster respond to at all?
+
+If SH refuses — the highest metric in the room against a settled cluster — then nothing we
+advertise moves it, and the question becomes whether anything does: joining its schedule
+(`--follow`), matching its master's address ordering, or waiting for its master to leave.
+That is a separate design and should not be smuggled into Q1.
+
+## What to do with a negative
+
+Record it at the strength it has. "Six runs, metrics 65 to 600, no adoption" is a finding.
+"Metric does not matter" is not, until metric has been varied with everything else held.
