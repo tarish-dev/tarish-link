@@ -1,0 +1,205 @@
+//! How much of the protocol do we actually understand?
+//!
+//! There are two different questions and it is easy to answer the second while believing
+//! you answered the first:
+//!
+//! 1. **Can we reproduce a frame?** Yes, for every tag with a parser — unknown fields are
+//!    carried raw and put back unchanged, so a parse-and-rebuild is byte-exact.
+//! 2. **Do we know what the bytes mean?** That is a different and much smaller number.
+//!
+//! The distinction matters because of what a transmitter has to do. Echoing a frame needs
+//! only (1). **Composing** one needs (2), because every byte we cannot name is a byte we
+//! have to invent — and the usual way to invent it is to copy whatever Apple happened to
+//! send, which is cargo-culting with extra steps and no signal when it is wrong.
+//!
+//! So this module classifies every byte of every tag into one of two buckets:
+//!
+//! - **named** — we can state what the field is and what the value means.
+//! - **opaque** — we reproduce it and cannot describe it. Reserved bytes, fields whose
+//!   meaning is unresolved, bodies we pass through, and whole tags with no parser.
+//!
+//! A field counts as named only if we could *choose* a correct value for it without
+//! copying one. `master_counter` is not named: it has a label from the paper and its
+//! observed values are inconsistent enough that we cannot say what a right one would be.
+
+/// The byte budget for one TLV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Coverage {
+    pub named: usize,
+    pub opaque: usize,
+}
+
+impl Coverage {
+    pub fn total(&self) -> usize {
+        self.named + self.opaque
+    }
+    pub fn add(&mut self, other: Coverage) {
+        self.named += other.named;
+        self.opaque += other.opaque;
+    }
+    pub fn percent_named(&self) -> f64 {
+        if self.total() == 0 {
+            return 0.0;
+        }
+        100.0 * self.named as f64 / self.total() as f64
+    }
+}
+
+/// Classify a channel sequence's bytes, given where it starts in `v`.
+///
+/// The qualifier byte is the interesting one: under `OpClass` it is an operating class,
+/// which we can name and choose. Under `Legacy` it is a flags byte carrying band,
+/// bandwidth and control-channel position that we have never decoded — so a 16-slot
+/// Legacy sequence hides 16 opaque bytes behind a schedule that otherwise reads perfectly.
+fn channel_sequence(v: &[u8]) -> Coverage {
+    use crate::sync::{ChanEncoding, ChannelSequence};
+    let Some(seq) = ChannelSequence::parse(v) else {
+        return Coverage { named: 0, opaque: v.len() };
+    };
+    // count, encoding, duplicate, step, fill
+    let mut c = Coverage { named: 6, opaque: 0 };
+    let slots = seq.channels.len();
+    c.named += slots; // the channel numbers themselves
+    match seq.encoding {
+        ChanEncoding::OpClass => c.named += slots,
+        ChanEncoding::Legacy => c.opaque += slots,
+        ChanEncoding::ChannelNumber => {}
+        ChanEncoding::Unknown(_) => c.opaque += slots,
+    }
+    c
+}
+
+/// Classify one TLV.
+pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
+    let len = v.len();
+    let all_opaque = Coverage { named: 0, opaque: len };
+    match tag {
+        // Service Response: DNS records in a documented encoding, with a compression
+        // dictionary we recovered and test for byte equality. Fully named.
+        2 => Coverage { named: len, opaque: 0 },
+
+        // Synchronization Parameters.
+        4 => {
+            if len < 33 {
+                return all_opaque;
+            }
+            // named: tx_channel, tx_counter, master_channel, guard_time, aw_period,
+            // af_period, aw_ext_len, aw_common_len, aw_remaining, the four ext counts,
+            // master, presence_mode, aw_counter, ap_beacon_alignment_delta.
+            // opaque: flags (we know one bit correlates with association, not the word),
+            // byte 28, and the two trailing bytes.
+            // 30 named: tx_channel 1, tx_counter 2, master_channel 1, guard_time 1,
+            // aw_period 2, af_period 2, aw_ext_len 2, aw_common_len 2, aw_remaining 2,
+            // four ext counts 4, master 6, presence_mode 1, aw_counter 2, ap_beacon 2.
+            // 3 opaque: the flags word, whose bits we cannot name, and byte 28.
+            // They must sum to 33, which is the fixed part.
+            let mut c = Coverage { named: 30, opaque: 3 };
+            debug_assert_eq!(c.total(), 33);
+            c.add(channel_sequence(&v[33..]));
+            // Whatever is left over after the sequence: the trailing bytes.
+            let counted = c.total();
+            c.opaque += len.saturating_sub(counted);
+            c
+        }
+
+        // Channel Sequence: the sequence, plus three bytes confirmed zero in all 7054
+        // samples -- measured, so named as padding rather than assumed.
+        18 => {
+            let mut c = channel_sequence(v);
+            c.named += len.saturating_sub(c.total());
+            c
+        }
+
+        // Election Parameters. opaque: byte 4, and the two past the named fields.
+        5 => {
+            if len < 19 {
+                return all_opaque;
+            }
+            Coverage { named: 18, opaque: len - 18 }
+        }
+
+        // Election Parameters v2. The counters are NOT named: their observed values are
+        // inconsistent between devices in one capture and we cannot say what a correct
+        // one would be. Nor is the second address, whose role is undocumented.
+        24 => {
+            if len < 40 {
+                return all_opaque;
+            }
+            Coverage { named: 18, opaque: len - 18 }
+        }
+
+        // Data Path State: the bitmap and the fields it selects are named; the extended
+        // block and the UMI options blob are not.
+        12 => {
+            use crate::state::{flag, DataPathState};
+            let Some(s) = DataPathState::parse(v) else { return all_opaque };
+            let mut c = Coverage { named: 2, opaque: 0 }; // the bitmap
+            if s.flags & flag::COUNTRY != 0 {
+                c.named += 3;
+            }
+            if s.flags & flag::SOCIAL_CHANNEL != 0 {
+                c.named += 2;
+            }
+            if s.flags & flag::INFRA_BSSID != 0 {
+                c.named += 8;
+            }
+            if s.flags & flag::INFRA_ADDRESS != 0 {
+                c.named += 6;
+            }
+            if s.flags & flag::AWDL_ADDRESS != 0 {
+                c.named += 6;
+            }
+            if s.flags & flag::UMI != 0 {
+                c.named += 2;
+            }
+            // Everything else -- UMI options, the extended flags word and its tail.
+            c.opaque += len.saturating_sub(c.total());
+            c
+        }
+
+        // Arpa: the host name is named, the flags byte is not.
+        16 => {
+            if len < 1 {
+                return all_opaque;
+            }
+            Coverage { named: len - 1, opaque: 1 }
+        }
+
+        // Version: packed nibbles and a device class we have a table for.
+        21 => Coverage { named: len, opaque: 0 },
+
+        // 802.11 Container: the element headers are named, the bodies are radio
+        // capability bits we pass through without decoding.
+        17 => {
+            use crate::state::Ieee80211Container;
+            let Some(c) = Ieee80211Container::parse(v) else { return all_opaque };
+            let headers = c.elements.len() * 2;
+            Coverage { named: headers, opaque: len - headers }
+        }
+
+        // The 6 GHz tags. Both are a class/channel pair -- which we can name and choose --
+        // followed by a raw remainder that has never been decoded. Tag 33's is the larger
+        // share, and the two pairs inside it have been identical in every capture without
+        // being required to be.
+        32 => {
+            use crate::state::SixGhzInfo;
+            let Some(i) = SixGhzInfo::parse(v) else { return all_opaque };
+            let _ = i;
+            Coverage { named: 2, opaque: len - 2 }
+        }
+        33 => {
+            use crate::state::SixGhzChannels;
+            let Some(c) = SixGhzChannels::parse(v) else { return all_opaque };
+            let named = 2 * (usize::from(c.first.is_some()) + usize::from(c.second.is_some()));
+            Coverage { named, opaque: len - named }
+        }
+
+        // Everything else has no parser at all.
+        _ => all_opaque,
+    }
+}
+
+/// Whether we have any decoder for a tag.
+pub fn is_decoded(tag: u8) -> bool {
+    matches!(tag, 2 | 4 | 5 | 12 | 16 | 17 | 18 | 21 | 24 | 32 | 33)
+}

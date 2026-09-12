@@ -39,6 +39,66 @@ command's output, so adding captures improves it rather than dating it.
 
 ---
 
+## How much of this do we actually understand?
+
+**63% of the control-plane bytes, and the other 37% we copy.** Run `awdl coverage
+captures/*.pcap` to regenerate this; it is measured, not estimated.
+
+Two claims get conflated and only one of them is strong:
+
+- *"We can reproduce any frame byte for byte."* True. Every tag with a parser carries its
+  unknown fields raw and puts them back unchanged, and `tests/build_*.rs` pin that against
+  real captures.
+- *"We understand the protocol."* **Not true, and the first claim is no evidence for it.**
+  A field carried raw round-trips perfectly while telling us nothing.
+
+The difference is exactly what a transmitter runs into. Echoing a frame needs only the
+first. *Composing* one needs the second, because every byte we cannot name is a byte we
+have to invent — and the tempting way to invent it is to copy whatever Apple sent, which
+is cargo-culting with no signal when it is wrong.
+
+| tag | | named | note |
+|---|---|---|---|
+| 2 | Service Response | 100% | it is DNS, and a documented encoding |
+| 18 | Channel Sequence | 100% | |
+| 21 | Version | 100% | |
+| 16 | Arpa | 97% | the flags byte is not named |
+| 5 | Election Parameters | 86% | |
+| 4 | Synchronization Parameters | 78% | the flags word, byte 28, the trailing pair, and 16 Legacy qualifier bytes |
+| 12 | Data Path State | 50% | the extended block and UMI options are opaque |
+| 24 | Election Parameters v2 | 45% | second address, both counters, 8 reserved |
+| 33 | 6 GHz channels | 24% | |
+| 17 | 802.11 Container | 14% | the element bodies are radio capability bits |
+| 32 | 6 GHz info | 15% | |
+| 6 | Service Parameters | **0%** | no parser |
+| 7 | HT Capabilities | **0%** | no parser |
+| 35 | *unrecognised* | **0%** | not in any published table, 2 bytes, `01 01` |
+
+Counting Service Response flatters the figure to 77.9%: it is 40% of all bytes on the air
+and it is the one thing that was already specified elsewhere. The number that matters for
+building a transmitter is the 63%.
+
+### "Are you sure of them in every frame?"
+
+A separate question, and the lengths column answers it. Some tags have one shape in all
+18157 frames and some do not:
+
+- **Invariant** — 4 (73 bytes), 5 (21), 17 (14), 18 (41), 21 (2), 24 (40). One shape each,
+  every frame, every vendor. These are fixed structs and can be treated as such.
+- **Variable** — 12 (15 or 47, by whether the device is associated), 16 (15 or 40),
+  32 (13), 33 (14), 2 (35 distinct lengths, which is expected of DNS records).
+- **Not a struct at all** — **tag 6 appears in eight different lengths** (9, 10, 11, 13 and
+  four more) and **tag 7 in three** (8, 9, 20). Whatever these are, they are not a fixed
+  layout, and the published names for them describe nothing we have confirmed.
+
+### What that means for sequencing
+
+The transmitter is not blocked on the remaining 37% — a frame carrying tags 4, 5, 18, 21,
+24, 12, 16, 17 and 2 has the shape of a real one, and the fastest way to learn whether the
+opaque bytes matter is to send a frame without them and watch a real peer. But it should be
+done knowing that is the experiment being run, rather than in the belief that the protocol
+is decoded. It is not.
+
 ## The gaps that matter, in order
 
 ### 1. Version: everyone but Apple announces v3.4 — and this is NOT a cheap change

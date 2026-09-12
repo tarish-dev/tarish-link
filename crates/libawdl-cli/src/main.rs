@@ -553,6 +553,7 @@ fn usage() -> ! {
     eprintln!("  awdl stats <file.pcap>   counts only, no per-frame output");
     eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
+    eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
     std::process::exit(2)
 }
 
@@ -586,6 +587,9 @@ fn main() {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             let bucket = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
             timeline(cap, bucket);
+        }
+        "coverage" => {
+            coverage(&args[2..]);
         }
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
@@ -818,4 +822,99 @@ fn dump_tlv<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, tag: u8, fro
         }
         println!("];");
     }
+}
+
+/// How much of what is actually on the air can we NAME, as opposed to merely reproduce.
+///
+/// The two are different and the difference is the whole point. Every tag with a parser
+/// round-trips byte for byte, because unknown fields are carried raw — so "we can rebuild
+/// any frame" is true and says nothing about understanding. What a transmitter needs is
+/// the other number: a byte we cannot name is a byte we have to invent, and inventing it
+/// usually means copying whatever Apple sent, which is cargo-culting with no signal when
+/// it is wrong.
+///
+/// Weighted by frames, not by tags. A tag in every frame matters more than one seen twice.
+fn coverage(files: &[String]) {
+    use libawdl::coverage::{is_decoded, of_tlv, Coverage};
+    use std::collections::BTreeMap;
+
+    let mut per_tag: BTreeMap<u8, (Coverage, u64)> = BTreeMap::new();
+    // "Are you sure of them in every frame?" is a second question, and shape variance is
+    // how to answer it: a tag that is 9 bytes from one device and 20 from another is not
+    // a fixed struct, whatever a table says its fields are.
+    let mut lengths: BTreeMap<u8, BTreeMap<usize, u64>> = BTreeMap::new();
+    let mut frames: u64 = 0;
+
+    for f in files {
+        let Ok(mut cap) = pcap::Capture::from_file(f) else {
+            eprintln!("skipping {f}: not a capture");
+            continue;
+        };
+        while let Ok(pkt) = cap.next_packet() {
+            let Seen::Awdl { af, .. } = classify(pkt.data) else { continue };
+            frames += 1;
+            for t in af.tlvs() {
+                let e = per_tag.entry(t.tag).or_insert((Coverage::default(), 0));
+                e.0.add(of_tlv(t.tag, t.value));
+                e.1 += 1;
+                *lengths.entry(t.tag).or_default().entry(t.value.len()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    if frames == 0 {
+        eprintln!("no AWDL frames");
+        return;
+    }
+
+    let mut total = Coverage::default();
+    let mut control = Coverage::default();
+    println!("{frames} AWDL action frames\n");
+    println!(
+        "{:<4} {:<28} {:>7} {:>9} {:>9} {:>6}  {}",
+        "tag", "name", "TLVs", "named", "opaque", "%", "lengths seen"
+    );
+    for (tag, (c, n)) in &per_tag {
+        total.add(*c);
+        // Service Response is DNS -- a documented encoding we happen to carry. Counting it
+        // with the rest flatters the number, because the tags a transmitter has to compose
+        // from nothing are the other ones.
+        if *tag != 2 {
+            control.add(*c);
+        }
+        let shapes = lengths.get(tag).map(|m| {
+            let mut v: Vec<String> = m.iter().map(|(l, n)| format!("{l}x{n}")).collect();
+            if v.len() > 4 {
+                let extra = v.len() - 4;
+                v.truncate(4);
+                v.push(format!("+{extra} more"));
+            }
+            v.join(" ")
+        }).unwrap_or_default();
+        let pct = if c.total() == 0 { "  n/a".to_string() } else { format!("{:>5.1}", c.percent_named()) };
+        println!(
+            "{:<4} {:<28} {:>7} {:>9} {:>9} {}  {}{}",
+            tag,
+            libawdl::tlv::tag_name(*tag),
+            n,
+            c.named,
+            c.opaque,
+            pct,
+            shapes,
+            if is_decoded(*tag) { "" } else { "   NO PARSER" }
+        );
+    }
+    println!();
+    println!(
+        "all TLVs:        {:>9} bytes   named {:>9} ({:.1}%)   opaque {:>9}",
+        total.total(), total.named, total.percent_named(), total.opaque
+    );
+    println!(
+        "without tag 2:   {:>9} bytes   named {:>9} ({:.1}%)   opaque {:>9}",
+        control.total(), control.named, control.percent_named(), control.opaque
+    );
+    println!();
+    println!("Every one of those bytes round-trips exactly. That is a separate claim from");
+    println!("understanding them, and it is the weaker one. A zero-length tag (0, SSTH");
+    println!("Request) is a presence flag and has no bytes to understand.");
 }
