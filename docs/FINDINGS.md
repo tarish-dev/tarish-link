@@ -1692,6 +1692,60 @@ What changes is the claim's strength. "libawdl can be elected master" is true an
 demonstrated once. "libawdl will be elected master" is **not** supported, and the deciding
 variable is still unidentified.
 
+## 37. We were followed when we overlapped LEAST — audibility is not the gate
+
+Finding 36 left two candidates for why being elected is not reproducible. The first — that a
+wall-clock transmitter lands in a synchronised peer's listening windows only by coincidence —
+is now **refuted, and inverted**.
+
+`awdl phase` folds each frame's timestamp onto the 262144 µs cycle and buckets it into
+sixteen windows.
+
+| run | our shared airtime with Apple peers | followed? |
+|---|---|---|
+| `tx-first` | **4%, 12%, 12%** | **yes, all three** |
+| `trial-D` | **32%, 56%** | **no** |
+
+More overlap, less influence. Whatever decides this, it is not whether they can hear us.
+
+### The instrument, and why its answer is trustworthy here
+
+This radio reports **no TSFT at all** — 0 of 801 frames in every capture we hold — so the fold
+uses the host's capture timestamp, which for a USB adapter is when the frame reached the
+kernel rather than when it was on the air. That could easily have been too coarse to resolve
+a 16 TU window, so the Apple senders were used as a control **before** reading anything into
+our own numbers: in `two-iphones-awdl.pcap` three Apple devices each land in **3 of 16 slots**
+with 68–85% mutual overlap. Known structure, clearly resolved. The instrument can see windows.
+
+### What the same data suggests instead
+
+The peers' own spread tracks the outcome better than ours does:
+
+```text
+  tx-first    Apple devices at 12/16 and 16/16 slots, 48-85% mutual   -> they adopted us
+  trial-D     the MacBook down to 7/16, locked to the iPhone          -> it ignored us
+  two-iphones Apple only, 3/16 each, 85% mutual                       -> fully settled
+```
+
+A device spread across most of the cycle looks like one that is *searching*; a device
+concentrated in a few windows looks like one that has *settled*. The run where we were
+adopted is the run where the peers were spread out.
+
+**This is a correlation over three captures and it is not a finding.** It is, however, the
+first hypothesis here that fits all the evidence including the inverted overlap result, and
+it is testable: capture a peer as it joins a cluster and watch its occupancy narrow.
+
+### A concrete defect it did expose
+
+Our beacon transmits every sixteen windows — **exactly one cycle** — so it lands on a single
+phase for a whole run, and which phase is decided by when the process happened to start. The
+measurement confirms it: we occupy 3-4 of 16 slots, tightly.
+
+That is not wrong by itself; Apple's settled devices are just as concentrated. What is wrong
+is that **our phase has nothing to do with the schedule we advertise.** We announce slots 0,
+2, 8 and 10 and then transmit wherever the start time put us. Fixing that needs no TSF and no
+peer — our own cycle is our own reference — and it is the next change worth making.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

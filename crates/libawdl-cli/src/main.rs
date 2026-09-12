@@ -554,6 +554,7 @@ fn usage() -> ! {
     eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
+    eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
@@ -606,6 +607,10 @@ fn main() {
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok()),
             );
+        }
+        "phase" => {
+            let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
+            phase(cap);
         }
         "coverage" => {
             coverage(&args[2..]);
@@ -1069,4 +1074,113 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         Beacon::aws_at(end_us) & 0xffff,
         libawdl::election::ElectionParamsV2::counter_after(b.tenure_base, Beacon::aws_at(end_us))
     );
+}
+
+/// Where in the AWDL cycle does each node actually transmit?
+///
+/// A cycle is sixteen Availability Windows of 16 TU, 262144 us in total. A node is present
+/// in only a few of those windows -- Apple occupies four of sixteen -- so **two nodes can
+/// only hear each other in a window they both attend.** Advertising a schedule is not the
+/// same as keeping one, and this is the measurement that tells them apart.
+///
+/// Each frame's radiotap TSFT is folded onto the cycle and bucketed into sixteen slots.
+/// The absolute phase is the capturing radio's, not the cluster's, so **slot numbers here
+/// are not the slot numbers in a channel sequence** -- what is comparable is the SHAPE:
+/// which senders concentrate, which spread, and whether two senders concentrate in the
+/// same place.
+///
+/// The specific thing this was built to check: our beacon transmits every sixteen windows,
+/// which is exactly one cycle, so it should land on a single phase for a whole run -- and
+/// whether that phase coincides with a peer's is then a matter of when the process
+/// happened to start.
+fn phase<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
+    use std::collections::BTreeMap;
+
+    const SLOTS: u64 = 16;
+    const TU: u64 = 1024;
+    const AW_US: u64 = 16 * TU;
+    const CYCLE_US: u64 = SLOTS * AW_US;
+
+    let mut hist: BTreeMap<String, [u64; 16]> = BTreeMap::new();
+    let mut no_tsf: u64 = 0;
+    let mut total: u64 = 0;
+
+    while let Ok(pkt) = cap.next_packet() {
+        let Seen::Awdl { rt, dot11, .. } = classify(pkt.data) else { continue };
+        total += 1;
+        // TSFT is the right clock and this radio does not report it -- 0 of 801 frames in
+        // every capture we hold. Falling back to the host's capture timestamp, which is a
+        // USB adapter's idea of when the frame reached the kernel, not when it was on the
+        // air. THAT MAY BE FAR TOO COARSE, which is why the Apple senders act as the
+        // control: they are known to occupy four windows of sixteen, so if their
+        // distribution comes out flat the instrument cannot see windows at all and nothing
+        // below means anything.
+        let t = match rt.tsft {
+            Some(t) => t,
+            None => {
+                no_tsf += 1;
+                (pkt.header.ts.tv_sec as u64).wrapping_mul(1_000_000)
+                    + pkt.header.ts.tv_usec as u64
+            }
+        };
+        let slot = ((t % CYCLE_US) / AW_US) as usize;
+        hist.entry(dot11.src.to_string()).or_insert([0; 16])[slot.min(15)] += 1;
+    }
+
+    if total == 0 {
+        eprintln!("no AWDL frames");
+        return;
+    }
+    if no_tsf > 0 {
+        println!("{total} AWDL frames; {no_tsf} had NO TSFT — host capture timestamps used instead");
+        println!("READ THE APPLE SENDERS FIRST: they occupy four windows of sixteen. If they");
+        println!("look flat here, the timestamps cannot resolve windows and nothing below counts.");
+    } else {
+        println!("{total} AWDL frames, all with TSFT");
+    }
+    println!("(slot numbers are the capturing radio's phase, not the cluster's — compare shapes, not indices)\n");
+
+    for (src, h) in &hist {
+        let n: u64 = h.iter().sum();
+        if n == 0 {
+            continue;
+        }
+        let occupied = h.iter().filter(|c| **c > 0).count();
+        let bars: String = h
+            .iter()
+            .map(|c| {
+                let frac = *c as f64 / n as f64;
+                match (frac * 16.0) as u32 {
+                    0 if *c == 0 => '.',
+                    0 => '\u{2581}',
+                    1 => '\u{2582}',
+                    2 => '\u{2583}',
+                    3..=4 => '\u{2584}',
+                    5..=7 => '\u{2585}',
+                    8..=11 => '\u{2586}',
+                    _ => '\u{2588}',
+                }
+            })
+            .collect();
+        println!("  {src}  [{bars}]  {n:>5} frames in {occupied}/16 slots");
+    }
+
+    // The comparison that matters: does any pair of senders share their busiest slots?
+    println!();
+    let keys: Vec<&String> = hist.keys().collect();
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            let (a, b) = (&hist[keys[i]], &hist[keys[j]]);
+            let (na, nb): (u64, u64) = (a.iter().sum(), b.iter().sum());
+            if na == 0 || nb == 0 {
+                continue;
+            }
+            // Overlap: the probability mass they share, slot by slot. 1.0 means identical
+            // distributions, 0.0 means they are never on the air at the same time.
+            let overlap: f64 = (0..16)
+                .map(|k| (a[k] as f64 / na as f64).min(b[k] as f64 / nb as f64))
+                .sum();
+            println!("  {} vs {}  shared airtime {:.0}%", keys[i], keys[j], overlap * 100.0);
+        }
+    }
 }
