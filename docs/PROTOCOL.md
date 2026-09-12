@@ -52,6 +52,28 @@ out of it, each of which produced a confident wrong answer before it was:
 Always print the capture's **hash and size** next to its result. Identical hashes across runs
 mean the harness failed, not that the protocol is deterministic.
 
+## Establishing a clean room is harder than it sounds
+
+The forming cells need an air with no Apple senders on it, and **that state cannot be
+produced on demand**. Within one hour, switching AirDrop off on every device gave a
+completely silent channel once — 55 frames, all ours — and two minutes of continued
+transmission the next time, from devices still naming each other as master.
+
+Which of these explains it is not known: AWDL teardown may simply be slow; a Mac keeps
+`awdl0` UP for Handoff, Sidecar and AirPlay regardless of the AirDrop setting; or another
+Apple device in range that nobody thought about — a Watch, an iPad, an Apple TV — participates
+without anyone touching AirDrop.
+
+**And AWDL addresses rotate per session**, so a capture cannot even tell you how many distinct
+devices are present, let alone which. Four different addresses appeared across four
+consecutive twenty-second captures in a room believed to hold two phones.
+
+The consequence for this protocol: **verify the empty room immediately before the run and
+abort if it is not empty.** Do not assume a wait is sufficient, and do not infer device count
+from addresses. If a clean room cannot be had, run only the cells that do not need one and
+say which cells are missing — half a factorial reported as a factorial is how findings 38 and
+44 happened.
+
 ## The open questions, and the design that settles them
 
 ### Q1. Does peer cluster state decide adoption, or does our metric?
