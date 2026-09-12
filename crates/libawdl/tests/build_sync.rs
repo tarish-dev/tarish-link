@@ -115,3 +115,73 @@ fn an_unrepresentable_sequence_is_refused() {
     unknown.encoding = ChanEncoding::Unknown(7);
     assert!(unknown.encode().is_none(), "an unknown encoding has no known stride");
 }
+
+mod fixture_frame;
+
+/// A whole captured frame, taken apart and put back together byte for byte.
+///
+/// This is the test the transmitter rests on. The TLV builders each prove one tag; this
+/// proves the thing that carries them — the 802.11 header, the vendor-specific action
+/// wrapper, the 12-byte fixed block, and every TLV in its original order with its
+/// original length encoding. A frame that differs from this by one byte is a frame an
+/// Apple device may simply ignore, with nothing logged anywhere to say why.
+#[test]
+fn a_whole_apple_frame_survives_parse_and_rebuild() {
+    use libawdl::{action::ActionFrame, dot11::{management_header, Dot11, Mac}, radiotap::Radiotap};
+
+    let rt = Radiotap::parse(fixture_frame::FRAME).expect("radiotap parses");
+    let body80211 = rt.payload(fixture_frame::FRAME).expect("has a payload");
+    let d = Dot11::parse(body80211).expect("802.11 header parses");
+    assert!(d.is_action());
+
+    // The 802.11 header, rebuilt from its parsed parts.
+    let seq = u16::from_le_bytes([body80211[22], body80211[23]]) >> 4;
+    let rebuilt_hdr = management_header(d.dst, d.src, seq);
+    assert_eq!(
+        &rebuilt_hdr[..],
+        &body80211[..24],
+        "the 24-byte management header differs; duration and the BSSID are the usual causes"
+    );
+    assert_eq!(d.bssid, Mac(libawdl::action::BSSID), "every AWDL frame carries this BSSID");
+
+    // The action frame body, rebuilt from its parsed parts.
+    let af = ActionFrame::parse(&body80211[24..]).expect("AWDL action frame parses");
+    let tlvs: Vec<(u8, Vec<u8>)> = af.tlvs().map(|t| (t.tag, t.value.to_vec())).collect();
+    assert!(tlvs.len() > 3, "the fixture carries a real set of tags, not one");
+
+    let rebuilt = libawdl::action::encode_body(&af.fixed, &tlvs);
+    let original = &body80211[24..];
+    assert_eq!(
+        rebuilt.len(),
+        original.len(),
+        "body length differs — rebuilt {} vs captured {}",
+        rebuilt.len(),
+        original.len()
+    );
+    if rebuilt != original {
+        let i = rebuilt.iter().zip(original).position(|(a, b)| a != b).unwrap();
+        panic!("body byte {i} differs: rebuilt 0x{:02x}, captured 0x{:02x}", rebuilt[i], original[i]);
+    }
+}
+
+/// The header version is a packed pair of nibbles, and it is NOT the version in tag 21.
+#[test]
+fn the_header_version_is_one_point_oh_and_is_not_tag_21() {
+    use libawdl::action::{Fixed, HEADER_VERSION};
+
+    let f = Fixed::for_tx(libawdl::action::SUBTYPE_MIF, 0x1234_5678);
+    assert_eq!(f.version_major, 1);
+    assert_eq!(f.version_minor, 0);
+    assert_eq!(f.encode()[5], HEADER_VERSION, "0x10 is 1.0, not 16");
+    assert_eq!(f.encode()[5], 0x10);
+}
+
+/// Broadcast frames carry duration 0; unicast frames carry 48. Measured, both.
+#[test]
+fn duration_follows_the_destination() {
+    use libawdl::dot11::{management_header, Mac, BROADCAST};
+
+    let src = Mac([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    assert_eq!(management_header(BROADCAST, src, 0)[2..4], [0, 0]);
+    assert_eq!(management_header(Mac([0x8a; 6]), src, 0)[2..4], [48, 0]);
+}

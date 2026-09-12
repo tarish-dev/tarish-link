@@ -104,3 +104,30 @@ impl Dot11 {
         b.get(self.body_offset..)
     }
 }
+
+/// Broadcast, which is where 18091 of the 18157 AWDL action frames in `captures/` go.
+/// The other 66 are unicast to one peer.
+pub const BROADCAST: Mac = Mac([0xff; 6]);
+
+/// Build the 24-byte management header for an AWDL action frame.
+///
+/// `duration` follows from the destination and is therefore not a parameter: a broadcast
+/// frame is never acknowledged and carries 0, a unicast frame carries 48 µs to cover the
+/// ACK. Both were measured, and getting it backwards is the kind of thing that works on a
+/// forgiving peer and not on a real one.
+///
+/// `seq` occupies the top 12 bits of the sequence-control field; the low 4 are the
+/// fragment number, which is 0 because AWDL action frames are never fragmented.
+pub fn management_header(dst: Mac, src: Mac, seq: u16) -> [u8; 24] {
+    let mut h = [0u8; 24];
+    // Frame control: version 0, type management (0), subtype action (13).
+    h[0] = (SUBTYPE_ACTION << 4) | (TYPE_MANAGEMENT << 2);
+    h[1] = 0;
+    let duration: u16 = if dst == BROADCAST { 0 } else { 48 };
+    h[2..4].copy_from_slice(&duration.to_le_bytes());
+    h[4..10].copy_from_slice(&dst.0);
+    h[10..16].copy_from_slice(&src.0);
+    h[16..22].copy_from_slice(&crate::action::BSSID);
+    h[22..24].copy_from_slice(&(seq << 4).to_le_bytes());
+    h
+}
