@@ -556,11 +556,150 @@ fn main() {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             run(cap, args[1] == "stats");
         }
+        "profile" => {
+            let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
+            profile(cap);
+        }
         "timeline" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             let bucket = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
             timeline(cap, bucket);
         }
         _ => usage(),
+    }
+}
+
+/// Per-sender profile: what one implementation actually puts on the air.
+///
+/// **This exists to make the gap table reproducible.** We are building a replacement for
+/// `libmosey`, and the specification for it is the difference between what Apple sends,
+/// what `libmosey` sends, and what OWL sends. A table typed out by hand goes stale the
+/// moment another capture is taken; this regenerates it.
+///
+/// Run it over captures from each implementation and compare the output.
+fn profile<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
+    use std::collections::BTreeSet;
+
+    struct Prof {
+        frames: u64,
+        psf: u64,
+        mif: u64,
+        tags: BTreeMap<u8, u64>,
+        seq_shapes: BTreeSet<String>,
+        aw_periods: BTreeSet<u16>,
+        metrics: BTreeSet<u32>,
+        counters: BTreeSet<u32>,
+        versions: BTreeSet<String>,
+        assoc_channels: BTreeSet<u16>,
+        six_ghz: BTreeSet<u8>,
+        services: BTreeSet<String>,
+        host_names: BTreeSet<String>,
+    }
+    impl Default for Prof {
+        fn default() -> Self {
+            Prof {
+                frames: 0, psf: 0, mif: 0,
+                tags: BTreeMap::new(),
+                seq_shapes: BTreeSet::new(), aw_periods: BTreeSet::new(),
+                metrics: BTreeSet::new(), counters: BTreeSet::new(),
+                versions: BTreeSet::new(), assoc_channels: BTreeSet::new(),
+                six_ghz: BTreeSet::new(), services: BTreeSet::new(),
+                host_names: BTreeSet::new(),
+            }
+        }
+    }
+
+    let mut by_sender: BTreeMap<String, Prof> = BTreeMap::new();
+
+    while let Ok(pkt) = cap.next_packet() {
+        let Seen::Awdl { dot11, af, .. } = classify(pkt.data) else { continue };
+        let p = by_sender.entry(dot11.src.to_string()).or_default();
+        p.frames += 1;
+        match af.fixed.subtype {
+            libawdl::action::SUBTYPE_PSF => p.psf += 1,
+            libawdl::action::SUBTYPE_MIF => p.mif += 1,
+            _ => {}
+        }
+        for t in af.tlvs() {
+            *p.tags.entry(t.tag).or_default() += 1;
+            match t.tag {
+                2 => {
+                    for r in service::records(t.value) {
+                        if let service::Record::Ptr { name, .. } = &r {
+                            p.services.insert(name.clone());
+                        }
+                    }
+                }
+                4 => {
+                    if let Some(sp) = SyncParams::parse(t.value) {
+                        p.aw_periods.insert(sp.aw_period);
+                    }
+                }
+                12 => {
+                    if let Some(d) = DataPathState::parse(t.value) {
+                        if let Some(ch) = d.infra_channel {
+                            p.assoc_channels.insert(ch);
+                        }
+                    }
+                }
+                16 => {
+                    if let Some(a) = Arpa::parse(t.value) {
+                        p.host_names.insert(a.name);
+                    }
+                }
+                18 => {
+                    if let Some(cs) = ChannelSequence::parse(t.value) {
+                        p.seq_shapes.insert(format!(
+                            "{:?} {}/{} -> {:?}",
+                            cs.encoding, cs.occupied_slots(), cs.channels.len(), cs.distinct()
+                        ));
+                    }
+                }
+                21 => {
+                    if let Some(v) = Version::parse(t.value) {
+                        p.versions.insert(format!("v{}.{} {}", v.major, v.minor, v.class_name()));
+                    }
+                }
+                24 => {
+                    if let Some(e) = ElectionParamsV2::parse(t.value) {
+                        p.metrics.insert(e.self_metric);
+                        p.counters.insert(e.self_counter);
+                    }
+                }
+                32 => {
+                    if let Some(i) = SixGhzInfo::parse(t.value) {
+                        p.six_ghz.insert(i.channel.channel);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for (who, p) in &by_sender {
+        println!("\n=== {who}   {} frames  ({} PSF, {} MIF)", p.frames, p.psf, p.mif);
+        let tags: Vec<String> = p.tags.keys().map(|t| t.to_string()).collect();
+        println!("  tags emitted       {}", tags.join(" "));
+        println!("  availability window{:?} TU", p.aw_periods);
+        for s in &p.seq_shapes {
+            println!("  channel sequence   {s}");
+        }
+        println!("  self metric        {:?}", p.metrics);
+        println!("  self counter       {:?}", p.counters);
+        if !p.versions.is_empty() {
+            println!("  version            {:?}", p.versions);
+        }
+        if !p.assoc_channels.is_empty() {
+            println!("  assoc channel      {:?}", p.assoc_channels);
+        }
+        if !p.six_ghz.is_empty() {
+            println!("  6 GHz channel      {:?}", p.six_ghz);
+        }
+        if !p.services.is_empty() {
+            println!("  services           {:?}", p.services);
+        }
+        if !p.host_names.is_empty() {
+            println!("  host name          {:?}", p.host_names);
+        }
     }
 }

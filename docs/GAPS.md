@@ -1,0 +1,138 @@
+# What Apple sends, what libmosey sends, what OWL sends
+
+*The specification for `libawdl`'s transmitter, derived from captures rather than from a
+paper.*
+
+Regenerate any row with `awdl profile <capture>`; this document is assembled from that
+command's output, so adding captures improves it rather than dating it.
+
+**Sources.** Apple: `assoc-connected.pcap` (an iPhone on a 5 GHz AP and a Mac on 6 GHz).
+`libmosey`: `blazer-mix.pcap`, a Pixel 10 Pro running our own stack. OWL:
+`owl-transmitting.pcap`, seemoo-lab OWL on a Pi with an ALFA.
+
+---
+
+## The table
+
+| | **Apple** | **libmosey** | **OWL** |
+|---|---|---|---|
+| tags emitted | **11–13** | 10 | 9 |
+| **2** Service Response | yes, 1–3 services | yes, `_airdrop` only | **NONE** |
+| **4** Sync Parameters | yes | yes | yes |
+| **5** Election | yes | yes | yes |
+| **6** Service Parameters | yes | yes | yes |
+| **7** HT Capabilities | yes | yes | yes |
+| **12** Data Path State | yes, **AP channel populated** | yes, **no association** | yes |
+| **16** Arpa (host name) | yes, `<uuid>.local` | **MISSING** | yes, `raspberrypi.local` |
+| **17** 802.11 Container | yes | yes | **MISSING** |
+| **18** Channel Sequence | yes | yes | yes |
+| **21** Version | **v10.0** | **v3.4** | **v3.4** |
+| **24** Election v2 | yes | yes | yes |
+| **32/33** 6 GHz | yes *when on 6 GHz* | **MISSING** | **MISSING** |
+| availability window | 16 TU | 16 TU | 16 TU |
+| channel sequence | **3–6 of 16**, multi-channel | **16/16, one channel** | **16/16, one channel** |
+| — slot 0 | the AP's channel | not reserved | not reserved |
+| — slot 8 | channel 6, always | absent | absent |
+| self metric | **510 – 537** | **1** | 60 |
+| self counter | moving (4→32, 68866→68867) | **0, never moves** | **0, never moves** |
+| PSF : MIF | ~0 : 1 | 0 : 1 | **524 : 900** |
+
+---
+
+## The gaps that matter, in order
+
+### 1. Version: everyone but Apple announces v3.4
+
+Apple devices announce **v10.0**. Both `libmosey` and OWL announce **v3.4** — the same
+number, which suggests a shared lineage or a value nobody revisited. Six major versions of
+drift, and any version-gated behaviour on the Apple side sees us as ancient.
+
+**`libawdl` should announce what current devices announce**, and this is the cheapest
+single change on the list. Note there are *two* version fields — the action-frame header
+(1.0 everywhere) and tag 21 — so be explicit about which.
+
+### 2. The channel sequence is the big one
+
+Apple occupies **3 to 6 of 16 slots** and spreads them:
+
+```
+slot   0    1    2    3  4  5  6  7  8   9   10   11 12 13 14 15
+chan  104   0   149   0  0  0  0  0  6   0   149   0  0  0  0  0
+       ^                              ^
+       the AP's channel               the cross-band rendezvous
+```
+
+Both `libmosey` and OWL emit **16/16 on a single channel**. Three consequences, all measured:
+
+- **No association slot**, so AWDL takes the whole radio and Wi-Fi dies on a chip that
+  cannot hold two channels — the BCM4383 behaviour recorded as a hardware limit in
+  BUILD-NOTES 40/42. Apple runs the same constraint and schedules around it.
+- **No channel-6 rendezvous**, so a device on 2.4 GHz and one on 5 GHz never meet. Every
+  Apple device keeps slot 8 on channel 6, in 556 of 556 sequences observed.
+- **Permanently on-channel**, which is maximal availability and maximal power draw. Apple
+  is absent 10–13 slots of 16.
+
+**This cannot be fixed at the integration layer** — finding 8 measured `libmosey` refusing
+to build a multi-channel sequence even when handed two bands. It is the single strongest
+reason `libawdl` has to exist.
+
+### 3. Election: we forfeit by advertising nothing
+
+Apple advertises metric **510–537** and a **moving** counter. `libmosey` advertises metric
+**1** and counter **0**, unchanged across every frame in every capture; OWL advertises 60
+and 0.
+
+Elections are decided on **metric**, not counter (finding 9 — a device with counter 68364
+yielded to one with 608 and a higher metric). So a metric of 1 means never winning, which
+for a phone may be the right posture — but it should be a decision. Counter 0 against a
+peer's moving value is a field nobody maintains.
+
+### 4. What OWL is missing that `libmosey` gets right
+
+- **Service Response (tag 2).** OWL emits **zero**. A peer can synchronise with it
+  perfectly and still find nothing to talk to. `libmosey` emits `_airdrop._tcp.local`.
+- **802.11 Container (tag 17).** Absent from OWL, present in both others.
+- **PSF ratio.** OWL sends 524 PSF to 900 MIF. Apple and `libmosey` send almost none —
+  9 PSF in 278 frames in one capture, zero in others. OWL is far noisier than the devices
+  it imitates.
+
+### 5. What `libmosey` is missing that OWL gets right
+
+- **Arpa (tag 16)** — the host name. OWL sends `raspberrypi.local`; Apple sends
+  `<uuid>.local`; `libmosey` sends nothing. This is where a human-readable device name
+  would come from.
+
+### 6. The 6 GHz tags track the association
+
+The Mac in `assoc-connected.pcap` is associated on **6 GHz channel 53** and emits tags
+**32 and 33** carrying exactly that. The iPhone in the same capture is on 5 GHz channel 104,
+puts 104 in slot 0, and emits **neither** tag.
+
+So 32/33 are how a 6 GHz association is advertised, because the channel sequence's operating
+classes cover only 2.4 and 5 GHz. Neither `libmosey` nor OWL emits them at all.
+
+---
+
+## Therefore, for `libawdl`
+
+Ordered by how much each buys:
+
+1. **Build a real schedule.** Slot 0 for the association, slot 8 on channel 6, the rest on
+   the regional social channel, and be absent the rest of the time. This is the one that
+   fixes AWDL/Wi-Fi coexistence and cross-band discovery, and no configuration of
+   `libmosey` can do it.
+2. **Announce v10.0.** One field.
+3. **Emit Service Response** — already implemented, `service::encode_records`.
+4. **Emit Arpa** with a real host name.
+5. **Advertise a credible metric and a counter that moves.**
+6. **Emit tag 17**, and 32/33 when associated on 6 GHz.
+7. **Send PSF sparingly** — match Apple's ratio, not OWL's.
+
+Everything above is observable in `captures/`, and every claim in this document can be
+re-derived with `awdl profile`.
+
+## What this table does not cover
+
+**Transmit correctness.** Emitting the right bytes and being *accepted* are different bars,
+and nothing here has been on the air from `libawdl`. The table says what to send; only an
+Apple device can say whether it worked.

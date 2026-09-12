@@ -69,6 +69,13 @@ Every claim names the capture behind it — see [docs/FINDINGS.md](docs/FINDINGS
 - `AP Beacon alignment delta` exists — evidence AWDL is designed to time-share with an
   access point, not merely tolerate one.
 
+## The gap table
+
+[docs/GAPS.md](docs/GAPS.md) puts **Apple, `libmosey` and OWL side by side** — every tag,
+the channel sequence, the election values, the version. That table is the specification for
+this project's transmitter, and it is generated from captures with `awdl profile` rather
+than typed out, so more captures improve it instead of dating it.
+
 ## Layout
 
 ```
