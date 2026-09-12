@@ -32,7 +32,21 @@ pub struct Radiotap {
     pub freq: Option<u16>,
     /// Antenna signal, dBm.
     pub signal_dbm: Option<i8>,
+    /// The FLAGS byte, raw.
+    ///
+    /// **This was skipped for the first weeks of this project, and that was a mistake.**
+    /// It carries `BADFCS`, so without it every capture-derived claim silently included
+    /// frames the radio itself knew were corrupt — and a corrupt frame does not announce
+    /// itself: TLV lengths are explicit, so a frame with flipped bits parses cleanly and
+    /// contributes a plausible wrong value. It is kept raw because `DATAPAD` and `FCS`
+    /// change how the payload should be measured, and only one of those is decoded here.
+    pub flags: Option<u8>,
 }
+
+/// `BADFCS` — the radio checked the frame and it failed. Do not trust its contents.
+pub const F_BADFCS: u8 = 0x40;
+/// `FCS` — the 802.11 frame carries its 4-byte checksum, so it is included in the payload.
+pub const F_FCS: u8 = 0x10;
 
 impl Radiotap {
     pub fn parse(b: &[u8]) -> Option<Radiotap> {
@@ -61,7 +75,7 @@ impl Radiotap {
             }
         }
 
-        let mut rt = Radiotap { len, tsft: None, freq: None, signal_dbm: None };
+        let mut rt = Radiotap { len, tsft: None, freq: None, signal_dbm: None, flags: None };
 
         // Only the first present word carries the fields we read; a second word means
         // vendor namespaces, which we skip rather than guess at.
@@ -85,6 +99,7 @@ impl Radiotap {
             cur += 8;
         }
         if present & (1 << FLAGS) != 0 {
+            rt.flags = le::u8(b, cur);
             cur += 1;
         }
         if present & (1 << RATE) != 0 {
@@ -103,6 +118,29 @@ impl Radiotap {
         }
 
         Some(rt)
+    }
+
+    /// The radio checked this frame's FCS and it failed.
+    ///
+    /// `false` when the driver reported no flags at all, which is not the same as "the
+    /// frame is good" — it means the question was not answered. Callers that care about
+    /// integrity should treat a missing FLAGS field as a gap in the instrument rather
+    /// than as a pass, which is what [`fcs_known_good`] is for.
+    pub fn bad_fcs(&self) -> bool {
+        self.flags.is_some_and(|f| f & F_BADFCS != 0)
+    }
+
+    /// The radio checked the FCS and it passed: flags present, `BADFCS` clear.
+    pub fn fcs_known_good(&self) -> bool {
+        self.flags.is_some_and(|f| f & F_BADFCS == 0)
+    }
+
+    /// Whether the 4-byte FCS is included at the end of the 802.11 frame.
+    ///
+    /// It matters for byte accounting: with this set the last four bytes of
+    /// [`payload`](Self::payload) are a checksum, not protocol.
+    pub fn includes_fcs(&self) -> bool {
+        self.flags.is_some_and(|f| f & F_FCS != 0)
     }
 
     /// The 802.11 frame that follows this header.

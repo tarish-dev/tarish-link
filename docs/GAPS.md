@@ -167,10 +167,20 @@ classes cover only 2.4 and 5 GHz. Neither `libmosey` nor OWL emits them at all.
 
 Ordered by how much each buys:
 
-1. **Build a real schedule.** Slot 0 for the association, slot 8 on channel 6, the rest on
-   the regional social channel, and be absent the rest of the time. This is the one that
-   fixes AWDL/Wi-Fi coexistence and cross-band discovery, and no configuration of
-   `libmosey` can do it.
+1. **Build a real schedule.** ✅ `ChannelSequence::apple_shaped`, with
+   `SyncParams::encode` to put it on the wire — both pinned by byte equality against
+   captured Apple and `libmosey` frames in `tests/build_sync.rs`.
+
+   The measured shape is **four occupied slots out of sixteen**: slot 0 for the
+   association, slots 2 and 10 on the regional social channel, slot 8 on channel 6, and
+   absent for the other twelve. An earlier version of this line said "the rest on the
+   regional social channel", which is not what Apple does and is worth being exact about:
+   filling the spare twelve slots keeps the radio on the air three times longer per cycle
+   for no gain, because peers schedule against the slots they were told about. `libmosey`
+   does fill all sixteen — `LIBMOSEY` in `tests/fixture_sync.rs` is that frame.
+
+   This is the one that fixes AWDL/Wi-Fi coexistence and cross-band discovery, and no
+   configuration of `libmosey` can do it.
 2. **Decide on the version deliberately.** Announcing v10.0 is a capability claim, not a
    cosmetic field — see §1. It is also the only way to test whether the non-contact code
    flow is version-gated, so it is worth doing as an *experiment* with a way back.

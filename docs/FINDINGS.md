@@ -1022,6 +1022,60 @@ is not.**
 
 ---
 
+## 20. The two bytes everyone calls padding are a field, and only OWL zeroes them
+
+Synchronization Parameters (tag 4) ends with two bytes after the embedded channel
+sequence. OWL's `frame.h` comments them out as `/* uint8_t pad[2]; */` and Wireshark
+renders them the same way. Across every capture in `captures/` that is wrong.
+
+| | tag 4, last 2 bytes | tag 18, last 3 bytes |
+|---|---|---|
+| TLVs examined | 7054 | 7054 |
+| non-zero | **2018 (29%)** | **0** |
+
+Same captures, same frames, same senders. That contrast is the argument: if these were
+uninitialised stack a builder forgot to clear, tag 18's three bytes would show it too, and
+in 7054 samples not one does.
+
+### What decides it
+
+Not the frame — the sender's own state, and it tracks one bit of `flags`:
+
+```
+2a:f3:94:4d:96:79  flags=0x1800  slot0=102       tail 00 00   x166
+be:35:be:c9:05:1f  flags=0x1800  slot0=102       tail 00 00   x197
+16:50:71:fb:18:bb  flags=0x1800  slot0=6         tail 00 00   x517
+d2:75:0e:61:4c:e2  flags=0x1000  slot0=absent    tail 00 4c   x164
+6a:89:d8:a5:88:9b  flags=0x1000  slot0=absent    tail 20 64   x190
+                                                 tail 00 4c   x20
+```
+
+A sender advertising `0x1800` puts its association channel in slot 0 and writes zero here.
+A sender advertising `0x1000` leaves slot 0 empty and writes a value here. One device was
+seen switching from `00 4c` to `20 64` within a single capture, so it is not fixed at boot.
+
+`0x20 0x64` reads plausibly as a Legacy channel-sequence pair — qualifier `0x20`, channel
+100 — for devices that were associated on 100/104 in the neighbouring captures. `0x00 0x4c`
+does not: 76 is not a channel. **So there is a shape but not yet a decode, and it is
+recorded as that rather than given a speculative name.**
+
+### What was done about it
+
+`SyncParams` carries the two bytes as `trailing` and puts back what it was given, so a
+parsed frame re-encodes to the bytes it arrived as. `tests/build_sync.rs` pins it with an
+Apple frame ending `00 4c`, which a builder writing zeros cannot reproduce. When
+constructing a frame of our own we write zeros — what OWL does, and what every associated
+Apple device does.
+
+### A second thing this turned up
+
+The radiotap parser was skipping the FLAGS byte, so nothing in this project had ever
+checked `BADFCS`. A corrupt frame does not announce itself here — TLV lengths are
+explicit, so flipped bits parse cleanly and contribute a plausible wrong value — which
+means every capture-derived claim had an unexamined error term. It is parsed now, and the
+answer is reassuring: **zero BADFCS frames across all 7054**, so nothing previously
+concluded rests on corrupt input. Worth having asked.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

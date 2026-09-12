@@ -273,9 +273,21 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
     let mut versions: BTreeMap<String, u64> = BTreeMap::new();
     let mut sixghz: BTreeMap<String, u64> = BTreeMap::new();
     let mut instances: BTreeMap<String, u64> = BTreeMap::new();
+    // Capture integrity. A frame the radio knew was corrupt still parses cleanly here --
+    // TLV lengths are explicit, so flipped bits become a plausible wrong value rather than
+    // an error -- so the count of them is the error bar on everything else printed below.
+    let mut bad_fcs: u64 = 0;
+    let mut no_flags: u64 = 0;
 
     while let Ok(pkt) = cap.next_packet() {
         total += 1;
+        if let Some(rt) = libawdl::radiotap::Radiotap::parse(pkt.data) {
+            if rt.flags.is_none() {
+                no_flags += 1;
+            } else if rt.bad_fcs() {
+                bad_fcs += 1;
+            }
+        }
         match classify(pkt.data) {
             Seen::AwdlData { seq, ethertype, multicast, bytes } => {
                 data_n += 1;
@@ -519,6 +531,15 @@ fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool)
             eprintln!("  {m}  {n}");
         }
     }
+    // Printed unconditionally, including the zero: "no corrupt frames" is a result, and
+    // one that silently disappears when it is good is not one anybody can rely on.
+    eprintln!("capture integrity: {bad_fcs} frame(s) failed FCS");
+    if no_flags > 0 {
+        eprintln!(
+            "  {no_flags} frame(s) carried no radiotap FLAGS field, so their integrity is \
+             unknown rather than good — locally injected frames look like this"
+        );
+    }
     eprintln!("tags seen:");
     for (t, n) in &by_tag {
         eprintln!("  [{:>2}] {:<28} {n}", t, libawdl::tlv::tag_name(*t));
@@ -531,6 +552,7 @@ fn usage() -> ! {
     eprintln!("  awdl read  <file.pcap>   dissect a recorded capture");
     eprintln!("  awdl stats <file.pcap>   counts only, no per-frame output");
     eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
+    eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     std::process::exit(2)
 }
 
@@ -564,6 +586,11 @@ fn main() {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             let bucket = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
             timeline(cap, bucket);
+        }
+        "tlv" => {
+            let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
+            let Some(tag) = args.get(3).and_then(|s| s.parse::<u8>().ok()) else { usage() };
+            dump_tlv(cap, tag, args.get(4).map(|s| s.as_str()));
         }
         _ => usage(),
     }
@@ -701,5 +728,94 @@ fn profile<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
         if !p.host_names.is_empty() {
             println!("  host name          {:?}", p.host_names);
         }
+    }
+}
+
+/// Dump every DISTINCT raw value of one tag, as a Rust byte array ready to paste.
+///
+/// This exists because of the discipline in `tests/build.rs`: a serialiser that only
+/// round-trips through its own parser proves nothing, so every builder is tested for byte
+/// equality against something a real device actually sent. That needs fixtures, and
+/// hand-transcribing them from a hex dump is how a fixture ends up subtly wrong — at which
+/// point the test is worse than no test, because it certifies the wrong bytes.
+///
+/// Distinct values, not every frame: a capture holds thousands of near-identical
+/// Synchronization Parameters and the interesting thing is how many *shapes* there are.
+/// The count is printed so a one-off can be told from the steady state, and the first
+/// sighting is what gets dumped — a value seen once in 3000 frames is more likely a
+/// transient than a specimen worth building against.
+fn dump_tlv<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, tag: u8, from: Option<&str>) {
+    use std::collections::BTreeMap;
+
+    // Keyed on the bytes so identical values collapse; the value keeps enough to judge
+    // whether a shape is representative.
+    struct Sighting {
+        count: u64,
+        first_frame: u64,
+        senders: std::collections::BTreeSet<String>,
+    }
+    let mut seen: BTreeMap<Vec<u8>, Sighting> = BTreeMap::new();
+    let mut frame = 0u64;
+    let want = from.map(|m| m.to_ascii_lowercase());
+
+    while let Ok(pkt) = cap.next_packet() {
+        frame += 1;
+        let Seen::Awdl { dot11, af, .. } = classify(pkt.data) else { continue };
+        let src = dot11.src.to_string().to_ascii_lowercase();
+        if let Some(w) = &want {
+            if &src != w {
+                continue;
+            }
+        }
+        for t in af.tlvs() {
+            if t.tag != tag {
+                continue;
+            }
+            let e = seen.entry(t.value.to_vec()).or_insert_with(|| Sighting {
+                count: 0,
+                first_frame: frame,
+                senders: Default::default(),
+            });
+            e.count += 1;
+            e.senders.insert(src.clone());
+        }
+    }
+
+    if seen.is_empty() {
+        eprintln!("no tag {tag} ({}) in this capture{}", libawdl::tlv::tag_name(tag),
+            from.map(|m| format!(" from {m}")).unwrap_or_default());
+        std::process::exit(1);
+    }
+
+    eprintln!("tag {tag} ({}): {} distinct value(s)", libawdl::tlv::tag_name(tag), seen.len());
+    // Most-seen first: the steady state is what a builder should reproduce.
+    let mut order: Vec<_> = seen.iter().collect();
+    order.sort_by(|a, b| b.1.count.cmp(&a.1.count));
+
+    // A tag carrying a counter is distinct in EVERY frame -- Synchronization Parameters
+    // yields 331 "shapes" from one device in one capture, all differing only in
+    // tx_counter and aw_remaining. So a high distinct count is not a finding, and
+    // dumping all of them is not useful. Three is enough to see which fields move.
+    const LIMIT: usize = 3;
+    if order.len() > LIMIT {
+        eprintln!(
+            "  showing {LIMIT}; {} more suppressed. Many distinct values usually means \
+             the tag carries a counter, not that the sender is inconsistent.",
+            order.len() - LIMIT
+        );
+        order.truncate(LIMIT);
+    }
+
+    for (i, (value, s)) in order.iter().enumerate() {
+        let senders: Vec<&str> = s.senders.iter().map(|x| x.as_str()).collect();
+        println!("// tag {tag} ({}) -- {} bytes, seen {}x, first at frame {}",
+            libawdl::tlv::tag_name(tag), value.len(), s.count, s.first_frame);
+        println!("// from {}", senders.join(", "));
+        println!("pub const TLV_{i}: &[u8] = &[");
+        for row in value.chunks(16) {
+            let cells: Vec<String> = row.iter().map(|b| format!("0x{b:02x}")).collect();
+            println!("    {},", cells.join(", "));
+        }
+        println!("];");
     }
 }
