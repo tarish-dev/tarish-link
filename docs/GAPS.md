@@ -137,11 +137,12 @@ failure. It is one field to change and a large surface to be judged against.
 > merits, but it is **no longer the decisive test** — and if run as one it would come back
 > negative for a reason unrelated to the version.
 >
-> Nor is our own rotating identity the obstacle, which an earlier draft of this note claimed.
-> An Apple device's identity is signed by hardware we cannot replicate, so the flow is
-> **structurally closed to us** rather than pending — making a stable identity on our side
-> worth nothing against Apple. The useful response is not to chase it but to notice if Apple
-> ever makes it mandatory, which is what `/Ask` response logging is for.
+> Nor is the flow closed to us, which a later draft of this note claimed on the grounds that
+> an Apple identity is hardware-signed. It is — and it can be **extracted** from an Apple
+> device the user owns rather than minted. `GoOpenDrop` did this, and with a genuine record
+> plus the matching email in the peer's contacts, *contacts-only* AirDrop worked, no
+> "Everyone" required. So the shape of the answer is an **opt-in identity the user supplies**,
+> never one we ship. FINDINGS 33 has the design and its four constraints.
 >
 > Stock Quick Share does not separate the hypotheses — Google announces v3.4 *and* holds no
 > Apple validation record, so either would explain its exclusion. What it does show is that

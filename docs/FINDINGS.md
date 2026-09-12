@@ -1432,47 +1432,71 @@ Mac because it had been paired with it at some point; the managed iPhone could n
 never had. The MDM profile may have tightened *when* the prompt is required, but the
 mechanism is pairing, not a restriction.
 
-### What it means for us — a closed door, not a task
+### What it means for us — opt-in, not impossible
 
-If the mechanism is persistent trust between device identities, then **announcing v10.0 does
-not get us into it**, and the version experiment §1 recommends would come back negative for a
-reason that has nothing to do with the version. That alone saves a build cycle.
+Announcing v10.0 does not get us into this flow, so the version experiment §1 recommends
+would come back negative for a reason unrelated to the version. That much saves a build
+cycle.
 
-An earlier draft of this entry went further and called our own rotating identity an urgent
-problem. **That was wrong**, and the operator corrected it: an Apple device's identity is
-signed by hardware we cannot replicate — whether that is specifically the MFi coprocessor or
-the Secure Enclave's device certificate does not matter, because there is no path to minting
-one either way. So this flow is not "not yet" for us. It is **structurally closed**.
+Two earlier drafts of this section were wrong in opposite directions and both are corrected
+here. The first called our rotating identity an urgent problem. The second called the flow
+structurally closed, on the grounds that an Apple identity is signed by hardware we cannot
+replicate. **The signing part is true and the conclusion does not follow**, because the
+identity does not have to be minted — it can be extracted from an Apple device the user owns.
 
-Which settles a decision rather than reopening it. This file records elsewhere that our mDNS
-instance name follows a MAC that is fresh every AWDL session and our TLS certificate is
-generated at each start and never stored, and asks that it stay a decision rather than become
-an accident. It stays. **Persisting the certificate buys nothing against Apple**, because the
-thing it would buy is not for sale. The original argument — *a key that never touches storage
-cannot be stolen from storage* — is unchanged, and what it was trading against turns out to be
-unpurchasable.
+The operator's own earlier project, `GoOpenDrop`, does exactly that, and its configuration
+names the three artefacts:
 
-### The version of this feature that IS ours
+```json
+"apple_root_cert":              "certs/apple_root_ca.pem",
+"extracted_certififcate":       "...",
+"extracted_certkey":            "...",
+"extracted_validation_recoed":  "..."
+```
 
-Trust between **our own** devices is entirely in our gift, and there the argument reverses.
-A Tarish-to-Tarish trusted-device list, a one-time confirmation that is not asked again, a
-reconnect without prompting — none of that needs an Apple signature, only an identity we
-choose to keep. If that is ever wanted, it is a deliberate feature with a real cost
-(a key on disk), not a gap.
+They go out as `SenderRecordData` on the client side and `ReceiverRecordData` on the server
+side. **And it worked well enough that "Everyone" was not needed** — with a genuine extracted
+record, and the associated email address added to the peer's contacts, *contacts-only* AirDrop
+succeeded. That is a better outcome than Everyone mode, not a worse one: no ten-minute
+timeout, and the receiver never has to open itself to the world.
+
+This is already understood in the daemon, which says the record "cannot be generated, must be
+extracted from a real Apple device, and expires yearly" and omits it deliberately. What is
+missing is not knowledge but a **hook**.
+
+### The feature this implies
+
+An optional, user-supplied identity. Absent, everything behaves exactly as it does today —
+ephemeral key, Everyone mode, no record. Present, the daemon sends the record and can be
+discovered by contact.
+
+Four things that make it shippable in a public project:
+
+- **The credentials are never ours to ship.** They are Apple-issued, tied to one device and
+  one Apple ID, and include a private key. A user extracts their own from hardware they own.
+  The repository carries the code path and the public Apple root, never the artefacts.
+- **The certificate must then be the extracted one**, which means persistence stops being a
+  contradiction: today's ephemeral key is right for the anonymous path, and an identity the
+  user deliberately installed is a different mode with a different answer. The existing
+  argument — *a key that never touches storage cannot be stolen from storage* — keeps the
+  default and does not govern a key the user chose to provide.
+- **It expires yearly.** Not set-and-forget; the failure will look like AirDrop silently
+  reverting to anonymous.
+- **It is an identity, and it is somebody's.** Presenting an extracted record means presenting
+  *that device's* identity, so it belongs to the person who owns both ends, not to a third
+  party.
 
 ### The actual risk, and the only useful mitigation
 
-The danger is not that we cannot join the trusted flow. It is that Apple might one day make
-it **mandatory for every peer**, which would end AirDrop interoperability for Tarish outright
-— an operator concern recorded before this finding existed: *"worried with more devices coming
-along, apple might enforce this and make it the only way ios to android work, better be
-prepared."*
+The danger is not exclusion from the trusted flow. It is Apple making it **mandatory for
+every peer**, which would end AirDrop interoperability for anyone without an extracted
+identity — an operator concern recorded before this finding existed: *"worried with more
+devices coming along, apple might enforce this and make it the only way ios to android work,
+better be prepared."*
 
-Nothing we build prevents that. What helps is **noticing early**, which makes the `/Ask`
-non-200 response logging on the task list a monitoring feature rather than a nicety: the first
-sign would be Apple peers refusing our `/Ask` with a status we currently discard. Today
-AirDrop works both directions with no identity presented at all, so the permissive path is
-still open — and the hedge for the day it closes is Quick Share, which owes Apple nothing.
+Nothing we build prevents that. **Noticing early** is what helps, which promotes the `/Ask`
+non-200 response logging on the task list from a nicety to a monitoring feature: the first
+sign would be Apple peers refusing our `/Ask` with a status we currently discard.
 
 ### What is proven and what is not
 
