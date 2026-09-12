@@ -42,6 +42,11 @@ impl Version {
     pub fn class_name(&self) -> &'static str {
         device_class_name(self.device_class)
     }
+
+    /// Serialise back to the wire: two bytes, packed nibbles then the device class.
+    pub fn encode(&self) -> [u8; 2] {
+        [(self.major << 4) | (self.minor & 0x0f), self.device_class]
+    }
 }
 
 // ------------------------------------------------------------------ tag 16 ---
@@ -57,6 +62,19 @@ pub struct Arpa {
 }
 
 impl Arpa {
+    /// Serialise back to the wire: the flags byte, then the name in the compressed DNS
+    /// encoding shared with Service Response.
+    ///
+    /// Compression is not an optimisation here. The captured Apple values end in a
+    /// `0xc00c` pointer, so a builder that spells `local` out produces a longer tag that
+    /// still parses and that no Apple device would have sent.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + self.name.len() + 2);
+        out.push(self.flags);
+        out.extend_from_slice(&crate::service::encode_name(&self.name));
+        out
+    }
+
     pub fn parse(v: &[u8]) -> Option<Arpa> {
         let flags = le::u8(v, 0)?;
         let rest = v.get(1..)?;
@@ -105,7 +123,13 @@ pub struct DataPathState {
     pub infra_address: Option<[u8; 6]>,
     pub awdl_address: Option<[u8; 6]>,
     pub umi: Option<u16>,
+    /// The UMI options blob, kept whole. Its contents are not decoded, but it sits
+    /// *between* other fields, so a builder that drops it shifts everything after it.
+    pub umi_options: Option<Vec<u8>>,
     pub extended_flags: Option<u16>,
+    /// Whatever follows the extended flags word. Undecoded upstream, carried so that a
+    /// parse and rebuild is exact.
+    pub extended_tail: Vec<u8>,
 }
 
 impl DataPathState {
@@ -145,10 +169,12 @@ impl DataPathState {
         }
         if flags & flag::UMI_OPTIONS != 0 {
             let n = le::u16(v, off)? as usize;
+            s.umi_options = v.get(off + 2..off + 2 + n).map(|b| b.to_vec());
             off += 2 + n;
         }
         if flags & flag::EXTENDED != 0 {
             s.extended_flags = le::u16(v, off);
+            s.extended_tail = v.get(off + 2..).unwrap_or(&[]).to_vec();
             // The extended fields beyond the flags word are left undecoded: upstream
             // marks several of them "meaning unknown", and a speculative name is worse
             // than none.
@@ -159,6 +185,138 @@ impl DataPathState {
     /// Whether this device says it is associated to an access point.
     pub fn is_associated(&self) -> bool {
         self.flags & flag::INFRA_BSSID != 0
+    }
+
+    /// Serialise back to the wire.
+    ///
+    /// **The order here is the wire order, not the bit order**, and it has to match
+    /// `parse` exactly — country and social channel precede the infrastructure fields
+    /// despite having higher bit numbers. Writing them in numeric order produces a tag
+    /// that parses without error into entirely different values.
+    ///
+    /// The bitmap is taken from `flags` rather than recomputed from which options are
+    /// `Some`, so a tag that arrived claiming a field it did not carry re-encodes as it
+    /// arrived instead of being quietly corrected.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32);
+        out.extend_from_slice(&self.flags.to_le_bytes());
+        if self.flags & flag::COUNTRY != 0 {
+            let c = self.country.clone().unwrap_or_default();
+            let mut b = c.into_bytes();
+            b.resize(3, 0);
+            out.extend_from_slice(&b);
+        }
+        if self.flags & flag::SOCIAL_CHANNEL != 0 {
+            out.extend_from_slice(&self.social_channel_raw.unwrap_or(0).to_le_bytes());
+        }
+        if self.flags & flag::INFRA_BSSID != 0 {
+            out.extend_from_slice(&self.infra_bssid.unwrap_or_default());
+            out.extend_from_slice(&self.infra_channel.unwrap_or(0).to_le_bytes());
+        }
+        if self.flags & flag::INFRA_ADDRESS != 0 {
+            out.extend_from_slice(&self.infra_address.unwrap_or_default());
+        }
+        if self.flags & flag::AWDL_ADDRESS != 0 {
+            out.extend_from_slice(&self.awdl_address.unwrap_or_default());
+        }
+        if self.flags & flag::UMI != 0 {
+            out.extend_from_slice(&self.umi.unwrap_or(0).to_le_bytes());
+        }
+        if self.flags & flag::UMI_OPTIONS != 0 {
+            let o = self.umi_options.clone().unwrap_or_default();
+            out.extend_from_slice(&(o.len() as u16).to_le_bytes());
+            out.extend_from_slice(&o);
+        }
+        if self.flags & flag::EXTENDED != 0 {
+            out.extend_from_slice(&self.extended_flags.unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(&self.extended_tail);
+        }
+        out
+    }
+
+    /// What this device is: its AWDL address, its region, its social channel, and the
+    /// access point it is associated to if there is one.
+    ///
+    /// `infra` is the AP's BSSID and channel. Supplying it sets [`flag::INFRA_BSSID`],
+    /// which is what tells a peer we are associated at all — and it is the same channel
+    /// that belongs in slot 0 of the schedule. The two are separate statements of one
+    /// fact, and a peer that finds them disagreeing has no way to tell which is right.
+    pub fn describing(
+        awdl_address: [u8; 6],
+        country: &str,
+        social_channel: u8,
+        infra: Option<([u8; 6], u16)>,
+    ) -> DataPathState {
+        let mut flags = flag::COUNTRY | flag::SOCIAL_CHANNEL | flag::AWDL_ADDRESS;
+        if infra.is_some() {
+            flags |= flag::INFRA_BSSID;
+        }
+        DataPathState {
+            flags,
+            country: Some(country.to_string()),
+            social_channel_raw: Some(u16::from(social_channel)),
+            infra_bssid: infra.map(|(b, _)| b),
+            infra_channel: infra.map(|(_, c)| c),
+            awdl_address: Some(awdl_address),
+            ..Default::default()
+        }
+    }
+}
+
+// ------------------------------------------------------------------ tag 17 ---
+
+/// IEEE 802.11 Container (tag 17): standard 802.11 information elements, verbatim.
+///
+/// AWDL does not invent a capability format — it carries the ones 802.11 already defines.
+/// The captured values hold a single element `0xbf` (VHT Capabilities) with a 12-byte body,
+/// which is exactly what the standard specifies: four bytes of capability info and eight of
+/// the supported VHT-MCS and NSS set.
+///
+/// The elements are kept as `(id, body)` pairs rather than decoded. The bits inside them
+/// describe the radio, so the only correct source for them is the radio — `libawdl-hal`,
+/// not a table in here. Carrying them opaquely is what lets a HAL supply its own.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Ieee80211Container {
+    pub elements: Vec<(u8, Vec<u8>)>,
+}
+
+/// Element ID for VHT Capabilities, the one observed in every captured container.
+pub const ELEM_VHT_CAPABILITIES: u8 = 0xbf;
+
+impl Ieee80211Container {
+    /// Walk the element list. Stops rather than guessing when a length runs past the end,
+    /// for the same reason the TLV iterator does: a truncated capture and a malformed
+    /// frame look identical, and trimming one to fit invents data.
+    pub fn parse(v: &[u8]) -> Option<Ieee80211Container> {
+        let mut elements = Vec::new();
+        let mut off = 0usize;
+        while off + 2 <= v.len() {
+            let id = v[off];
+            let len = usize::from(v[off + 1]);
+            let body = v.get(off + 2..off + 2 + len)?;
+            elements.push((id, body.to_vec()));
+            off += 2 + len;
+        }
+        // A container with bytes left over is not one we understood.
+        if off != v.len() {
+            return None;
+        }
+        Some(Ieee80211Container { elements })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (id, body) in &self.elements {
+            out.push(*id);
+            out.push(body.len() as u8);
+            out.extend_from_slice(body);
+        }
+        out
+    }
+
+    /// The VHT Capabilities element, if the container carries one.
+    pub fn vht_capabilities(&self) -> Option<&[u8]> {
+        self.elements.iter().find(|(id, _)| *id == ELEM_VHT_CAPABILITIES).map(|(_, b)| b.as_slice())
     }
 }
 

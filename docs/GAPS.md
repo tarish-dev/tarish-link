@@ -184,11 +184,33 @@ Ordered by how much each buys:
 2. **Decide on the version deliberately.** Announcing v10.0 is a capability claim, not a
    cosmetic field — see §1. It is also the only way to test whether the non-contact code
    flow is version-gated, so it is worth doing as an *experiment* with a way back.
-3. **Emit Service Response** — already implemented, `service::encode_records`.
-4. **Emit Arpa** with a real host name.
-5. **Advertise a credible metric and a counter that moves.**
-6. **Emit tag 17**, and 32/33 when associated on 6 GHz.
+3. **Emit Service Response** — ✅ `service::encode_records`.
+4. **Emit Arpa** with a real host name — ✅ `Arpa::encode`, compression pointer and all.
+5. **Advertise a credible metric and a counter that moves.** ✅ `ElectionParams::claiming`
+   and `ElectionParamsV2::claiming`, both tags, as every real device sends them. The metric
+   is the caller's to choose; the counter is passed in rather than invented, because its
+   meaning is still unresolved and it is not the election's ordering term.
+6. **Emit tag 17**, and 32/33 when associated on 6 GHz. ✅ for 17 —
+   `Ieee80211Container`, which turned out to carry standard 802.11 elements rather than a
+   format of AWDL's own: one VHT Capabilities element, 12 bytes. Its bits describe the
+   radio, so they belong to the HAL and are carried opaquely. 32/33 not yet built.
 7. **Send PSF sparingly** — match Apple's ratio, not OWL's.
+
+Also done, and not on the original list because it was assumed rather than planned: **the
+frame itself.** `action::encode_body` and `dot11::management_header` assemble a complete
+action frame, pinned by taking a captured Apple frame apart and rebuilding it byte for byte.
+
+### What is still missing to be a participant
+
+- **Tags 6 (Service Parameters) and 7 (HT Capabilities)** — undecoded, not merely unbuilt.
+  Tag 7 is 9 bytes from one device and 20 from another, so it is not a fixed struct, and
+  emitting bytes we cannot describe would be guessing on the air.
+  `tests/build_frame.rs` asserts the missing set is exactly `{6, 7, 32, 33}`, so it cannot
+  grow unnoticed.
+- **Tags 32/33** — conditional on a 6 GHz association, not unconditionally missing.
+- **The transmitter.** Everything above builds bytes; nothing has yet put one in the air.
+  That is `libawdl-hal`'s side, and it is the next real milestone — it is also what §1's
+  version experiment needs.
 
 Everything above is observable in `captures/`, and every claim in this document can be
 re-derived with `awdl profile`.
