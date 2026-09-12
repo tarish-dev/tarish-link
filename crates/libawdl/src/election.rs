@@ -275,16 +275,21 @@ impl ElectionParamsV2 {
     /// Address breaks a metric tie. That part is still inferred rather than observed —
     /// no capture so far has contained two nodes with equal metrics.
     ///
-    /// # This diverges from OWL, and the divergence is MEASURED — see FINDINGS 44
+    /// # This diverges from OWL, and the divergence is UNRESOLVED — see FINDINGS 45
     ///
-    /// Two probes against the same room, minutes apart, with two iPhones joining from cold:
-    /// advertising the highest metric with the **lowest** counter brought three Apple
-    /// devices over to us — one of them carrying a counter 4500 times larger than ours —
-    /// and advertising the lowest metric with the **highest** counter brought none. Metric
-    /// decides; the counter does not.
+    /// An experiment appeared to settle this as metric-first and **did not replicate**:
+    /// against an established two-iPhone cluster, advertising 600 against their 534 and 514
+    /// changed nothing, and advertising 50 changed nothing either. The original A/B was
+    /// confounded because its second arm ran after the first arm had made the devices
+    /// organise.
     ///
-    /// Keep this function metric-first. The note below records what OWL does and why the
-    /// earlier evidence did not test it.
+    /// What survives: **counter-first is refuted** — a device carrying a counter 4500 times
+    /// ours, at distance 0 so that value was its own `master_counter`, adopted us anyway.
+    /// Metric-first is *not* established; it is simply the remaining candidate.
+    ///
+    /// The variable that separates every observation is whether the peer was **forming or
+    /// settled**, not what either of us advertised. A settled Apple cluster has never
+    /// re-elected in any run here, at any metric from 65 to 600.
     ///
     ///
     /// OWL's `awdl_election_compare_master` is **counter first, metric second**:

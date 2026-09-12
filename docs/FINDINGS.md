@@ -2215,7 +2215,7 @@ could adopt *them*. Whether transmitting inside a cluster's own windows changes 
 responds is the next question, and it is now askable for the first time, because every
 earlier trial was aiming at a schedule it could not hit.
 
-## 44. ★ SETTLED: the election is decided by METRIC, not by counter
+## 44. ~~SETTLED: the election is decided by METRIC~~ — RETRACTED, see finding 45
 
 The question FINDINGS 42 called the most important open one in the project. Answered with a
 designed experiment and a control, which is the first time tonight that a hypothesis was
@@ -2272,6 +2272,14 @@ The same three devices, the same room, minutes apart: with the highest counter i
 and the lowest metric, **not one of them followed us**. They organised around an Apple device
 instead.
 
+### ⚠ THE CONCLUSION BELOW IS RETRACTED — see finding 45
+
+A replication against two iPhones showed the highest metric in the room achieving nothing,
+and revealed that this experiment was **never controlled**: probe B ran after probe A, by
+which time probe A had caused the devices to organise. Its negative is explained as well by
+the cluster having settled as by our low metric. What survives is narrower and is in finding
+45. The text below is kept as written so the error is legible.
+
 ### The conclusion
 
 **Metric decides. The counter is not the primary key, and probably not a key at all.**
@@ -2289,6 +2297,74 @@ This is the cleanest experiment in this document and the only one with a real co
 five candidates eliminated in findings 36-39 were each tested by changing one thing and
 watching; this changed one thing and **also ran the converse**, which is what turns "the
 outcome differed" into "the variable is responsible". The difference cost one extra run.
+
+## 45. ★ The variable is CLUSTER STATE, not metric — and finding 44 was uncontrolled
+
+The operator asked to repeat the election experiment *"just to make 1000% sure"*. It did not
+replicate, and the failure exposed a control I never had.
+
+### The replication
+
+Mac AirDrop off, two iPhones only, verified on the air before starting — `da:da` as master
+with `ce:53` already following it, an **established** cluster.
+
+```text
+  REP A   our metric 600 (highest in the room)   -> nobody followed us
+  REP B   our metric 50  (lowest in the room)    -> nobody followed us
+```
+
+Identical outcomes. Our metric made **no difference at all**, and in REP A we out-metricked
+both peers (600 against 534 and 514) and was still ignored.
+
+### What that exposes about finding 44
+
+Probe B ran **after** probe A — and probe A is what made those devices organise. So by the
+time we advertised a low metric they were a settled cluster, and the negative result is
+explained equally well by settledness as by the metric. **The A/B was confounded by its own
+first arm.** That is a textbook failure and I did not see it while writing the finding up as
+the cleanest experiment in the document.
+
+### The variable that fits every observation
+
+| run | our metric | peers' state | adopted us? |
+|---|---|---|---|
+| `tx-first` | 530 | spread across 12-16/16 slots, unsettled | **yes, three** |
+| `trial-D/F/G` | 65-600 | settled | no |
+| `trial-E` | 600 | — | yes |
+| `PROBE_A` | 600 | **cold-joining, AirDrop just switched on** | **yes, three** |
+| `PROBE_B` | 50 | settled during probe A | no |
+| `REP_A` | 600 | established pair | no |
+| `REP_B` | 50 | established pair | no |
+
+**Every adoption happened while the peers were forming or joining. Every refusal happened
+against a settled cluster.** Metric spans 65 to 600 on both sides of that line and does not
+separate them.
+
+This is the hypothesis finding 38 reached from three captures and then dropped when a
+breadth sweep refuted the *mechanism* it had guessed at. The observation was right; the
+explanation was wrong.
+
+### What is actually established now
+
+- **A settled Apple cluster does not re-elect**, whatever we advertise. Six runs, metrics from
+  65 to 600, no adoption.
+- **A joining or unsettled device will adopt us**, and has done so in three separate runs
+  including one that relayed our metric and tenure counter two hops.
+- **Counter-first is still refuted** by the one observation that does not depend on any of
+  this: `de:d3` carried a counter 4500 times ours, at distance 0 so it was its own
+  `master_counter`, and adopted us anyway.
+- **Metric-first is NOT established.** It may still be how the comparison works when a
+  comparison happens at all — `beats()` stays as it is — but no run here demonstrates it.
+
+### The method lesson, again and more expensively
+
+Finding 44 called itself "the only experiment in this document with a real control". It had
+a converse, which is not the same thing: the converse ran in a **changed environment that the
+first arm had changed**. A control has to hold everything else fixed, and cluster state was
+neither held fixed nor measured.
+
+The operator's instinct to repeat is what caught it. A result that does not replicate against
+a different device set was never a result.
 
 ## Open, not yet investigated
 
