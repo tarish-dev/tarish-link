@@ -179,3 +179,136 @@ pub fn records(v: &[u8]) -> Vec<Record> {
     }
     out
 }
+
+// ---------------------------------------------------------------- building ---
+//
+// The inverse of everything above. `libawdl` has to *emit* these records, not only read
+// them: OWL sends zero Service Response records against Apple's 1620 in a comparable
+// capture, so a peer synchronising with it perfectly still has nothing to discover.
+//
+// The test that matters for a builder is not "does it produce something parseable" but
+// "does it produce the same bytes a real device produced". `tests/fixture_service.rs`
+// holds a captured TLV and the round-trip test requires byte equality.
+
+/// Encode a name, compressing any suffix that the dictionary covers.
+///
+/// **Compression is not optional.** A receiver is not obliged to accept a name spelled out
+/// in full where a code exists, and more practically: Apple's own frames use the codes, so
+/// a frame that does not is distinguishable from a real one. Matching the wire is the whole
+/// job.
+///
+/// The dictionary entries are multi-label suffixes (`_airdrop._tcp.local`), so the longest
+/// matching suffix is what to look for — greedy from the end, not label by label.
+pub fn encode_name(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut rest = name;
+
+    loop {
+        if rest.is_empty() {
+            break;
+        }
+        // Longest suffix first: "_airdrop._tcp.local" must win over "local".
+        let mut best: Option<(usize, u16)> = None;
+        for code in 0xC001u16..=0xC00E {
+            let Some(text) = compressed_label(code) else { continue };
+            if rest == text || rest.ends_with(&format!(".{text}")) {
+                let prefix_len = rest.len() - text.len();
+                if best.map_or(true, |(l, _)| text.len() > rest.len() - l) {
+                    best = Some((prefix_len, code));
+                }
+            }
+        }
+
+        if let Some((prefix_len, code)) = best {
+            // Emit any labels before the compressed suffix, then the code.
+            let prefix = rest[..prefix_len].trim_end_matches('.');
+            for label in prefix.split('.').filter(|l| !l.is_empty()) {
+                out.push(label.len() as u8);
+                out.extend_from_slice(label.as_bytes());
+            }
+            out.extend_from_slice(&code.to_be_bytes());
+            return out;
+        }
+
+        // Nothing in the dictionary matches: spell the remaining labels out, then
+        // terminate.
+        //
+        // A NAME ENDING IN A LITERAL LABEL IS TERMINATED WITH 0xC000. One ending in a
+        // dictionary code is not — the code implies the end. Observed in a captured
+        // frame: the PTR target `iPhone (2)` is `0a "iPhone (2)" c0 00`, while the record
+        // name `_applicationservicepairing._tcp.local` ends at its `c0 0a` code with no
+        // terminator.
+        //
+        // 0xC000 decodes to nothing, so omitting it produces a name that reads back
+        // correctly and is two bytes shorter than what the device sent. A round-trip
+        // test against our own parser passes either way; only byte equality with a real
+        // frame catches it.
+        for label in rest.split('.').filter(|l| !l.is_empty()) {
+            out.push(label.len() as u8);
+            out.extend_from_slice(label.as_bytes());
+        }
+        out.extend_from_slice(&0xC000u16.to_be_bytes());
+        rest = "";
+    }
+    out
+}
+
+impl Record {
+    /// Serialise this record as it appears inside a Service Response TLV.
+    pub fn encode(&self) -> Vec<u8> {
+        let (name, rtype) = match self {
+            Record::Ptr { name, .. } => (name.as_str(), T_PTR),
+            Record::Srv { name, .. } => (name.as_str(), T_SRV),
+            Record::Txt { name, .. } => (name.as_str(), T_TXT),
+            Record::Other { name, rtype, .. } => (name.as_str(), *rtype),
+        };
+
+        let encoded_name = encode_name(name);
+        let mut out = Vec::new();
+
+        // THE LENGTH INCLUDES THE TYPE BYTE THAT FOLLOWS IT. The parser has to subtract
+        // one; the builder has to add one. Getting this wrong here produces a frame that
+        // our own parser reads back correctly only if it makes the same mistake.
+        out.extend_from_slice(&((encoded_name.len() + 1) as u16).to_le_bytes());
+        out.extend_from_slice(&encoded_name);
+        out.push(rtype);
+
+        let data = match self {
+            Record::Ptr { target, .. } => encode_name(target),
+            Record::Srv { priority, weight, port, target, .. } => {
+                let mut d = Vec::new();
+                // Big-endian: DNS's own layout, carried through unchanged.
+                d.extend_from_slice(&priority.to_be_bytes());
+                d.extend_from_slice(&weight.to_be_bytes());
+                d.extend_from_slice(&port.to_be_bytes());
+                d.extend_from_slice(&encode_name(target));
+                d
+            }
+            Record::Txt { strings, .. } => {
+                let mut d = Vec::new();
+                for s in strings {
+                    d.push(s.len() as u8);
+                    d.extend_from_slice(s.as_bytes());
+                }
+                d
+            }
+            Record::Other { data, .. } => data.clone(),
+        };
+
+        out.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        // The two bytes upstream calls unknown. Zero in every capture examined, and
+        // written as zero rather than omitted -- the field is positional.
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(&data);
+        out
+    }
+}
+
+/// Serialise a whole Service Response TLV value from its records.
+pub fn encode_records(records: &[Record]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for r in records {
+        out.extend_from_slice(&r.encode());
+    }
+    out
+}
