@@ -128,6 +128,18 @@ failure. It is one field to change and a large surface to be judged against.
 > The synthesis may be both: a version gate, but on an **AirDrop-layer** version in the
 > plists rather than on tag 21.
 >
+> **ANSWERED, 2026-09-12 — it is the trust bootstrap, not the version.** An iPhone that
+> could not see a MacBook at all was sent a file *from* that Mac; the transfer required a
+> PIN; and afterwards the iPhone could discover the Mac. Discovery was the effect of the
+> code, not its precondition. See FINDINGS 33.
+>
+> This inverts the recommendation below. Announcing v10.0 is still worth doing on its own
+> merits, but it is **no longer the decisive test** — and if run as one it would come back
+> negative for a reason unrelated to the version. The thing standing between us and this
+> flow is that we have no durable identity for a peer to remember: our mDNS instance name
+> follows a rotating MAC and our TLS certificate is regenerated at every start. That was
+> recorded as a deliberate decision; it is now a decision with a known cost.
+>
 > Stock Quick Share does not separate the hypotheses — Google announces v3.4 *and* holds no
 > Apple validation record, so either would explain its exclusion. What it does show is that
 > a full, well-resourced implementation on the same AWDL version has not cleared the gate

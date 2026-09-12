@@ -1398,6 +1398,71 @@ those — see the open question on the non-contact code.
 An operator theory that a locked-down VPN blocked identity resolution was **tested and
 refuted**: disabling the VPN and restarting the phone changed nothing.
 
+## 33. ★ The non-contact code is a TRUST BOOTSTRAP, and discovery is what it unlocks
+
+The single most consequential observation in this project so far, and it came from a
+frustrated operator working around a phone that would not cooperate rather than from any
+planned experiment.
+
+The managed iPhone of finding 32 could not see the MacBook — not with the VPN off, not after
+a reboot. Then:
+
+> **the operator sent a file from the Mac to the iPhone, the transfer required a PIN, and
+> after that the iPhone could discover the Mac.**
+
+Order matters here and it is the right way round. The code did not appear *because* the
+devices knew each other; the devices knew each other *because* of the code. Discovery was
+the effect, not the precondition.
+
+### What this settles
+
+`docs/GAPS.md` §1 carried two competing explanations for the non-contact code. One was a
+version gate — Apple offering a new flow to peers announcing something recent, with v3.4
+peers left on the legacy path. The other was written like this:
+
+> *A competing explanation is that the code bootstraps persistent trust, which needs a
+> durable identity to bind to — Apple devices carry an Apple-signed validation record and we
+> structurally cannot.*
+
+**That is what was just observed.** The code establishes a durable association between two
+specific devices, and once established, each can find the other without further ceremony.
+
+It also explains finding 32 without needing MDM at all: the personal iPhone could see the
+Mac because it had been paired with it at some point; the managed iPhone could not because it
+never had. The MDM profile may have tightened *when* the prompt is required, but the
+mechanism is pairing, not a restriction.
+
+### Why this is bad news for us, and urgent rather than theoretical
+
+If the mechanism is persistent trust between device identities, then **announcing v10.0 does
+not get us into it** — and the version experiment §1 recommends would come back negative for
+a reason that has nothing to do with the version. Worse, we are currently unable to
+participate in such a scheme at all, and not because of anything Apple does:
+
+- our **mDNS instance name** is derived from `mosey0`'s MAC, which is fresh every AWDL session
+- our **TLS certificate** is generated at each start and never written to disk
+
+A note already in this file put it as a decision worth keeping visible rather than a bug:
+
+> *Any future feature that wants a peer to remember us — a trusted-device list, a one-time
+> confirmation, a reconnect-without-prompting — needs a stable identity, and we throw ours
+> away twice per restart.*
+
+**That future feature has arrived on the other side of the wire.** The argument for a
+throwaway key — "a key that never touches storage cannot be stolen from storage" — is still a
+good argument, and it is now a trade with a known cost rather than a free choice.
+
+### What is proven and what is not
+
+Proven: a PIN-confirmed transfer from the Mac preceded the iPhone's ability to discover it,
+on a phone where discovery had repeatedly failed.
+
+Not proven, and not guessed at: whether the association is bound to an Apple ID, to a device
+key, or to something else; how long it survives; whether it is symmetric; and whether an
+Apple device would ever offer this flow to a non-Apple peer at all. **The last of those is
+the one that decides whether any of it matters to Tarish**, and it needs a deliberate test on
+the *personal* iPhone, not the managed one.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
