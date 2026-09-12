@@ -73,6 +73,13 @@ pub const SLOT_US: u32 = 4 * AW_US;
 /// A full sixteen-slot cycle: 1024 TU, about 1.05 seconds.
 pub const CYCLE_US: u32 = 16 * SLOT_US;
 
+/// How often a master intends to send a Periodic Synchronization Frame, in TU.
+///
+/// 110 in every captured Apple frame, and `PSF_INTERVAL_MASTER_TU` in OWL — which both
+/// advertises it as `af_period` and paces by it. It is an advertisement, so a transmitter
+/// that emits it and sends at some other rate is misdescribing itself.
+pub const PSF_INTERVAL_TU: u16 = 110;
+
 /// A metric that loses to any real Apple device: 65, which is what `libmosey` advertises.
 ///
 /// "I am here and I do not want the job." The right default until the schedule we advertise
@@ -224,6 +231,11 @@ impl Beacon {
         (now_us / u64::from(AW_US)) as u32
     }
 
+    /// How often we have told peers we will send a PSF, in microseconds.
+    pub fn psf_interval_us(&self) -> u64 {
+        u64::from(PSF_INTERVAL_TU) * u64::from(TU_US)
+    }
+
     /// Which channel-sequence slot `now_us` falls in, on our own cycle.
     pub fn slot_at(now_us: u64) -> usize {
         ((now_us % u64::from(CYCLE_US)) / u64::from(SLOT_US)) as usize
@@ -242,7 +254,13 @@ impl Beacon {
             guard_time: 0,
             // 16 TU, which is what the paper says and what all 18157 captured frames say.
             aw_period: 16,
-            action_frame_period: 110,
+            // THE PSF INTERVAL, in TU, and a promise we should keep. OWL sets this field
+            // from its own `psf_interval` (`PSF_INTERVAL_MASTER_TU 110`) and paces PSFs by
+            // it; every Apple frame carries 110 too. This crate emitted the number and
+            // paced by an unrelated rule, so the frame told every receiver how often we
+            // intended to send and we did not honour it. `psf_interval_us` is the value to
+            // pace by.
+            action_frame_period: PSF_INTERVAL_TU,
             // Bit 11 set: the trailing field is absent, which is what every associated
             // Apple device says. See `FLAG_NO_TRAILING`.
             flags: 0x1800,

@@ -274,9 +274,51 @@ impl ElectionParamsV2 {
     ///
     /// Address breaks a metric tie. That part is still inferred rather than observed —
     /// no capture so far has contained two nodes with equal metrics.
+    ///
+    /// # ⚠ THIS DIVERGES FROM OWL, AND OWL MAY BE RIGHT
+    ///
+    /// OWL's `awdl_election_compare_master` is **counter first, metric second**:
+    ///
+    /// ```c
+    /// int result = compare(a->master_counter, b->master_counter);
+    /// if (!result) result = compare(a->master_metric, b->master_metric);
+    /// ```
+    ///
+    /// The capture that settled this function compared `self_metric` and `self_counter`;
+    /// OWL compares `master_counter` and `master_metric`, which are what a peer says about
+    /// *its own top master*. **Those are different fields, so the measurement did not test
+    /// OWL's rule** and this implementation is an undecided divergence rather than a
+    /// considered one.
+    ///
+    /// It cannot be resolved from the captures held: in the run behind finding 9 the losing
+    /// device was already following when the capture began, so its independent election
+    /// state was never seen. Settling it needs a capture of a device **joining** a cluster.
+    /// See FINDINGS 42.
+    ///
+    /// It also ignores three things OWL does and this crate does not: refusing a peer that
+    /// names us as its own sync master (cycle prevention), refusing one that would make the
+    /// sync tree taller than ten, and breaking a metric tie on *height* before address.
     pub fn beats(&self, other: &ElectionParamsV2, self_addr: [u8; 6], other_addr: [u8; 6]) -> bool {
         (self.self_metric, self_addr) > (other.self_metric, other_addr)
     }
+
+    /// Would adopting `peer` as our sync master create a cycle?
+    ///
+    /// True when the peer already names `self_addr` as the node it synchronises to. OWL
+    /// rejects such a peer outright — *"do not allow cycles in sync tree"* — and without the
+    /// check two nodes can name each other and the tree stops being one.
+    ///
+    /// `peer_parent` is the peer's own `other` field, which is its next hop toward the
+    /// master. See [`ElectionParamsV2::other`].
+    pub fn would_cycle(peer_parent: [u8; 6], self_addr: [u8; 6]) -> bool {
+        peer_parent == self_addr
+    }
+
+    /// The largest sync-tree height OWL will accept, and a sane bound for us.
+    ///
+    /// `AWDL_ELECTION_TREE_MAX_HEIGHT`, described in its own source as an arbitrary limit —
+    /// recorded as borrowed rather than derived.
+    pub const MAX_TREE_HEIGHT: u32 = 10;
 
     /// The counter a node should advertise, given how many Availability Windows it has
     /// held the job and where its counter stood when it took it.

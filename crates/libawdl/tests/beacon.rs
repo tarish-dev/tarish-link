@@ -308,3 +308,34 @@ fn the_breadth_control_is_honest_about_where_it_transmits() {
     // Default is unchanged: Apple's shape.
     assert_eq!(Beacon::new(ADDR, 149, "QA").advertised_slots(), vec![2, 8, 10]);
 }
+
+/// We must pace PSFs by the interval we advertise.
+///
+/// `action_frame_period` is the PSF interval: OWL sets the field from its own
+/// `psf_interval` and paces by it, and every Apple frame carries 110 TU. Emitting the
+/// number while sending at some other rate misdescribes us to every receiver.
+#[test]
+fn the_advertised_psf_interval_is_the_one_we_would_pace_by() {
+    use libawdl::beacon::PSF_INTERVAL_TU;
+    let b = Beacon::new(ADDR, 149, "QA");
+    let f = b.mif(0);
+    let af = ActionFrame::parse(&f[24..]).unwrap();
+    let sync = SyncParams::parse(af.tlvs().find(|t| t.tag == 4).unwrap().value).unwrap();
+
+    assert_eq!(sync.action_frame_period, PSF_INTERVAL_TU, "we advertise 110 TU");
+    assert_eq!(b.psf_interval_us(), u64::from(PSF_INTERVAL_TU) * 1024);
+    // Sanity: the interval is shorter than a slot, so a PSF is not a per-slot event.
+    assert!(b.psf_interval_us() > u64::from(AW_US), "longer than one availability window");
+    assert!(b.psf_interval_us() < u64::from(CYCLE_US), "and shorter than a full cycle");
+}
+
+/// Cycle prevention, which OWL has and this crate did not.
+#[test]
+fn adopting_a_peer_that_already_follows_us_would_cycle() {
+    use libawdl::election::ElectionParamsV2;
+    let me = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let them = [0xaa; 6];
+    assert!(ElectionParamsV2::would_cycle(me, me), "a peer whose parent is us");
+    assert!(!ElectionParamsV2::would_cycle(them, me));
+    assert_eq!(ElectionParamsV2::MAX_TREE_HEIGHT, 10);
+}

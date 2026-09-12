@@ -2072,6 +2072,103 @@ The honest next step is still **reception**: `libawdl::follow` can now recover a
 phase correctly, and a beacon that transmits in *the cluster's* windows rather than its own
 is a different experiment from any run so far.
 
+## 42. ★ Reading OWL in full: thirteen things it knows that we did not
+
+Prompted by the operator — *"actually do read it now fully, i think its time"* — after OWL had
+already corrected two claims in this document. It corrected more. OWL is 4278 lines of GPL-3
+C by Milan Stute and the Open Wireless Link Project, and it is the reference this project
+should have been checking against all along.
+
+### The one that matters most: our election comparison may be backwards
+
+```c
+static int awdl_election_compare_master(a, b) {
+	int result = compare(a->master_counter, b->master_counter);
+	if (!result) result = compare(a->master_metric, b->master_metric);
+	return result;
+}
+```
+
+**Counter first, metric second** — the opposite of `ElectionParamsV2::beats`, which finding 9
+settled as metric-first on the strength of a capture.
+
+**The two claims are not about the same fields.** OWL compares `master_counter` and
+`master_metric` — what a peer says about *its own top master*. Finding 9 compared
+`self_metric` and `self_counter`. So the capture that "refuted counter-first" did not test
+OWL's rule at all, and our `beats()` is a divergence from the reference implementation that
+nobody decided to make.
+
+It is not resolvable from the captures we hold: in the run that produced finding 9, the
+losing device was **already following** when the capture began, so its independent election
+state was never observed. **This is now the most important open question in the project** —
+it decides whether our node can ever win an election correctly — and it needs a capture of a
+device *joining* a cluster.
+
+### What OWL does in the election that we do not do at all
+
+- **Cycle prevention.** Reject a peer whose `sync_addr` is us: *"do not allow cycles in sync
+  tree"*. Without it two nodes can name each other and the tree is not a tree.
+- **Tree height limit**, `AWDL_ELECTION_TREE_MAX_HEIGHT 10`, rejecting a peer that would make
+  the sync tree taller than that.
+- **Tie-breaks, in order**: equal master metric → prefer the *shorter* tree; equal height →
+  prefer the *larger* address. We had the address tie-break inferred and the height one not
+  at all.
+- **`sync_addr` and `master_addr` as separate state** — the immediate parent and the root.
+  Independent confirmation of finding 26, arrived at from the code rather than from 634
+  frames.
+- **`AWDL_ELECTION_METRIC_INIT 60`.** OWL declines the election by default too, within five
+  of `libmosey`'s 65. Three independent implementations choosing not to compete is worth
+  noticing.
+
+### Timing: OWL already had the rule I derived the hard way
+
+```c
+/* Schedule MIF in middle of sequence (if non-zero) */
+if (awdl_chan_num(awdl_state->channel.current, ...) > 0)
+    awdl_send_action(state, AWDL_ACTION_MIF);
+/* schedule next in the middle of EAW */
+ev_timer_rearm(loop, timer, usec_to_sec(next_aw + tu_to_usec(eaw_len / 2)));
+```
+
+Transmit in the **middle** of the slot, and only when the slot's channel is non-zero. That is
+exactly the centre-aiming correction of finding 40 and the "only in advertised windows" fix of
+finding 37, both of which were reached by trial and error over several hours.
+
+### And the field we emit and ignore
+
+**`action_frame_period` is the PSF interval.** OWL: `tlv->af_period = state->psf_interval`,
+initialised to `PSF_INTERVAL_MASTER_TU 110`. Every Apple frame carries 110 and our beacon
+copies it verbatim while pacing PSFs by an unrelated rule. The frame has been telling every
+receiver how often we intend to send, and we were not honouring our own advertisement.
+
+### Data-path rules we have not implemented
+
+- **Multicast data only in EAW 0 or 10** — `awdl_is_multicast_eaw` returns `slot == 0 || slot
+  == 10`. Not action frames, which is why our broadcast MIFs are not affected, but it
+  constrains any data path we build.
+- **Guard intervals at slot edges**: `AWDL_UNICAST_GUARD_TU 3`, `AWDL_MULTICAST_GUARD_TU 16`.
+  A node refuses to start a transmission that close to a boundary. `awdl_can_send_in` returns
+  a signed time so the caller knows whether to wait or whether it has just missed.
+- **Per-peer `sync_offset`.** OWL keeps each peer's clock offset and asks *"are we on the same
+  channel as this peer right now"* with the offset applied. We have a single cluster phase.
+- **Peer timeout of 2 s** before a peer is dropped.
+
+### One place we can check ourselves against them
+
+OWL's idle schedule is slots `{0, 9, 10}` on the social channel and `{8}` on channel 6. Apple
+measured is `{0, 2, 8, 10}`. Both agree on 0, 8 and 10; they differ on 2 against 9. Ours
+follows Apple, which is the right call — but it is worth knowing OWL chose differently, since
+it means the exact placement of the third and fourth slots is not something either project
+established from first principles.
+
+### The meta-lesson
+
+Three claims in this document were wrong in ways OWL would have caught: that the trailing
+bytes were padding (it comments them), that clock recovery was undiscovered (it implements
+it), and that a slot is one availability window (its `schedule.c` says otherwise). **Check OWL
+before claiming anything is new.** It is on the research Pi at `~/owl`, it is 4278 lines, and
+reading it costs less than one wrong experiment.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

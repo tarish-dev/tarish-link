@@ -302,3 +302,24 @@ re-derived with `awdl profile`.
 **Transmit correctness.** Emitting the right bytes and being *accepted* are different bars,
 and nothing here has been on the air from `libawdl`. The table says what to send; only an
 Apple device can say whether it worked.
+
+## Check OWL first
+
+`~/owl` on the research Pi: 4278 lines of GPL-3 C by Milan Stute and the Open Wireless Link
+Project. It is the reference implementation of this protocol and it has now corrected four
+claims in `docs/FINDINGS.md`:
+
+| we said | OWL said |
+|---|---|
+| the bytes after the channel sequence are undecoded | it comments them `pad[2]` / `pad[3]` |
+| recovering the cluster clock without a TSF was undiscovered | `rx.c` does it, and has since 2018 |
+| a channel-sequence slot is one availability window | `schedule.c`: it is `presence_mode` of them |
+| election is decided metric-first | `election.c`: counter first, metric second |
+
+The last of those is **unresolved and is the most important open question in the project** —
+see FINDINGS 42. Three of the four cost real experiment time that reading first would have
+saved.
+
+Its licence is GPL-3 and this project does not copy its code. Reading it to learn what the
+protocol does is not the same thing, and the findings that came out of it are recorded with
+attribution.
