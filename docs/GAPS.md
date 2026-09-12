@@ -41,8 +41,9 @@ command's output, so adding captures improves it rather than dating it.
 
 ## How much of this do we actually understand?
 
-**63% of the control-plane bytes, and the other 37% we copy.** Run `awdl coverage
-captures/*.pcap` to regenerate this; it is measured, not estimated.
+**76% of the control-plane bytes, and the other 24% we copy.** Run `awdl coverage
+captures/*.pcap` to regenerate this; it is measured, not estimated. It was 63% before the
+decoding pass recorded in findings 21-25.
 
 Two claims get conflated and only one of them is strong:
 
@@ -60,23 +61,23 @@ is cargo-culting with no signal when it is wrong.
 | tag | | named | note |
 |---|---|---|---|
 | 2 | Service Response | 100% | it is DNS, and a documented encoding |
+| 17 | 802.11 Container | 100% | a standard VHT Capabilities element — finding 23 |
 | 18 | Channel Sequence | 100% | |
 | 21 | Version | 100% | |
 | 16 | Arpa | 97% | the flags byte is not named |
+| 4 | Synchronization Parameters | 93% | the flags word, byte 28, the trailing pair — finding 21 |
 | 5 | Election Parameters | 86% | |
-| 4 | Synchronization Parameters | 78% | the flags word, byte 28, the trailing pair, and 16 Legacy qualifier bytes |
+| 24 | Election Parameters v2 | 65% | the second address and 8 reserved — finding 22 |
 | 12 | Data Path State | 50% | the extended block and UMI options are opaque |
-| 24 | Election Parameters v2 | 45% | second address, both counters, 8 reserved |
+| 7 | HT Capabilities | 43% | 802.11 fields named, the variable tail is not — finding 24 |
 | 33 | 6 GHz channels | 24% | |
-| 17 | 802.11 Container | 14% | the element bodies are radio capability bits |
 | 32 | 6 GHz info | 15% | |
-| 6 | Service Parameters | **0%** | no parser |
-| 7 | HT Capabilities | **0%** | no parser |
+| 6 | Service Parameters | **0%** | shape known, contents are a hash — and **it does not matter**, finding 25 |
 | 35 | *unrecognised* | **0%** | not in any published table, 2 bytes, `01 01` |
 
-Counting Service Response flatters the figure to 77.9%: it is 40% of all bytes on the air
+Counting Service Response flatters the figure to 85.6%: it is 40% of all bytes on the air
 and it is the one thing that was already specified elsewhere. The number that matters for
-building a transmitter is the 63%.
+building a transmitter is the 76%.
 
 ### "Are you sure of them in every frame?"
 

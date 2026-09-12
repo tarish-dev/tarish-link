@@ -40,13 +40,21 @@ fn election_v2_has_fourteen_opaque_bytes_left() {
 /// The tags with no decoder at all. Naming them here means adding one is a visible change.
 #[test]
 fn the_undecoded_tags_are_the_ones_we_think_they_are() {
-    for tag in [6u8, 7, 35] {
-        assert!(!is_decoded(tag), "tag {tag} has no parser");
-        let c = of_tlv(tag, &[1, 2, 3, 4]);
-        assert_eq!(c.named, 0, "tag {tag} contributes nothing we can name");
-        assert_eq!(c.opaque, 4);
-    }
-    for tag in [2u8, 4, 5, 12, 16, 17, 18, 21, 24, 32, 33] {
+    // Tag 35 has no parser at all.
+    assert!(!is_decoded(35));
+    let c = of_tlv(35, &[1, 2, 3, 4]);
+    assert_eq!(c.named, 0);
+    assert_eq!(c.opaque, 4);
+
+    // Tag 6 HAS a parser and still names nothing, which is the distinction worth keeping:
+    // its field boundaries are known and its contents are a hash we cannot compute.
+    // Knowing where a field starts is not knowing what belongs in it.
+    assert!(is_decoded(6), "there is a parser");
+    let six = of_tlv(6, &[0u8; 11]);
+    assert_eq!(six.named, 0, "and it names nothing");
+    assert_eq!(six.opaque, 11);
+
+    for tag in [2u8, 4, 5, 7, 12, 16, 17, 18, 21, 24, 32, 33] {
         assert!(is_decoded(tag), "tag {tag} has a parser");
     }
 }

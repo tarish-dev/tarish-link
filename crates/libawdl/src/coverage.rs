@@ -216,6 +216,23 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             Coverage { named, opaque: len - named }
         }
 
+        // HT Capabilities: the IEEE 802.11 fields are named -- capability info, A-MPDU
+        // parameters, and the MCS bitmap -- and the two leading bytes and the variable
+        // tail are not.
+        7 => {
+            use crate::state::HtCapabilities;
+            if HtCapabilities::parse(v).is_none() {
+                return all_opaque;
+            }
+            Coverage { named: 5, opaque: len - 5 }
+        }
+
+        // Service Parameters: the field boundaries are known and the CONTENTS are not.
+        // A bitmask whose hash function we do not have is not a value we can choose, so
+        // this counts as nothing named -- knowing where a field starts is not knowing
+        // what belongs in it.
+        6 => all_opaque,
+
         // Everything else has no parser at all.
         _ => all_opaque,
     }
@@ -223,5 +240,5 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
 
 /// Whether we have any decoder for a tag.
 pub fn is_decoded(tag: u8) -> bool {
-    matches!(tag, 2 | 4 | 5 | 12 | 16 | 17 | 18 | 21 | 24 | 32 | 33)
+    matches!(tag, 2 | 4 | 5 | 6 | 7 | 12 | 16 | 17 | 18 | 21 | 24 | 32 | 33)
 }

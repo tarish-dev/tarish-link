@@ -209,3 +209,90 @@ fn the_v2_counters_are_a_tenure_as_master() {
     assert_eq!(e.master_counter, e.self_counter);
     assert_eq!(e.master, addr);
 }
+
+/// Tag 7 carries a standard HT Capability Information field, whatever its total length.
+///
+/// Three shapes from three devices. The named part is identical in position in all of
+/// them; only the tail differs, which is the evidence that the tail is a separate thing
+/// and not a longer version of the same fields.
+#[test]
+fn ht_capabilities_decode_across_three_shapes() {
+    use libawdl::state::HtCapabilities;
+
+    let short = HtCapabilities::parse(APPLE_HT_SHORT).expect("parses");
+    assert_eq!(short.unknown_0, [0, 0]);
+    assert_eq!(short.info, 0x006f);
+    assert!(short.ldpc() && short.supports_40mhz());
+    assert_eq!(short.sm_power_save(), 3, "spatial-multiplexing power save disabled");
+    assert!(!short.greenfield());
+    assert!(short.short_gi_20() && short.short_gi_40());
+    assert!(!short.tx_stbc());
+    assert_eq!(short.max_amsdu_octets(), 3839);
+    assert!(!short.lsig_txop_protection());
+    assert_eq!(short.max_ampdu_exponent(), 3);
+    assert_eq!(short.max_ampdu_octets(), 65535);
+    assert_eq!(short.min_mpdu_start_spacing_us(), 16.0);
+    assert_eq!(short.rx_mcs_bitmap, 0xffff);
+    assert_eq!(short.spatial_streams(), 2, "MCS 0-15 is two streams");
+    assert_eq!(short.encode(), APPLE_HT_SHORT);
+
+    // The long form differs in the info word and the A-MPDU spacing, not in layout.
+    let long = HtCapabilities::parse(APPLE_HT_LONG).expect("parses");
+    assert_eq!(long.info, 0x886f);
+    assert_eq!(long.max_amsdu_octets(), 7935, "B11 is set here and not in the short form");
+    assert!(long.lsig_txop_protection());
+    assert_eq!(long.min_mpdu_start_spacing_us(), 8.0);
+    assert_eq!(long.rx_mcs_bitmap, 0xffff);
+    assert_eq!(long.trailing.len(), 13, "and thirteen bytes nobody has decoded");
+    assert_eq!(long.encode(), APPLE_HT_LONG);
+
+    // libmosey: the same radio claim, a different A-MPDU spacing.
+    let mosey = HtCapabilities::parse(LIBMOSEY_HT).expect("parses");
+    assert_eq!(mosey.info, short.info, "same capabilities as Apple's short form");
+    assert_eq!(mosey.min_mpdu_start_spacing_us(), 4.0, "and a tighter spacing");
+    assert_eq!(mosey.encode(), LIBMOSEY_HT);
+
+    // Too short to hold the named fields is refused rather than part-parsed.
+    assert!(HtCapabilities::parse(&[0, 0, 0x6f, 0, 0x1f]).is_none());
+}
+
+/// HT and VHT must agree about the radio, and in Apple's frames they do.
+#[test]
+fn the_ht_and_vht_elements_describe_the_same_two_stream_radio() {
+    use libawdl::state::{HtCapabilities, Ieee80211Container, VhtCapabilities};
+
+    let ht = HtCapabilities::parse(APPLE_HT_SHORT).unwrap();
+    let vht_body = Ieee80211Container::parse(APPLE_CONTAINER).unwrap();
+    let vht = VhtCapabilities::parse(vht_body.vht_capabilities().unwrap()).unwrap();
+
+    assert_eq!(ht.spatial_streams(), 2);
+    assert_eq!(VhtCapabilities::spatial_streams(vht.rx_mcs_map), 2);
+    assert_eq!(
+        ht.spatial_streams(),
+        VhtCapabilities::spatial_streams(vht.rx_mcs_map),
+        "one radio, described twice — a mismatch would mean we had mis-split one of them"
+    );
+}
+
+/// Service Parameters: we know the shape and not the contents, and that is the honest
+/// state to leave it in.
+#[test]
+fn service_params_round_trip_without_being_understood() {
+    use libawdl::state::ServiceParams;
+
+    // An Apple frame advertising _airdrop: bit 19 is the one that is always set.
+    const APPLE: &[u8] = &[0x00, 0x00, 0x00, 0xa1, 0x2e, 0x04, 0x00, 0x08, 0x00, 0x10, 0x40];
+    let p = ServiceParams::parse(APPLE).expect("parses");
+    assert_eq!(p.sui, 11937);
+    assert_eq!(p.bitmask, 0x0008_0004);
+    assert!(p.bitmask & (1 << 19) != 0, "bit 19 accompanies _airdrop in every frame");
+    assert_eq!(p.trailing, vec![0x10, 0x40], "and two bytes past the mask");
+    assert_eq!(p.encode(), APPLE);
+
+    // What libmosey sends while AirDrop to a Mac works: nothing at all.
+    const MOSEY: &[u8] = &[0; 9];
+    let m = ServiceParams::parse(MOSEY).expect("parses");
+    assert_eq!(m, ServiceParams::empty());
+    assert_eq!(m.encode(), MOSEY);
+    assert_eq!(ServiceParams::empty().encode().len(), ServiceParams::MIN_LEN);
+}

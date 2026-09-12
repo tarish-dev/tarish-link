@@ -1153,6 +1153,70 @@ radio, so they have to come from the radio — `libawdl-hal` — and not from a 
 out of an Apple frame. Announcing capabilities the hardware does not have is an invitation
 to a peer to use them.
 
+## 24. Tag 7 is HT Capabilities, mostly in the 802.11 sense
+
+Same shape of answer as finding 23. Bytes 2..5 are the IEEE 802.11-2020 §9.4.2.55 **HT
+Capability Information** field and **A-MPDU Parameters**, and the two bytes after them are
+the start of the Supported MCS Set. Two independent sources agree: OWL's
+`awdl_ht_capabilities_tlv` names exactly those fields, and the values decode as sane radios.
+
+```text
+  00 00  6f 00  1f  ff ff  00 00                Apple, 9 bytes
+  00 00  6f 88  1b  ff ff  00 00 ... 96 00 ...  Apple, 20 bytes
+  00 00  6f 00  17  ff ff  00 00                libmosey, 9 bytes
+         ^^^^^  ^^  ^^^^^
+         info   A-MPDU   MCS 0-15
+```
+
+`0x006f` is LDPC, 40 MHz, SM power save disabled, short GI at both 20 and 40.
+`0x886f` adds the 7935-octet A-MSDU and L-SIG TXOP protection. The A-MPDU byte differs
+between all three — 16 µs, 8 µs and 4 µs minimum start spacing — which is the kind of
+variation that only makes sense if these really are per-radio capability fields.
+
+**A cross-check worth having:** the HT element says two spatial streams and so does the
+VHT element in tag 17 of the same frame. One radio, described twice, agreeing. A mis-split
+of either would show up as a disagreement, and `tests/build_election.rs` asserts it.
+
+The tag is still **not a fixed struct** — 8, 9 and 20 bytes — and all the variation is in
+the tail after byte 7, which nobody has decoded. The leading two bytes are `00 00`
+everywhere and OWL calls them unknown too.
+
+## 25. Tag 6 does not need to be solved, and here is the proof
+
+Service Parameters is a hash of the services a node advertises. The field boundaries come
+from OWL — three unnamed bytes, a 16-bit `sui`, a bitmask — and the captures support that
+split. The mask is clearly per-service and stable:
+
+```text
+  _airdrop         bit 19, in every frame that advertises it
+  _companion-link  bit 22, in all four
+```
+
+which reads like a Bloom filter over the service name. Twenty observations cannot recover
+the function that produced them, and inventing one would put an unverifiable claim about
+our own services on the air.
+
+### Why that is fine
+
+**`libmosey` sends this tag completely empty — `sui` 0, mask 0 — while advertising
+`_airdrop`, and AirDrop to a Mac works.** Two blazer sessions are in `captures/` doing
+exactly that, 1611 frames of it, and those are the same builds that transfer to a Mac
+today.
+
+So an Apple device does not require a populated Service Parameters to discover a peer or
+accept a transfer from one. `ServiceParams::empty()` is what a transmitter should send, and
+it is named for what it is rather than reached by `Default` so that the choice is visible.
+
+**This is a measurement of what Apple tolerates, not of what Apple means.** It is the right
+call today and the first place to look if a future peer starts filtering on this tag.
+
+### The general shape of the remaining work
+
+This is the second tag where the answer was "we do not need it" rather than "we decoded
+it", and it is worth noticing the pattern: the bytes still opaque are increasingly ones
+that are either radio-specific (so they belong to the HAL), or vendor-internal state that a
+peer does not act on. The way to tell which is to transmit without them and watch.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

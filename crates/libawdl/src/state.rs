@@ -263,6 +263,222 @@ impl DataPathState {
     }
 }
 
+// ------------------------------------------------------------------- tag 6 ---
+
+/// Service Parameters (tag 6): a hash of the services this node advertises.
+///
+/// The field boundaries come from OWL's `awdl_service_params_tlv` — three unnamed bytes, a
+/// 16-bit `sui`, then a bitmask — and the captures agree with that split. **The contents
+/// are a different matter and are not decoded here**, because a bitmask whose hash
+/// function you do not have is not something you can compute, only copy.
+///
+/// What the captures do show is that the mask is per-service and stable:
+///
+/// ```text
+///   _airdrop         bit 19 set in every frame that advertises it
+///   _companion-link  bit 22, in all four
+/// ```
+///
+/// which reads like a Bloom filter over the service name. Twenty observations are not
+/// enough to recover the function that produced them, and guessing one would put a claim
+/// about our services on the air that we could not check.
+///
+/// ### Why that does not block anything
+///
+/// **`libmosey` sends this tag completely empty — `sui` 0, mask 0 — while advertising
+/// `_airdrop`, and AirDrop to a Mac works.** Two of our own blazer sessions are in
+/// `captures/` doing exactly that, 1611 frames of it. So an Apple device does not require
+/// a populated Service Parameters to discover a peer or transfer to one, and the honest
+/// thing for a transmitter to send is zeros rather than a hash it invented.
+///
+/// That is a measurement of what Apple tolerates, not of what Apple means. If a future
+/// peer starts filtering on this tag, this is where to look first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServiceParams {
+    /// Bytes 0..3. `00 00 00` in every frame measured.
+    pub unknown_0: [u8; 3],
+    /// "Service Unique Identifier", per OWL. Varies frame to frame on Apple devices and
+    /// is 0 on `libmosey`.
+    pub sui: u16,
+    /// The service hash. See the type's note: observed, not understood.
+    pub bitmask: u32,
+    /// Bytes past the mask. Present on the 10- and 11-byte forms and undecoded; the
+    /// values look like more mask, which would make the field variable-length.
+    pub trailing: Vec<u8>,
+}
+
+impl ServiceParams {
+    pub const MIN_LEN: usize = 9;
+
+    pub fn parse(v: &[u8]) -> Option<ServiceParams> {
+        if v.len() < Self::MIN_LEN {
+            return None;
+        }
+        Some(ServiceParams {
+            unknown_0: v.get(0..3)?.try_into().ok()?,
+            sui: le::u16(v, 3)?,
+            bitmask: le::u32(v, 5)?,
+            trailing: v.get(9..).unwrap_or(&[]).to_vec(),
+        })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut o = Vec::with_capacity(Self::MIN_LEN + self.trailing.len());
+        o.extend_from_slice(&self.unknown_0);
+        o.extend_from_slice(&self.sui.to_le_bytes());
+        o.extend_from_slice(&self.bitmask.to_le_bytes());
+        o.extend_from_slice(&self.trailing);
+        o
+    }
+
+    /// What `libmosey` sends, and what we should send: nothing.
+    ///
+    /// Named for what it is rather than called `default()`, so that choosing it is a
+    /// decision a reader can see and question rather than a value that arrived by
+    /// omission. See the type's note for the evidence that it is accepted.
+    pub fn empty() -> ServiceParams {
+        ServiceParams { unknown_0: [0; 3], sui: 0, bitmask: 0, trailing: Vec::new() }
+    }
+}
+
+// ------------------------------------------------------------------- tag 7 ---
+
+/// HT Capabilities (tag 7).
+///
+/// Like tag 17, most of this is not AWDL's invention: bytes 2..5 are the **HT Capability
+/// Information** field and **A-MPDU Parameters** of IEEE 802.11-2020 §9.4.2.55, and the
+/// bytes after them begin the Supported MCS Set. Two independent sources agree on that
+/// split — OWL's `awdl_ht_capabilities_tlv`, which names `ht_capabilities`,
+/// `ampdu_params` and `rx_mcs`, and the values themselves, which decode as sane radios.
+///
+/// **The tag is not a fixed struct.** It has been seen at 8, 9 and 20 bytes, and the
+/// difference is all in the tail. The leading two bytes are `00 00` in every frame in
+/// `captures/` and OWL calls them `unknown`; nobody has said what they are.
+///
+/// ```text
+///   00 00  6f 00  1f  ff ff  00 00                Apple, 9 bytes
+///   00 00  6f 88  1b  ff ff  00 00 ... 96 00 ...  Apple, 20 bytes
+///   00 00  6f 00  17  ff ff  00 00                libmosey, 9 bytes
+///          ^^^^^  ^^  ^^^^^
+///          info   A-MPDU   MCS 0-15
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtCapabilities {
+    /// Bytes 0..2. `00 00` everywhere measured, and unnamed by every source.
+    pub unknown_0: [u8; 2],
+    /// HT Capability Information, IEEE 802.11-2020 §9.4.2.55.2.
+    pub info: u16,
+    /// A-MPDU Parameters, §9.4.2.55.3.
+    pub ampdu_params: u8,
+    /// The first two octets of the Supported MCS Set: one bit per MCS index, 0..15.
+    pub rx_mcs_bitmap: u16,
+    /// Everything after byte 7. Length varies by device and is undecoded.
+    pub trailing: Vec<u8>,
+}
+
+impl HtCapabilities {
+    pub const MIN_LEN: usize = 7;
+
+    pub fn parse(v: &[u8]) -> Option<HtCapabilities> {
+        if v.len() < Self::MIN_LEN {
+            return None;
+        }
+        Some(HtCapabilities {
+            unknown_0: v.get(0..2)?.try_into().ok()?,
+            info: le::u16(v, 2)?,
+            ampdu_params: le::u8(v, 4)?,
+            rx_mcs_bitmap: le::u16(v, 5)?,
+            trailing: v.get(7..).unwrap_or(&[]).to_vec(),
+        })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut o = Vec::with_capacity(Self::MIN_LEN + self.trailing.len());
+        o.extend_from_slice(&self.unknown_0);
+        o.extend_from_slice(&self.info.to_le_bytes());
+        o.push(self.ampdu_params);
+        o.extend_from_slice(&self.rx_mcs_bitmap.to_le_bytes());
+        o.extend_from_slice(&self.trailing);
+        o
+    }
+
+    fn bit(&self, n: u32) -> bool {
+        self.info & (1 << n) != 0
+    }
+
+    /// B0.
+    pub fn ldpc(&self) -> bool {
+        self.bit(0)
+    }
+    /// B1: set means 20 and 40 MHz, clear means 20 only.
+    pub fn supports_40mhz(&self) -> bool {
+        self.bit(1)
+    }
+    /// B2-B3. 3 means spatial-multiplexing power save is disabled.
+    pub fn sm_power_save(&self) -> u16 {
+        (self.info >> 2) & 0b11
+    }
+    /// B4.
+    pub fn greenfield(&self) -> bool {
+        self.bit(4)
+    }
+    /// B5.
+    pub fn short_gi_20(&self) -> bool {
+        self.bit(5)
+    }
+    /// B6.
+    pub fn short_gi_40(&self) -> bool {
+        self.bit(6)
+    }
+    /// B7.
+    pub fn tx_stbc(&self) -> bool {
+        self.bit(7)
+    }
+    /// B11: set means 7935 octets, clear means 3839.
+    pub fn max_amsdu_octets(&self) -> u16 {
+        if self.bit(11) { 7935 } else { 3839 }
+    }
+    /// B15.
+    pub fn lsig_txop_protection(&self) -> bool {
+        self.bit(15)
+    }
+
+    /// A-MPDU Parameters B0-B1, as the exponent. Length is `2^(13 + exp) - 1` octets.
+    pub fn max_ampdu_exponent(&self) -> u8 {
+        self.ampdu_params & 0b11
+    }
+    pub fn max_ampdu_octets(&self) -> u32 {
+        (1u32 << (13 + u32::from(self.max_ampdu_exponent()))) - 1
+    }
+
+    /// Minimum MPDU start spacing, in microseconds. B2-B4.
+    pub fn min_mpdu_start_spacing_us(&self) -> f32 {
+        match (self.ampdu_params >> 2) & 0b111 {
+            0 => 0.0,
+            1 => 0.25,
+            2 => 0.5,
+            3 => 1.0,
+            4 => 2.0,
+            5 => 4.0,
+            6 => 8.0,
+            _ => 16.0,
+        }
+    }
+
+    /// How many spatial streams the MCS bitmap covers. HT numbers MCS 0-7 for one stream,
+    /// 8-15 for two, so a bitmap of 0xffff is two streams.
+    pub fn spatial_streams(&self) -> u8 {
+        let mut n = 0u8;
+        for stream in 0..2u8 {
+            let mask = 0xffu16 << (8 * stream);
+            if self.rx_mcs_bitmap & mask != 0 {
+                n = stream + 1;
+            }
+        }
+        n
+    }
+}
+
 // ------------------------------------------------------------------ tag 17 ---
 
 /// IEEE 802.11 Container (tag 17): standard 802.11 information elements, verbatim.
