@@ -129,6 +129,44 @@ adapter is missing.
 **rfkill soft-blocks every radio at boot** until a country is set, and `ip link set up`
 then fails with `Operation not possible due to RF-kill`.
 
+## The probe, run on real hardware
+
+`cargo run --release --example probe -- <managed-iface> <monitor-iface>` asks a radio what
+it can do. On a Raspberry Pi 400 with an ALFA AWUS036ACM (`mt76x2u`), mainline Linux:
+
+```
+phy            phy1
+address        00:c0:ca:b0:60:4c
+
+TRANSMIT-capable AWDL social channels: [6, 44, 149]
+
+active monitor (ACKs rx)  yes
+injection                 yes
+MAC TSF readable          NO
+TSF channel schedule      NO
+fixed TX rate             NO
+
+==> tier: SoftTimed
+    to reach HwTimed, this radio still needs:
+      - MAC TSF cannot be read
+      - no TSF-anchored channel schedule — windows must be met by the CPU
+      - TX rate cannot be pinned per frame
+```
+
+**That is the entire conversation a vendor needs to have.** Three named primitives on their
+own chip, with everything else already passing — not a specification to interpret.
+
+It also confirms the tier model against reality rather than against intent: mainline
+`nl80211` reaches `SoftTimed` and cannot reach `HwTimed`, and the missing pieces are exactly
+the ones `wonder.ko` adds (`get_mac_tsf`, `set_channel_schedule_req`, `set_fixed_tx_rate`).
+
+> **One bug this found that compiling never would.** The backend invoked `iw` by bare name.
+> It ships in `/usr/sbin`, which is absent from a non-login shell's PATH on Debian, so it
+> worked interactively and failed from a service or any programmatically started process —
+> reporting `No such file or directory` for a tool that plainly existed. `ip` in `/sbin` has
+> the same problem. Both now resolve by absolute path. Worth knowing before a vendor meets
+> it.
+
 ## Verifying a backend
 
 A vendor backend is correct when it produces the same results as the reference one on the

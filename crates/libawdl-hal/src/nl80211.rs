@@ -33,11 +33,38 @@ use crate::{Error, Result};
 /// getting the seam right matters more than getting it fast. Channel switching through
 /// a process spawn is far too slow for per-slot hopping, which is one more reason
 /// [`Tier::SoftTimed`] is an honest ceiling here.
+/// Where `iw` actually lives.
+///
+/// NOT just "iw". It is a network-administration tool and ships in `/usr/sbin`, which is
+/// absent from a non-login shell's PATH on Debian — so invoking it by bare name works
+/// from an interactive session and fails from a service, a cron job, or a program started
+/// any other way. Found by running this probe on a Pi, where it reported
+/// `running iw: No such file or directory` from a shell in which `iw` plainly worked.
+fn ip_path() -> &'static str {
+    for p in ["/sbin/ip", "/usr/sbin/ip", "/bin/ip", "/usr/bin/ip"] {
+        if std::path::Path::new(p).exists() {
+            return p;
+        }
+    }
+    "ip"
+}
+
+fn iw_path() -> &'static str {
+    for p in ["/usr/sbin/iw", "/sbin/iw", "/usr/bin/iw", "/bin/iw"] {
+        if std::path::Path::new(p).exists() {
+            return p;
+        }
+    }
+    // Let PATH have the last word rather than failing here: a system that puts it
+    // somewhere unusual should still work if PATH knows.
+    "iw"
+}
+
 fn iw(args: &[&str]) -> Result<String> {
-    let out = Command::new("iw")
+    let out = Command::new(iw_path())
         .args(args)
         .output()
-        .map_err(|e| Error::Radio(format!("running iw: {e}")))?;
+        .map_err(|e| Error::Radio(format!("running {}: {e}", iw_path())))?;
     if !out.status.success() {
         return Err(Error::Radio(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
@@ -80,10 +107,11 @@ impl Nl80211 {
     /// transmit. Order matters; see the module note.
     pub fn bring_up(&self, channel: u8) -> Result<()> {
         // Down first. This is the whole trick.
-        let _ = Command::new("ip").args(["link", "set", &self.managed, "down"]).status();
+        // `ip` is in /sbin for the same reason `iw` is in /usr/sbin.
+        let _ = Command::new(ip_path()).args(["link", "set", &self.managed, "down"]).status();
         let _ = iw(&["dev", &self.monitor, "del"]);
         iw(&["phy", &self.phy, "interface", "add", &self.monitor, "type", "monitor"])?;
-        Command::new("ip")
+        Command::new(ip_path())
             .args(["link", "set", &self.monitor, "up"])
             .status()
             .map_err(|e| Error::Radio(format!("bringing up {}: {e}", self.monitor)))?;
