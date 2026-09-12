@@ -1293,6 +1293,49 @@ They do not need to be. **`libmosey` sets `extended_flags` to 0 and sends no ext
 at all, and AirDrop works** — 5361 frames of it in `captures/`. `DataPathState::describing`
 already omits it, so no change was needed, only the confidence that omitting it is correct.
 
+## 29. Tag 35 exists, is rare, and nobody has said what it is — including us
+
+Not in Wireshark's enumeration, not in the 2018 paper, not in OWL, and not previously in
+these docs. Two bytes, always `01 01`, **66 frames out of 18157**, from three Apple devices
+across three of sixteen captures.
+
+What was measured:
+
+- every one of the 66 sits within **7.5 s of an AWDL data frame**, and most within 0.07 s
+- but data traffic does not produce it — `run-b-ch6.pcap` has **3438 data frames and not
+  one tag 35**
+- 64 of the 66 are in `transfer-attempt.pcap`, clustered in the seconds after the last data
+  frame rather than during the transfer
+
+So it is associated with data sessions and is not caused by them, and two bytes reading
+`01 01` carry almost no information on their own. **The trigger is unknown and is left
+that way.** It is recorded because "we have seen this and do not know it" is worth keeping
+distinct from "we have never seen this", and because the next person to see tag 35 should
+find this rather than rediscover it.
+
+## 30. Tags 32 and 33 are shaped, not solved
+
+Four distinct tag-33 values now, which is enough for the shape and not for the fields:
+
+```text
+  01 00 00 00 | 35 86 | 01 | 35 86 | 00 | 00 00 00 00     channel 53
+  01 00 00 00 | 00 00 | 01 | 11 86 | 00 | 00 00 00 00     first pair empty, channel 17
+  01 00 00 00 | 55 86 | 01 | 55 86 | 27 | 00 00 00 00     channel 85, and byte 9 is 0x27
+```
+
+Two `(channel, operating class)` pairs, the first of which can be empty while the second is
+not. Every observed class is 134 — 6 GHz — and the channels 17, 53 and 85 are all valid
+6 GHz control channels. Byte 9 was `0x27` on exactly one device and `0x00` on the rest.
+
+The constant `01 00 00 00` prefix, the `01` separator and byte 9 are not decoded. **Three
+channels from three devices cannot separate "constant" from "happens to be the same", and
+that is the whole difficulty** — these tags only appear when a device is associated on
+6 GHz, so the sample is small by construction.
+
+This is the clearest case in the project of a gap that needs a capture rather than more
+analysis: two captures of one device on **two different 6 GHz channels** would move the
+bytes that are fields and leave the bytes that are constants alone.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
