@@ -72,6 +72,30 @@ failure. It is one field to change and a large surface to be judged against.
 > a full, well-resourced implementation on the same AWDL version has not cleared the gate
 > either.
 >
+> **The model string is not the gate — tested on hardware, 2026-09-11.** `sharingd` grew a
+> `persist.tarish.model` override so the claim could be changed without a rebuild, and blazer
+> advertised `MacBookPro18,3` as `ReceiverModelName` in both `/Discover` and `/Ask` — the two
+> places a sender reads the receiver's identity before it decides what to prompt. An iPhone
+> sent a video to it and the transfer ran normally: no code, nothing different from any
+> earlier run.
+>
+> The treatment really was applied, which is worth stating because a negative result is only
+> as good as the proof that the independent variable moved. The daemon was restarted *after*
+> the property was set and reads it once at thread start; `persist.tarish.model` is absent
+> from `property_contexts` and so carries the default label; `tarishsharingd` is permitted to
+> read that label — `security_compute_av` via `/sys/fs/selinux/access` returns
+> `allowed=0x40412`, exactly `read|getattr|map|open`, against `allowed=0` for a control pair
+> that should be denied — and no AVC denial fired at startup.
+>
+> What this refutes is the **model string alone**. It cannot refute the model as one term in
+> a conjunction: a device claiming to be a MacBook while carrying no Apple-signed identity
+> may fail an earlier check and never reach a model comparison at all. It also only moves the
+> *receiver's* claim, which is the right direction — the code appears on the sender, about the
+> receiver — but says nothing about what a sender announcing a Mac model would see.
+>
+> So two hypotheses remain, and they are the two that were always harder: an AirDrop-layer
+> version, or the Apple-signed identity.
+>
 > **The decisive test needs `libawdl` transmitting**, since only then do we control tag 21.
 > Announce v10.0, otherwise unchanged, and see whether the flow changes. That is a good
 > reason to build the transmitter, and a reason not to change the version casually before
