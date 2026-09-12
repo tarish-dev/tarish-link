@@ -116,6 +116,20 @@ pub struct Beacon {
     /// the radio is the only correct source. The default mirrors a captured Apple value —
     /// LDPC, 40 MHz, short GI at both widths, two spatial streams.
     pub ht: HtCapabilities,
+    /// Occupy this many windows of sixteen instead of Apple's four.
+    ///
+    /// **An experimental control for finding 38.** Trial E took mastership from a settled
+    /// Apple cluster while occupying six windows; trials F and G, at three windows and up
+    /// to the same frame rate, did not. But E's six were an accident — half its frames
+    /// landed in windows it did not advertise — so "breadth wins" is a hypothesis from one
+    /// success, and testing it needs breadth that is *deliberate* and *honestly advertised*.
+    ///
+    /// The schedule this produces still puts channel 6 in slot 8 and the association in
+    /// slot 0; the extra windows carry the social channel. What we announce is what we
+    /// transmit in, which is the whole difference from the bug that prompted it.
+    ///
+    /// `None` is Apple's measured shape and the right default.
+    pub windows: Option<usize>,
     /// **Reproduce the timing defect of the first transmit run, on purpose.**
     ///
     /// `aw_remaining` becomes 0 in every frame and `aw_counter` follows the frame count
@@ -150,13 +164,38 @@ impl Beacon {
                 rx_mcs_bitmap: 0xffff,
                 trailing: vec![0, 0],
             },
+            windows: None,
             legacy_timing: false,
         }
     }
 
-    /// The schedule we advertise: Apple's measured shape, four slots of sixteen.
+    /// The schedule we advertise: Apple's measured shape, four slots of sixteen — or a
+    /// deliberately wider one when [`windows`](Self::windows) asks for it.
     pub fn schedule(&self) -> ChannelSequence {
-        ChannelSequence::apple_shaped(self.social_channel, self.assoc_channel)
+        let base = ChannelSequence::apple_shaped(self.social_channel, self.assoc_channel);
+        let Some(n) = self.windows else { return base };
+        let n = n.clamp(1, 16);
+
+        let mut channels = vec![0u8; 16];
+        // Spread n windows as evenly as the cycle allows, so breadth is what varies and
+        // not clustering.
+        for i in 0..n {
+            channels[i * 16 / n] = self.social_channel;
+        }
+        // The two slots that carry meaning keep it: slot 8 is channel 6 whatever the rest
+        // of the schedule does, and slot 0 is the association when there is one.
+        channels[8] = 6;
+        if let Some(a) = self.assoc_channel {
+            channels[0] = a;
+        }
+        ChannelSequence {
+            encoding: crate::sync::ChanEncoding::OpClass,
+            duplicate: 0,
+            step_count: 3,
+            fill_channel: 0xffff,
+            qualifiers: channels.iter().map(|c| crate::sync::opclass_for(*c)).collect(),
+            channels,
+        }
     }
 
     /// Availability Windows elapsed at `now_us`, counted from our own epoch.

@@ -1787,10 +1787,8 @@ It also explains why the shared-airtime figure of finding 37 did not predict any
 measures overlap in **transmission**, and what matters is overlap with **reception**. A node
 transmits in a few windows and may listen in more.
 
-**This is a hypothesis from five trials with one success, not a finding.** The decisive test
-is a sweep: occupy 3, 6, 9 and 12 windows at a fixed rate and see whether being followed
-tracks breadth monotonically. `--per-window` and the advertised-slot machinery already make
-that a one-line change.
+**This was a hypothesis from five trials with one success, and the sweep refuted it.** See
+the correction below.
 
 ### The uncomfortable part
 
@@ -1802,6 +1800,68 @@ in the right places beat six in arbitrary ones.
 
 So this is a measurement of what works, and simultaneously an argument for the TSF path
 rather than a substitute for it.
+
+## 39. Breadth is refuted too — and trial E remains unexplained
+
+Finding 38 proposed that **window breadth** decides whether Apple devices follow us, on the
+strength of trial E occupying six windows and winning where three- and four-window trials
+lost. The sweep it called for was run, and the first point kills it.
+
+`--windows 6` produces six windows spread evenly across the cycle, every one of them
+advertised, verified on the air:
+
+```text
+  00:c0:ca:b0:60:4c  [▃..▃..▃.▃..▃..▃.]  891 frames in 6/16 slots   -> NOT followed
+```
+
+Six windows. Same metric 600, same peers, same rate band as E. The iPhone stayed master and
+the MacBook stayed with it.
+
+### Everything now eliminated
+
+| candidate | how it died |
+|---|---|
+| the metric | 65, 530 and 600 all behaved identically (D, C, G) |
+| the timing mode | `--legacy-timing` reproduced the original defect and changed nothing (B) |
+| audibility by overlap | followed at 4-12% shared airtime, ignored at 32-56% (finding 37) |
+| frame rate | E and G at identical rates, opposite outcomes |
+| **window breadth** | **six evenly spread windows, not followed (this finding)** |
+
+### What is left of trial E
+
+E's six windows were **three advertised plus the three immediately after them** — adjacent
+pairs, created by a loop that transmitted before waiting. W6's six are evenly spread and
+honestly announced. So what E had that nothing else has is one of:
+
+- transmitting in windows it did **not** advertise, or
+- **clustering** — pairs of consecutive windows rather than isolated ones, or
+- nothing at all, and the cluster happened to be in a receptive state that minute.
+
+The third cannot be dismissed. Every deliberate attempt to reproduce E has failed, across
+nine trials, and a single success that resists five separate explanations is exactly what a
+coincidence looks like.
+
+### The honest position
+
+**We can transmit AWDL that Apple devices parse and act on — finding 34 proved that with a
+two-hop tree carrying our own metric and tenure counter, and nothing since has undermined
+it. We cannot yet say what makes them act on it.** That is an uncomfortable place to stop
+and it is where the evidence is.
+
+The next thing worth doing is not another guess at the variable. It is **reception**: a node
+that can hear the cluster knows the master's TSF, its schedule, and whether its own frames
+provoked anything — none of which can be inferred from the outside. `Radio::rx` is wired and
+unused.
+
+### A note on the instrument
+
+Four harness bugs were found and fixed while running these trials, every one of which
+produced either a confident wrong answer or a silent stall: a capture attached to an
+interface that `bring_up` then destroyed; a failed capture leaving the previous trial's file
+for `scp` to copy, so four trials reported byte-identical results; an ssh that returned
+before its beacon exited, leaving two transmitters on one interface; and a wait loop built
+on `pgrep -f` that matched its own command line and never finished. The measurements that
+survive are the ones taken after each fix.
 
 ## Open, not yet investigated
 

@@ -269,3 +269,38 @@ fn the_beacon_can_align_to_the_windows_it_advertises() {
         assert!(b.advertised_slots().contains(&landed), "from slot {i} we land in {landed}");
     }
 }
+
+/// The breadth control advertises exactly what it transmits in.
+///
+/// That is the difference from trial E, which won an election by accident: it fired in the
+/// window after each advertised one, so half its frames were somewhere it never claimed to
+/// be. Testing whether breadth is what matters requires breadth that is honest.
+#[test]
+fn the_breadth_control_is_honest_about_where_it_transmits() {
+    for n in [3usize, 6, 9, 12] {
+        let mut b = Beacon::new(ADDR, 149, "QA");
+        b.windows = Some(n);
+        let slots = b.advertised_slots();
+        assert!(slots.len() >= n.min(16) - 1, "asked for {n}, advertised {slots:?}");
+        assert!(slots.contains(&8), "slot 8 stays channel 6 at every breadth");
+
+        // Every wait lands inside a window we advertise -- transmit set == advertised set.
+        for i in 0..16u64 {
+            let now = i * u64::from(AW_US) + 123;
+            let wait = b.us_until_next_advertised_window(now);
+            let landed = ((now + wait) % (16 * u64::from(AW_US)) / u64::from(AW_US)) as usize;
+            assert!(slots.contains(&landed), "n={n}: from {i} we land in {landed}, not in {slots:?}");
+        }
+
+        // And the frame really carries the wider schedule, not just the transmit loop.
+        let f = b.mif(0);
+        let af = ActionFrame::parse(&f[24..]).unwrap();
+        let seq = SyncParams::parse(af.tlvs().find(|t| t.tag == 4).unwrap().value)
+            .unwrap().channel_sequence.unwrap();
+        assert_eq!(seq.occupied_slots(), slots.len(), "n={n}: announced breadth must match");
+        assert_eq!(seq.channels[8], 6);
+    }
+
+    // Default is unchanged: Apple's shape.
+    assert_eq!(Beacon::new(ADDR, 149, "QA").advertised_slots(), vec![2, 8, 10]);
+}

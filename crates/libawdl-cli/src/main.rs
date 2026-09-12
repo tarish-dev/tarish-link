@@ -555,7 +555,7 @@ fn usage() -> ! {
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -610,6 +610,9 @@ fn main() {
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1),
+                args.iter().position(|a| a == "--windows")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse().ok()),
             );
         }
         "phase" => {
@@ -973,7 +976,7 @@ fn coverage(files: &[String]) {
 /// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1008,6 +1011,10 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     // already being outranked by an iPhone at 539 the same evening.
     if let Some(m) = metric {
         b.metric = m;
+    }
+    if let Some(w) = windows {
+        // An experimental control. See Beacon::windows.
+        b.windows = Some(w);
     }
     if legacy {
         // An experimental control. See Beacon::legacy_timing.
