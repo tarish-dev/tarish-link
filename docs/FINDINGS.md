@@ -1882,6 +1882,33 @@ week — *"the field a joining node uses to work out where in the schedule it ha
 and it took building a transmitter that could not aim to notice the description was the
 answer.
 
+### CORRECTION: OWL already does this, and said so
+
+An earlier version of this entry presented the mechanism as something nobody had noticed.
+**That was wrong, and the operator asked the obvious question — was this not in OWL?** It is,
+in `rx.c`:
+
+```c
+sync_err_tu = awdl_sync_error_tu(now, time_to_next_aw_master, aw_counter_master, &state->sync);
+awdl_sync_update_last(now, time_to_next_aw_master, aw_counter_master, &state->sync);
+```
+
+and the anchoring arithmetic in `sync.c` is the same one derived here:
+
+```c
+state->last_update = now_usec - tu_to_usec(eaw_period - time_to_next_aw);
+```
+
+So the finding is that **we had not implemented it**, not that it was undiscovered. The
+measurements below are still ours and still worth having — nobody had published what this
+recovers from a real Apple cluster through a USB adapter's host timestamps — but the idea is
+OWL's and the credit is theirs.
+
+OWL also carries something we lacked: a **sync error metric**, `awdl_sync_error_tu`, with a
+±3 TU threshold and a running count of measurements outside it. That is a better instrument
+than a spread computed after the fact, because it scores every frame against the current
+estimate as it arrives.
+
 ### It works on real Apple clusters
 
 `awdl follow` recovers the master, its advertised slots and the cycle phase from captures
@@ -1918,6 +1945,27 @@ and it is the one a naive implementation picks.
 - **Only the master's own frames may anchor the clock.** A follower names the master
   correctly but carries its own `aw_counter`, which may not have converged; averaging it in
   blurs the thing being measured.
+
+### One thing reading OWL raised, and how it was settled
+
+OWL synchronises on **extended** AWs — `presence_mode * aw_period` — and masks the low two
+bits of `aw_counter`. Apple frames carry `presence_mode: 4`. If a channel-sequence slot spans
+four Availability Windows rather than one, a 16-slot cycle is **1024 TU**, not 256, and every
+phase fold in this project is wrong by a factor of four.
+
+**Tested, and it is not.** Folding each sender's frame arrivals onto both candidate cycles
+and comparing how concentrated the result is, 256 TU wins for every device:
+
+```text
+  02:3b:e8:75:9c:03  presence_mode=4  conc@256TU=0.668  conc@1024TU=0.616
+  2a:f3:94:4d:96:79  presence_mode=4  conc@256TU=0.719  conc@1024TU=0.520
+  d2:75:0e:61:4c:e2  presence_mode=4  conc@256TU=0.798  conc@1024TU=0.562
+```
+
+Seven senders, three captures, no exceptions. So `presence_mode` governs something other
+than slot width — plausibly how many consecutive windows a node attends within a slot — and
+the 262144 µs cycle used throughout this project is right. Recorded because the question was
+a real one and the answer was not obvious from the code alone.
 
 ### What this unblocks
 
