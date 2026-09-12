@@ -1217,6 +1217,82 @@ it", and it is worth noticing the pattern: the bytes still opaque are increasing
 that are either radio-specific (so they belong to the HAL), or vendor-internal state that a
 peer does not act on. The way to tell which is to transmit without them and watch.
 
+## 26. Election v2's second address is the parent in the sync tree
+
+An earlier note here called it "a second address whose role is not documented", observed
+equal to the sender's own address in every frame checked. That check was too small.
+
+```text
+  distance   other == master   other != master   other == self
+         0             10487                 0           10487
+         1              7004                 0               0
+         2                32               634               0
+```
+
+At distance 0 the parent is the node itself; at distance 1 the parent *is* the master. In
+both cases the field looks like a copy of something else, which is why a sample that
+contained only those two cases concluded it was redundant. At distance 2 it stops
+coinciding.
+
+### Proven, not inferred
+
+If this is the next hop toward the master, the node it names must itself be advertising one
+hop closer to the *same* master — and that is checkable in the same capture. Of the 634
+frames where the two addresses differ, the named node was independently heard claiming
+`distance − 1` to the identical master in **634 of 634**. No counterexample, and not one
+case where the named node was never heard at all.
+
+`ElectionParamsV2::parent_for` builds it. A node two hops out must name who it actually
+heard the master through, because naming the master as its own parent describes a tree that
+does not exist.
+
+## 27. The Synchronization Parameters flags word has exactly two values, and bit 11 explains the trailing bytes
+
+Finding 20 established that the two bytes after the channel sequence are not padding, and
+left their presence unexplained. It is explained: **bit 11 of the flags word announces
+their absence**, without exception.
+
+```text
+  flags    frames   trailing non-zero
+  0x1800    13986                   0
+  0x1000     4171                4171
+```
+
+Only those two values appear anywhere, across Apple, `libmosey` and OWL, in 18157 frames.
+So the field is optional and its absence is declared — not padding some devices forget to
+clear, and not uninitialised stack.
+
+**What it contains is still unknown**, and this does not change that. `0x20 0x64` reads as
+a Legacy channel pair for channel 100, which those devices had been associated on; `0x00
+0x4c` does not, because 76 is not a channel. Shape, not decode.
+
+**The practical consequence is that a transmitter never has to invent it.** Set bit 11 and
+the field is legitimately absent, which is what every associated Apple device does.
+
+## 28. Data Path State: the unnamed flag bits carry no fields, and the extended block is skippable
+
+Two questions that mattered more than they looked, because Data Path State is a bitmap
+followed by only the fields the bitmap claims — so a bit that carries a field we do not know
+about puts every later offset wrong, silently.
+
+**It does not.** The length is a linear function of the flags, so the per-bit cost can be
+read straight off pairs of frames differing in one bit:
+
+```text
+  bit  6 (0x0040): 0 bytes      bit 10 (0x0400): 0 bytes      bit 13 (0x2000): 0 bytes
+```
+
+All three unnamed bits are booleans. The existing offset walk was never misaligned, which
+is worth having established rather than assumed.
+
+**The extended block is a fixed 18 bytes** when populated — four 32-bit values after two
+zero bytes — and its own `extended_flags` bits 10 and 11 likewise cost nothing. The four
+values vary per device and per frame and look like counters; they are not decoded.
+
+They do not need to be. **`libmosey` sets `extended_flags` to 0 and sends no extended block
+at all, and AirDrop works** — 5361 frames of it in `captures/`. `DataPathState::describing`
+already omits it, so no change was needed, only the confidence that omitting it is correct.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

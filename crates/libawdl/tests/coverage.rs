@@ -25,16 +25,16 @@ fn sync_params_have_five_opaque_bytes_left() {
     assert_eq!(op.opaque, 0, "OpClass qualifiers are operating classes");
 }
 
-/// Election v2, once the counters are decoded as a tenure as master.
+/// Election v2, once the counters are a tenure and the second address is the parent.
 ///
-/// It was 22 opaque bytes of 40. The two counters account for eight of them, leaving the
-/// second address — whose role is undocumented — and the eight reserved bytes.
+/// It was 22 opaque bytes of 40: the counters accounted for eight and the parent for six,
+/// which leaves the eight reserved bytes at offset 28 and nothing else.
 #[test]
-fn election_v2_has_fourteen_opaque_bytes_left() {
+fn election_v2_has_eight_opaque_bytes_left() {
     let c = of_tlv(24, fixture_election::APPLE_ELECTION_V2);
     assert_eq!(c.total(), 40);
-    assert_eq!(c.named, 26, "master, distance, both metrics, both counters");
-    assert_eq!(c.opaque, 14, "the second address and eight reserved bytes");
+    assert_eq!(c.named, 32, "master, parent, distance, both metrics, both counters");
+    assert_eq!(c.opaque, 8, "the reserved block at offset 28, and only that");
 }
 
 /// The tags with no decoder at all. Naming them here means adding one is a visible change.

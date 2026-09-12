@@ -16,6 +16,13 @@ use crate::le;
 /// because it is a parameter, and confirming it against real devices is the point.
 pub const TU_US: u32 = 1024;
 
+/// Bit 11 of [`SyncParams::flags`]: set means the two bytes after the channel sequence
+/// carry nothing.
+///
+/// Measured, without exception, over 18157 frames — see [`SyncParams::trailing`]. Named
+/// for what it predicts rather than for what it means, because only its effect is known.
+pub const FLAG_NO_TRAILING: u16 = 0x0800;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncParams {
     /// Channel this frame went out on.
@@ -75,10 +82,27 @@ pub struct SyncParams {
     /// Synchronization Parameters TLVs, **2018 have a non-zero value here** — Apple
     /// devices and `libmosey` both write them, and only OWL leaves them zero.
     ///
-    /// What decides the answer is the low bits of [`flags`](Self::flags), not the frame:
-    /// a sender advertising `0x1800` writes zero and puts its association channel in slot
-    /// 0, while a sender advertising `0x1000` writes a value here and leaves slot 0 empty.
-    /// One device was observed switching from `00 4c` to `20 64` mid-capture.
+    /// **Its presence is governed by bit 11 of [`flags`](Self::flags), exactly.** Only two
+    /// flag values appear on the air, and the correlation has no exceptions in 18157
+    /// frames:
+    ///
+    /// ```text
+    ///   flags    frames   trailing non-zero
+    ///   0x1800    13986                   0
+    ///   0x1000     4171                4171
+    /// ```
+    ///
+    /// So this is an optional field whose absence is announced, not padding that some
+    /// devices forget to clear. One device was observed switching from `00 4c` to `20 64`
+    /// mid-capture, so it is live state rather than a constant.
+    ///
+    /// What it *contains* is still unknown. `0x20 0x64` reads as a Legacy channel pair for
+    /// channel 100, which those devices had been associated on; `0x00 0x4c` does not, since
+    /// 76 is not a channel. That is a shape and not a decode, so it stays raw.
+    ///
+    /// The practical consequence is that a transmitter does not have to invent a value:
+    /// set bit 11 and the field is legitimately absent, which is what every associated
+    /// Apple device does.
     ///
     /// The contrast that rules out uninitialised memory is tag 18: it has three
     /// equivalent trailing bytes, written by the same devices in the same frames, and

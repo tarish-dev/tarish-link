@@ -41,7 +41,7 @@ command's output, so adding captures improves it rather than dating it.
 
 ## How much of this do we actually understand?
 
-**76% of the control-plane bytes, and the other 24% we copy.** Run `awdl coverage
+**78% of the control-plane bytes, and the other 22% we copy.** Run `awdl coverage
 captures/*.pcap` to regenerate this; it is measured, not estimated. It was 63% before the
 decoding pass recorded in findings 21-25.
 
@@ -67,7 +67,7 @@ is cargo-culting with no signal when it is wrong.
 | 16 | Arpa | 97% | the flags byte is not named |
 | 4 | Synchronization Parameters | 93% | the flags word, byte 28, the trailing pair — finding 21 |
 | 5 | Election Parameters | 86% | |
-| 24 | Election Parameters v2 | 65% | the second address and 8 reserved — finding 22 |
+| 24 | Election Parameters v2 | 80% | only the 8 reserved bytes at offset 28 — findings 22, 26 |
 | 12 | Data Path State | 50% | the extended block and UMI options are opaque |
 | 7 | HT Capabilities | 43% | 802.11 fields named, the variable tail is not — finding 24 |
 | 33 | 6 GHz channels | 24% | |
@@ -75,9 +75,9 @@ is cargo-culting with no signal when it is wrong.
 | 6 | Service Parameters | **0%** | shape known, contents are a hash — and **it does not matter**, finding 25 |
 | 35 | *unrecognised* | **0%** | not in any published table, 2 bytes, `01 01` |
 
-Counting Service Response flatters the figure to 85.6%: it is 40% of all bytes on the air
+Counting Service Response flatters the figure to 86.9%: it is 40% of all bytes on the air
 and it is the one thing that was already specified elsewhere. The number that matters for
-building a transmitter is the 76%.
+building a transmitter is the 78%.
 
 ### "Are you sure of them in every frame?"
 

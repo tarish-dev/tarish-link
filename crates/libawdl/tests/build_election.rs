@@ -296,3 +296,48 @@ fn service_params_round_trip_without_being_understood() {
     assert_eq!(m.encode(), MOSEY);
     assert_eq!(ServiceParams::empty().encode().len(), ServiceParams::MIN_LEN);
 }
+
+/// Election v2's second address is the next hop toward the master, not a copy of it.
+///
+/// The distinction only shows up at distance 2 or more, which is why a smaller check
+/// concluded it was redundant.
+#[test]
+fn the_v2_second_address_is_the_parent_in_the_sync_tree() {
+    use libawdl::election::ElectionParamsV2;
+
+    let me = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let master = [0xbe, 0x35, 0xbe, 0xc9, 0x05, 0x1f];
+    let relay = [0x9a, 0x3f, 0x22, 0x91, 0xec, 0x70];
+
+    // Root: we are our own parent.
+    assert_eq!(ElectionParamsV2::parent_for(me, me, 0, None), me);
+    // One hop: the parent IS the master, which is why the fields coincide.
+    assert_eq!(ElectionParamsV2::parent_for(me, master, 1, None), master);
+    // Two hops: the parent is whoever we heard the master through.
+    assert_eq!(ElectionParamsV2::parent_for(me, master, 2, Some(relay)), relay);
+
+    // A claim of our own names ourselves in both fields, which is correct at distance 0.
+    let e = ElectionParamsV2::claiming(me, 530, 0);
+    assert_eq!(e.distance, 0);
+    assert_eq!(e.other, me);
+    assert_eq!(e.master, me);
+}
+
+/// Sync flags bit 11 announces that the trailing field is absent.
+#[test]
+fn flags_bit_eleven_governs_the_trailing_field() {
+    use libawdl::sync::{SyncParams, FLAG_NO_TRAILING};
+
+    let associated = SyncParams::parse(fixture_sync2::APPLE_ASSOCIATED).unwrap();
+    assert_eq!(associated.flags, 0x1800);
+    assert!(associated.flags & FLAG_NO_TRAILING != 0);
+    assert_eq!(associated.trailing, [0, 0], "announced absent, and absent");
+
+    let follower = SyncParams::parse(fixture_sync2::APPLE_FOLLOWER).unwrap();
+    assert_eq!(follower.flags, 0x1000);
+    assert!(follower.flags & FLAG_NO_TRAILING == 0);
+    assert_ne!(follower.trailing, [0, 0], "not announced absent, and present");
+}
+
+#[path = "fixture_sync.rs"]
+mod fixture_sync2;

@@ -138,8 +138,8 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             if len < 40 {
                 return all_opaque;
             }
-            // master 6, distance 4, both metrics 8, both counters 8.
-            Coverage { named: 26, opaque: len - 26 }
+            // master 6, the parent 6, distance 4, both metrics 8, both counters 8.
+            Coverage { named: 32, opaque: len - 32 }
         }
 
         // Data Path State: the bitmap and the fields it selects are named; the extended
