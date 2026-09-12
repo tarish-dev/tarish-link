@@ -743,8 +743,20 @@ impl ClassChannel {
 /// speculatively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SixGhzInfo {
+    /// **The device's own 6 GHz infrastructure channel.**
+    ///
+    /// Proven rather than inferred, on 2026-09-12: the sender was identified as a
+    /// particular MacBook by matching the frame's source against that machine's own
+    /// `awdl0` address, and `system_profiler` on that machine reported "Channel: 53
+    /// (6GHz, 160MHz)" while its frames carried channel 53, operating class 134. The
+    /// device's own operating system and its AWDL frames agree.
     pub channel: ClassChannel,
     /// Everything after the class/channel pair, kept raw.
+    ///
+    /// Bytes 6..9 were `04 08 02` in every frame from every device. Bytes 9..11 move
+    /// within a single device in a single capture — `c1 c0`, `83 8a`, `01 00` from one
+    /// Mac in 90 seconds — so they are live state, not a constant. Bytes 11..13 have
+    /// always been zero. None of it is decoded.
     pub trailing: Vec<u8>,
 }
 
@@ -772,9 +784,25 @@ impl SixGhzInfo {
 ///                 channel then opclass, as OpClass encoding does it
 /// ```
 ///
-/// Both pairs have been identical in every capture, which is why it reads as one channel
-/// stated twice rather than two different ones. A value of `00 00` for the first pair with
-/// `11 86` for the second has also been seen, so they are not required to match.
+/// **The first pair is the device's own 6 GHz association and is empty when it has none;
+/// the second is populated either way.** Measured across three different channels — 17,
+/// 53 and 85 — from five devices:
+///
+/// ```text
+///   01 00 00 00 | 35 86 | 01 | 35 86 | 00 | 00 00 00 00   macOS, OS reports 6 GHz ch 53
+///   01 00 00 00 | 00 00 | 01 | 11 86 | 00 | 00 00 00 00   iOS, no 6 GHz association
+///   01 00 00 00 | 55 86 | 01 | 55 86 | 27 | 00 00 00 00   ch 85, and byte 9 is 0x27
+/// ```
+///
+/// The field boundaries are established by variation, not by assumption: bytes 4..6 and
+/// 7..9 track the channel and go to `00 00` when there is none, while `01 00 00 00`, the
+/// `01` separator and the trailing four zeros did not move once across those three
+/// channels. Byte 9 was `0x27` on exactly one device.
+///
+/// **Why these tags exist at all**: on a 6 GHz association, Data Path State reports
+/// `infra_channel` as **0** — verified on the MacBook above, which was associated and
+/// still published zero — and the channel sequence cannot express 6 GHz either (finding
+/// 17). So this tag is the only place a 6 GHz association is visible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SixGhzChannels {
     pub first: Option<ClassChannel>,

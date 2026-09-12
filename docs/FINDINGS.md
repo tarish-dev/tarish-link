@@ -1336,6 +1336,68 @@ This is the clearest case in the project of a gap that needs a capture rather th
 analysis: two captures of one device on **two different 6 GHz channels** would move the
 bytes that are fields and leave the bytes that are constants alone.
 
+## 31. The 6 GHz channel in tag 33 is the device's own association — proven against the OS
+
+Finding 30 left tags 32 and 33 "shaped, not solved". The shape is now anchored to a
+meaning, and the method is worth recording because it needed no new decoding at all.
+
+A capture was taken on the Pi while the MacBook these notes are being written on was
+transmitting AWDL. The frame's source address was matched against that machine's own
+`awdl0` address — `ea:8e:0d:cc:09:73`, read from `ifconfig` on the same machine — so the
+sender is identified rather than assumed. `system_profiler` on that machine reported
+**"Channel: 53 (6GHz, 160MHz)"**, and its tag 33 carried **channel 53, operating class
+134**. The device's own operating system and its AWDL frames agree.
+
+Across three channels from five devices:
+
+```text
+  01 00 00 00 | 35 86 | 01 | 35 86 | 00 | 00 00 00 00   macOS, OS says 6 GHz ch 53
+  01 00 00 00 | 00 00 | 01 | 11 86 | 00 | 00 00 00 00   iOS, no 6 GHz association
+  01 00 00 00 | 55 86 | 01 | 55 86 | 27 | 00 00 00 00   ch 85, and byte 9 is 0x27
+```
+
+The first pair is the association and is **empty when there is none**; the second is
+populated either way. Bytes 4..6 and 7..9 move with the channel; `01 00 00 00`, the `01`
+separator and the trailing four zeros did not move once. That is a boundary established by
+variation rather than by assumption. Byte 9 was `0x27` on exactly one device and is not
+decoded, and tag 32's bytes 9..11 change within a single device inside 90 seconds — `c1 c0`,
+`83 8a`, `01 00` — so they are live state, not a constant.
+
+### Why these tags exist
+
+**On a 6 GHz association, Data Path State publishes `infra_channel` as 0.** Verified on the
+same MacBook, which was associated on channel 53 and reported zero. The channel sequence
+cannot express 6 GHz either (finding 17). So tag 33 is the *only* place a 6 GHz association
+is visible, which is presumably why Apple added a tag outside the published range for it.
+
+## 32. An MDM-managed iPhone hides a real Mac and shows our Tarish device
+
+Recorded because it is a confound, not because it is understood.
+
+On 2026-09-12 a MacBook was set to AirDrop "Everyone", `sharingd` running, firewall off,
+`awdl0` up, and **advertising `_airdrop._tcp.local` on port 8770** — all confirmed on the
+machine itself and in the capture. Its schedule overlapped the iPhone's in 3 of 16 slots on
+both 149 and 6, so the two could hear each other.
+
+- the operator's **personal** iPhone saw the Mac
+- an **MDM-managed** iPhone did not, with the VPN disabled and after a reboot
+- the same MDM iPhone **did** see a Pixel running Tarish
+- our own Pixel saw the Mac, which is what proves the Mac was discoverable at all
+
+So AirDrop is not disabled on the managed phone, and the Mac is not misconfigured. The only
+known difference between the two iPhones is the MDM profile. **The cause is not known and
+is not guessed at here.**
+
+### The consequence that matters
+
+**Do not run identity or PIN experiments on the managed iPhone.** It hides a genuine Apple
+peer for reasons we cannot see, which is exactly the kind of hidden variable that would make
+a result about Apple's identity gating meaningless. The personal iPhone is the instrument for
+those — see the open question on the non-contact code.
+
+An operator theory that a locked-down VPN blocked identity resolution was **tested and
+refuted**: disabling the VPN and restarting the phone changed nothing.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
