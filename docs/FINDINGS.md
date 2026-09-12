@@ -1432,25 +1432,47 @@ Mac because it had been paired with it at some point; the managed iPhone could n
 never had. The MDM profile may have tightened *when* the prompt is required, but the
 mechanism is pairing, not a restriction.
 
-### Why this is bad news for us, and urgent rather than theoretical
+### What it means for us — a closed door, not a task
 
 If the mechanism is persistent trust between device identities, then **announcing v10.0 does
-not get us into it** — and the version experiment §1 recommends would come back negative for
-a reason that has nothing to do with the version. Worse, we are currently unable to
-participate in such a scheme at all, and not because of anything Apple does:
+not get us into it**, and the version experiment §1 recommends would come back negative for a
+reason that has nothing to do with the version. That alone saves a build cycle.
 
-- our **mDNS instance name** is derived from `mosey0`'s MAC, which is fresh every AWDL session
-- our **TLS certificate** is generated at each start and never written to disk
+An earlier draft of this entry went further and called our own rotating identity an urgent
+problem. **That was wrong**, and the operator corrected it: an Apple device's identity is
+signed by hardware we cannot replicate — whether that is specifically the MFi coprocessor or
+the Secure Enclave's device certificate does not matter, because there is no path to minting
+one either way. So this flow is not "not yet" for us. It is **structurally closed**.
 
-A note already in this file put it as a decision worth keeping visible rather than a bug:
+Which settles a decision rather than reopening it. This file records elsewhere that our mDNS
+instance name follows a MAC that is fresh every AWDL session and our TLS certificate is
+generated at each start and never stored, and asks that it stay a decision rather than become
+an accident. It stays. **Persisting the certificate buys nothing against Apple**, because the
+thing it would buy is not for sale. The original argument — *a key that never touches storage
+cannot be stolen from storage* — is unchanged, and what it was trading against turns out to be
+unpurchasable.
 
-> *Any future feature that wants a peer to remember us — a trusted-device list, a one-time
-> confirmation, a reconnect-without-prompting — needs a stable identity, and we throw ours
-> away twice per restart.*
+### The version of this feature that IS ours
 
-**That future feature has arrived on the other side of the wire.** The argument for a
-throwaway key — "a key that never touches storage cannot be stolen from storage" — is still a
-good argument, and it is now a trade with a known cost rather than a free choice.
+Trust between **our own** devices is entirely in our gift, and there the argument reverses.
+A Tarish-to-Tarish trusted-device list, a one-time confirmation that is not asked again, a
+reconnect without prompting — none of that needs an Apple signature, only an identity we
+choose to keep. If that is ever wanted, it is a deliberate feature with a real cost
+(a key on disk), not a gap.
+
+### The actual risk, and the only useful mitigation
+
+The danger is not that we cannot join the trusted flow. It is that Apple might one day make
+it **mandatory for every peer**, which would end AirDrop interoperability for Tarish outright
+— an operator concern recorded before this finding existed: *"worried with more devices coming
+along, apple might enforce this and make it the only way ios to android work, better be
+prepared."*
+
+Nothing we build prevents that. What helps is **noticing early**, which makes the `/Ask`
+non-200 response logging on the task list a monitoring feature rather than a nicety: the first
+sign would be Apple peers refusing our `/Ask` with a status we currently discard. Today
+AirDrop works both directions with no identity presented at all, so the permissive path is
+still open — and the hedge for the day it closes is Quick Share, which owes Apple nothing.
 
 ### What is proven and what is not
 
