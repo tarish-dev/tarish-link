@@ -1583,6 +1583,61 @@ someone changing it will read it.
 - Our MIF is 317 bytes against Apple's mean of 626, because Apple sends **several** Service
   Response TLVs per frame and we send one.
 
+## 35. A master does not synchronise to anyone — which is why it suits our hardware
+
+Finding 34 set the default metric to decline the election, on the grounds that winning while
+unsynchronised "can only have degraded" the cluster. **That was an assertion, not a
+measurement**, and the operator challenged it. The challenge was right, and it produced a
+better understanding than the original claim.
+
+### The real defect, which was not the metric
+
+Every frame in the first run carried **`aw_remaining = 0`**. Our own parser documents that
+field as *"TU left in the current window — the field a joining node uses to work out where in
+the schedule it has arrived"*. Telling every peer "my window ends right now", in every frame,
+forever, is wrong at any metric.
+
+The cause was that the beacon derived its timing from a **frame counter** rather than a clock:
+`aw_counter` advanced by a fixed 16 per frame regardless of elapsed time, and `aw_remaining`
+was hardcoded. Both now come from one monotonic reading per frame, so every timing field in a
+frame describes the same instant.
+
+```text
+run 1, counter-derived:  aw_remaining  1 distinct value   always 0
+run 3, clock-derived:    aw_remaining  16 distinct        0..15
+a real MacBook:          aw_remaining  15 distinct        0..16
+```
+
+### The inversion worth keeping
+
+**A follower must align to the master's TSF. A master does not align to anybody — it is the
+reference.** So a master needs timing that is *self-consistent*, not timing that agrees with
+someone else's, and a monotonic host clock supplies exactly that.
+
+That makes master the role **available** to a radio with no TSF read, not the one out of
+reach. What remains missing is precision rather than coherence: a host clock carries
+scheduler jitter a MAC timer does not, so our windows wander more than Apple's. That is a
+quality to measure, not a correctness bug.
+
+There is also a reason for `libmosey`'s metric of 65 that is not timidity: a master has
+obligations — it must actually be present in the windows it advertises — and that costs
+power. A phone declining may be a battery decision.
+
+### What is NOT established
+
+Run 1 (broken timing, metric 530): three Apple devices followed us.
+Run 3 (fixed timing, metric 530): the MacBook, at metric 510, did **not** follow — it stayed
+its own master, and we ran as two clusters side by side.
+
+Same metrics, opposite outcomes. **It is tempting and wrong to credit the timing fix**, because
+the peer populations differed: run 1 had two iPhones present, one of them advertising 537,
+above our 530. That is n=1 each way with an uncontrolled variable.
+
+Settling it needs the same peers present in both configurations, which is a controlled run
+nobody has done. Until then the honest statement is that our frames transmit and are acted
+on — finding 34 proves that with a two-hop tree — and that **what decides whether a peer
+follows us is not yet understood**.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

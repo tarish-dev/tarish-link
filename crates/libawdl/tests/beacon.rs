@@ -4,7 +4,7 @@ mod fixture_frame;
 
 use libawdl::{
     action::{ActionFrame, SUBTYPE_MIF, SUBTYPE_PSF},
-    beacon::Beacon,
+    beacon::{Beacon, AW_US},
     dot11::{Dot11, Mac, BROADCAST},
     radiotap::Radiotap,
     sync::SyncParams,
@@ -102,18 +102,20 @@ fn the_counters_advance_the_way_apple_devices_do() {
     use libawdl::election::ElectionParamsV2;
     let mut b = Beacon::new(ADDR, 149, "QA");
 
-    let tenure_of = |b: &Beacon| {
-        let f = b.mif(0);
+    let tenure_at = |b: &Beacon, now: u64| {
+        let f = b.mif(now);
         let af = ActionFrame::parse(&f[24..]).unwrap();
         ElectionParamsV2::parse(af.tlvs().find(|t| t.tag == 24).unwrap().value).unwrap().self_counter
     };
 
-    assert_eq!(tenure_of(&b), 0);
-    b.advance(191);
-    assert_eq!(tenure_of(&b), 0, "not a tick yet — the step is on the boundary");
-    b.advance(1);
-    assert_eq!(tenure_of(&b), 1, "192 windows is one tick");
-    assert_eq!(b.sent, 2, "and two frames have gone out");
+    assert_eq!(tenure_at(&b, 0), 0);
+    // Tenure now follows the clock, not the frame count: 191 windows is not a tick and
+    // 192 is, whatever number of frames went out in between.
+    assert_eq!(tenure_at(&b, 191 * u64::from(AW_US)), 0, "the step is on the boundary");
+    assert_eq!(tenure_at(&b, 192 * u64::from(AW_US)), 1, "192 windows is one tick");
+    b.advance();
+    b.advance();
+    assert_eq!(b.sent, 2, "and the frame counter is its own thing");
 
     // tx_counter reaches the frame as written.
     let f = b.mif(0);
@@ -146,4 +148,55 @@ fn the_default_metric_loses_to_a_real_apple_device() {
     // And competing is available, deliberately, for a radio that can hold time.
     let strong = ElectionParamsV2::claiming(ADDR, METRIC_COMPETE, 0);
     assert!(strong.beats(&theirs, ADDR, apple), "530 beat 515 on hardware");
+}
+
+/// The timing fields must describe the same instant and count down within a window.
+///
+/// This is the fix for what the first transmit run actually did wrong. It sent
+/// `aw_remaining = 0` in every frame — "my window ends right now", forever — while a
+/// joining node reads exactly that field to work out where in the schedule it has arrived.
+/// A master does not have to agree with anyone else's clock, but it does have to agree
+/// with its own.
+#[test]
+fn the_window_fields_are_self_consistent() {
+    use libawdl::sync::TU_US;
+    let b = Beacon::new(ADDR, 149, "QA");
+
+    let remaining_at = |us: u64| -> u16 {
+        let f = b.mif(us);
+        let af = ActionFrame::parse(&f[24..]).unwrap();
+        SyncParams::parse(af.tlvs().find(|t| t.tag == 4).unwrap().value).unwrap().aw_remaining
+    };
+    let counter_at = |us: u64| -> u16 {
+        let f = b.mif(us);
+        let af = ActionFrame::parse(&f[24..]).unwrap();
+        SyncParams::parse(af.tlvs().find(|t| t.tag == 4).unwrap().value).unwrap().aw_counter
+    };
+
+    // At the start of a window the whole window is left; a quarter in, three quarters.
+    assert_eq!(remaining_at(0), 16, "a full 16 TU window");
+    assert_eq!(remaining_at(u64::from(AW_US) / 4), 12);
+    assert_eq!(remaining_at(u64::from(AW_US) / 2), 8);
+    // It must MOVE, which is the point: the bug was one value forever. Zero is legal at
+    // the very end of a window and real Apple devices emit it too -- a captured MacBook
+    // spanned 0..16 -- so the assertion is on the spread, not on avoiding zero.
+    let mut seen = std::collections::BTreeSet::new();
+    for i in 0..256u64 {
+        let us = i * u64::from(TU_US) / 4;
+        let r = remaining_at(us);
+        assert!(r <= 16, "aw_remaining is a TU count within a 16 TU window, got {r}");
+        seen.insert(r);
+    }
+    assert!(seen.len() >= 16, "it must sweep the window, not sit still: saw {seen:?}");
+
+    // The counter advances exactly one per window, and agrees with the remaining field.
+    assert_eq!(counter_at(0), 0);
+    assert_eq!(counter_at(u64::from(AW_US) - 1), 0, "still in window 0");
+    assert_eq!(counter_at(u64::from(AW_US)), 1, "and over the boundary");
+    assert_eq!(counter_at(10 * u64::from(AW_US)), 10);
+
+    // aws_at and aw_remaining_us describe one clock, not two.
+    let t = 3 * u64::from(AW_US) + 5000;
+    assert_eq!(Beacon::aws_at(t), 3);
+    assert_eq!(Beacon::aw_remaining_us(t), AW_US - 5000);
 }

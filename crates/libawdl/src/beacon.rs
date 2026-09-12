@@ -6,12 +6,19 @@
 //!
 //! # What this deliberately does not do
 //!
-//! **It does not synchronise.** A correct AWDL node transmits inside its own Availability
-//! Windows, anchored to the cluster's TSF. This emits frames on a timer instead, which is
-//! what OWL does and is measurably worse — see `libawdl_hal::Tier`. The schedule we
-//! *advertise* is honest; the schedule we *keep* is not, until the HAL can anchor to a
-//! TSF. That gap is the reason to build this now rather than later: a real peer's reaction
-//! is the only way to find out how much it matters.
+//! **It does not synchronise to anyone else.** A node that *follows* a master must align
+//! its Availability Windows to that master's TSF, and this crate has no TSF read on the
+//! hardware it runs on.
+//!
+//! **A master does not have that problem**, which is the thing worth noticing: the master
+//! *is* the reference, so it needs timing that is **self-consistent**, not timing that
+//! agrees with somebody else's. A monotonic clock can supply that. So the role that looks
+//! harder is the one that is actually available to a radio without TSF support — and the
+//! first transmit run bore that out, with two iPhones and a MacBook electing us.
+//!
+//! What is still missing is precision, not coherence: a host clock has scheduler jitter a
+//! MAC timer does not, so our windows will wander by more than Apple's. That is a quality
+//! problem to measure, not a correctness one.
 //!
 //! # PSF and MIF differ by identity, not by size
 //!
@@ -42,8 +49,13 @@ use crate::{
     election::{ElectionParams, ElectionParamsV2, AW_PER_COUNTER_TICK},
     service::{self, Record},
     state::{Arpa, DataPathState, HtCapabilities, Ieee80211Container, Version, ELEM_VHT_CAPABILITIES},
-    sync::{ChannelSequence, SyncParams},
+    sync::{ChannelSequence, SyncParams, TU_US},
 };
+
+/// One Availability Window in microseconds: 16 TU.
+///
+/// From the wire, not the paper — `aw_period` reads 16 in all 18157 captured frames.
+pub const AW_US: u32 = 16 * TU_US;
 
 /// A metric that loses to any real Apple device: 65, which is what `libmosey` advertises.
 ///
@@ -88,8 +100,6 @@ pub struct Beacon {
     pub instance: String,
     /// Frames sent, which feeds `tx_counter`.
     pub sent: u16,
-    /// Availability Windows elapsed, which feeds `aw_counter` and the election tenure.
-    pub aws: u32,
     /// Where our tenure counter stood when we took the job. See
     /// [`ElectionParamsV2::self_counter`].
     pub tenure_base: u32,
@@ -115,7 +125,6 @@ impl Beacon {
             metric: METRIC_DECLINE,
             instance: addr.iter().map(|b| format!("{b:02x}")).collect(),
             sent: 0,
-            aws: 0,
             tenure_base: 0,
             vht: [0x32, 0x00, 0x80, 0x03, 0xfa, 0xff, 0, 0, 0xfa, 0xff, 0, 0],
             ht: HtCapabilities {
@@ -133,7 +142,17 @@ impl Beacon {
         ChannelSequence::apple_shaped(self.social_channel, self.assoc_channel)
     }
 
-    fn sync(&self) -> SyncParams {
+    /// Availability Windows elapsed at `now_us`, counted from our own epoch.
+    pub fn aws_at(now_us: u64) -> u32 {
+        (now_us / u64::from(AW_US)) as u32
+    }
+
+    /// Microseconds left in the current Availability Window at `now_us`.
+    pub fn aw_remaining_us(now_us: u64) -> u32 {
+        AW_US - (now_us % u64::from(AW_US)) as u32
+    }
+
+    fn sync(&self, now_us: u64) -> SyncParams {
         SyncParams {
             tx_channel: self.social_channel,
             tx_counter: self.sent,
@@ -147,7 +166,11 @@ impl Beacon {
             flags: 0x1800,
             aw_ext_length: 16,
             aw_common_length: 16,
-            aw_remaining: 0,
+            // TU left in this window, from our own clock. **Zero here is a lie**, and it
+            // was what this sent on the first transmit run: a joining node reads this to
+            // work out where in the schedule it has arrived, and "my window ends now",
+            // every frame, forever, is not something it can align to.
+            aw_remaining: (Self::aw_remaining_us(now_us) / TU_US) as u16,
             ext_min: 3,
             ext_max_multicast: 3,
             ext_max_unicast: 3,
@@ -155,32 +178,36 @@ impl Beacon {
             master: self.addr,
             presence_mode: 4,
             reserved_28: 0,
-            aw_counter: (self.aws & 0xffff) as u16,
+            // Derived from the clock rather than from the frame count. Those only agree
+            // if every frame goes out exactly one window apart, which no scheduler
+            // guarantees -- and a counter that drifts from its own clock is a counter a
+            // follower cannot use.
+            aw_counter: (Self::aws_at(now_us) & 0xffff) as u16,
             ap_beacon_alignment_delta: 0,
             channel_sequence: Some(self.schedule()),
             trailing: [0, 0],
         }
     }
 
-    fn tenure(&self) -> u32 {
-        ElectionParamsV2::counter_after(self.tenure_base, self.aws)
+    fn tenure(&self, now_us: u64) -> u32 {
+        ElectionParamsV2::counter_after(self.tenure_base, Self::aws_at(now_us))
     }
 
     /// The state every frame carries, PSF and MIF alike.
     ///
     /// This is the measured PSF set minus tag 6, which we cannot fill. A MIF is this plus
     /// identity and services.
-    fn state_tlvs(&self) -> Vec<(u8, Vec<u8>)> {
+    fn state_tlvs(&self, now_us: u64) -> Vec<(u8, Vec<u8>)> {
         let seq = self.schedule();
         let mut tlvs: Vec<(u8, Vec<u8>)> = Vec::new();
-        if let Some(v) = self.sync().encode() {
+        if let Some(v) = self.sync(now_us).encode() {
             tlvs.push((4, v));
         }
         tlvs.push((5, ElectionParams::claiming(self.addr, self.metric).encode()));
         if let Some(v) = seq.encode_tag18() {
             tlvs.push((18, v));
         }
-        tlvs.push((24, ElectionParamsV2::claiming(self.addr, self.metric, self.tenure()).encode()));
+        tlvs.push((24, ElectionParamsV2::claiming(self.addr, self.metric, self.tenure(now_us)).encode()));
         tlvs.push((
             12,
             DataPathState::describing(
@@ -211,13 +238,13 @@ impl Beacon {
     /// Apple sends these roughly twice as often as MIFs and at about half the size. The
     /// mistake to avoid is sending MIFs at PSF rate — legal, and it wastes a shared
     /// channel.
-    pub fn psf_tlvs(&self) -> Vec<(u8, Vec<u8>)> {
-        self.state_tlvs()
+    pub fn psf_tlvs(&self, now_us: u64) -> Vec<(u8, Vec<u8>)> {
+        self.state_tlvs(now_us)
     }
 
     /// A Master Indication Frame: the state set, plus who we are and what we offer.
-    pub fn mif_tlvs(&self) -> Vec<(u8, Vec<u8>)> {
-        let mut tlvs = self.state_tlvs();
+    pub fn mif_tlvs(&self, now_us: u64) -> Vec<(u8, Vec<u8>)> {
+        let mut tlvs = self.state_tlvs(now_us);
         tlvs.push((16, Arpa { flags: 3, name: format!("{}.local", self.host) }.encode()));
         tlvs.push((
             2,
@@ -233,24 +260,29 @@ impl Beacon {
     ///
     /// `target_tx_time` should come from the radio's TSF. Passing anything else makes the
     /// header's own jitter figure a fiction — see `Fixed::for_tx`.
-    pub fn frame(&self, subtype: u8, target_tx_time: u32) -> Vec<u8> {
-        let tlvs = if subtype == SUBTYPE_MIF { self.mif_tlvs() } else { self.psf_tlvs() };
+    pub fn frame(&self, subtype: u8, now_us: u64) -> Vec<u8> {
+        let tlvs =
+            if subtype == SUBTYPE_MIF { self.mif_tlvs(now_us) } else { self.psf_tlvs(now_us) };
         let mut f = management_header(BROADCAST, Mac(self.addr), self.sent).to_vec();
-        f.extend_from_slice(&action::encode_body(&Fixed::for_tx(subtype, target_tx_time), &tlvs));
+        // target_tx_time is the same clock, truncated. On a radio that reports TSF this
+        // should be the TSF -- see `Fixed::for_tx`.
+        f.extend_from_slice(&action::encode_body(
+            &Fixed::for_tx(subtype, now_us as u32),
+            &tlvs,
+        ));
         f
     }
 
-    pub fn mif(&self, target_tx_time: u32) -> Vec<u8> {
-        self.frame(SUBTYPE_MIF, target_tx_time)
+    pub fn mif(&self, now_us: u64) -> Vec<u8> {
+        self.frame(SUBTYPE_MIF, now_us)
     }
-    pub fn psf(&self, target_tx_time: u32) -> Vec<u8> {
-        self.frame(SUBTYPE_PSF, target_tx_time)
+    pub fn psf(&self, now_us: u64) -> Vec<u8> {
+        self.frame(SUBTYPE_PSF, now_us)
     }
 
-    /// Advance the counters by one frame and `aws` availability windows.
-    pub fn advance(&mut self, aws: u32) {
+    /// Count one frame out. Timing no longer lives here — it comes from the clock.
+    pub fn advance(&mut self) {
         self.sent = self.sent.wrapping_add(1);
-        self.aws = self.aws.wrapping_add(aws);
     }
 
     /// Availability windows per tenure tick, re-exported so a caller pacing this does not

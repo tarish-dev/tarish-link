@@ -554,7 +554,7 @@ fn usage() -> ! {
     eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -600,6 +600,7 @@ fn main() {
                 args.get(4).and_then(|s| s.parse().ok()).unwrap_or(149),
                 args.get(5).and_then(|s| s.parse().ok()).unwrap_or(30),
                 args.get(6).and_then(|s| s.parse().ok()).unwrap_or(2),
+                args.iter().any(|a| a == "--compete"),
             );
         }
         "coverage" => {
@@ -959,7 +960,7 @@ fn coverage(files: &[String]) {
 /// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -985,8 +986,19 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     };
 
     let mut b = Beacon::new(addr, channel, "QA");
+    if compete {
+        b.metric = libawdl::beacon::METRIC_COMPETE;
+    }
+    // Our epoch. Every timing field in the frame is derived from this one monotonic
+    // reading, which is what makes them agree with each other -- a master's timing has to
+    // be self-consistent, and does not have to agree with anybody else's.
+    let epoch = std::time::Instant::now();
     eprintln!("beaconing as {} on channel {channel} for {secs}s", libawdl::dot11::Mac(addr));
-    eprintln!("  metric {} — an Apple peer must follow this or beat it", b.metric);
+    eprintln!(
+        "  metric {} — {}",
+        b.metric,
+        if compete { "COMPETING: a peer must follow us or beat us" } else { "declining the election" }
+    );
     eprintln!("  MIF {} bytes, PSF {} bytes, 1 MIF per {psf_per_mif} PSF", b.mif(0).len(), b.psf(0).len());
     eprintln!("  THE TIMING IS NOT SYNCHRONISED. See the fn comment.");
 
@@ -1002,13 +1014,11 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     let mut first_error: Option<String> = None;
 
     while std::time::Instant::now() < deadline {
-        // target_tx_time should be the radio's TSF. We have no TSF on this backend, so it
-        // is the frame counter scaled to microseconds -- monotonic and honest about being
-        // ours rather than the cluster's. A peer that synchronises to it will be wrong,
-        // which is exactly the limitation this run exists to measure.
-        let t = b.aws.wrapping_mul(16 * libawdl::sync::TU_US);
+        // A real monotonic reading, so aw_counter, aw_remaining and target_tx_time all
+        // describe the same instant. On a radio that reports TSF this should be the TSF.
+        let now_us = epoch.elapsed().as_micros() as u64;
         let is_mif = psf_per_mif == 0 || n % (psf_per_mif + 1) == 0;
-        let frame = if is_mif { b.mif(t) } else { b.psf(t) };
+        let frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
         match radio.tx(&frame, TxParams::default()) {
             Ok(()) => {
                 if is_mif { sent_mif += 1 } else { sent_psf += 1 }
@@ -1020,7 +1030,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                 }
             }
         }
-        b.advance(WINDOWS_PER_FRAME);
+        b.advance();
         n += 1;
         std::thread::sleep(period);
     }
@@ -1030,6 +1040,11 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         eprintln!("first error: {e}");
         eprintln!("EAGAIN here means another vif on the same phy is up, not a full buffer.");
     }
-    eprintln!("tx_counter reached {}, aw_counter {}, tenure {}",
-        b.sent, b.aws & 0xffff, libawdl::election::ElectionParamsV2::counter_after(b.tenure_base, b.aws));
+    let end_us = epoch.elapsed().as_micros() as u64;
+    eprintln!(
+        "tx_counter {}, aw_counter {}, tenure {}",
+        b.sent,
+        Beacon::aws_at(end_us) & 0xffff,
+        libawdl::election::ElectionParamsV2::counter_after(b.tenure_base, Beacon::aws_at(end_us))
+    );
 }
