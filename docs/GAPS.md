@@ -1,5 +1,9 @@
 # What Apple sends, what libmosey sends, what OWL sends
 
+> For the wire format itself — every tag, every field, and how well each is understood —
+> see **[SPEC.md](SPEC.md)**. This file is the three-way comparison and the coverage
+> accounting.
+
 *The specification for `libawdl`'s transmitter, derived from captures rather than from a
 paper.*
 

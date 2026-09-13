@@ -32,6 +32,15 @@ Broadcom driver exposes — and presents it as a mac80211 wiphy. AWDL therefore 
 timing. On commodity hardware (an ALFA AWUS036ACM on `mt76`) those come from mainline
 mac80211, which is why OWL runs on a Raspberry Pi with no Google code at all.
 
+## Where to start reading
+
+| | |
+|---|---|
+| **[docs/SPEC.md](docs/SPEC.md)** | **the wire format, tag by tag.** Read this to implement. Every field is marked *named*, *carried* or *measured-constant*, and the difference is the point |
+| [docs/FINDINGS.md](docs/FINDINGS.md) | the lab notebook, in discovery order, including the wrong turns. Read this to know *why* |
+| [docs/GAPS.md](docs/GAPS.md) | Apple vs `libmosey` vs OWL, side by side, plus what fraction of the bytes we can actually name |
+| [docs/HAL.md](docs/HAL.md) | what a radio has to do before any of this is possible |
+
 ## What has been established so far
 
 Every claim names the capture behind it — see [docs/FINDINGS.md](docs/FINDINGS.md).
