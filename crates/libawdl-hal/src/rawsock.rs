@@ -165,3 +165,13 @@ fn if_nametoindex(iface: &str) -> Result<u32> {
     }
     Ok(idx)
 }
+
+/// So one event loop can wait on this and the tun together.
+///
+/// A blocking read on either descriptor starves the other, and two threads would need a
+/// lock around the radio. `poll` on both is the smallest arrangement that works.
+impl std::os::fd::AsRawFd for RawSock {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+}

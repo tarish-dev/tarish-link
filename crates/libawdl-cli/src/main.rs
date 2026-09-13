@@ -558,6 +558,8 @@ fn usage() -> ! {
     eprintln!("  awdl bytemap <file.pcap>... [tag]      which bytes of a tag ever VARY");
     eprintln!("  awdl correlate <file.pcap>...          match unknown bytes against KNOWN fields");
     eprintln!("  awdl tun <name> [secs] [mac]           open the awdl0 netdev. needs root, Linux");
+    eprintln!("  awdl datapath <mon> <our-mac> [name] [secs] [--verbose]");
+    eprintln!("                                         RUN THE PIPE: tun <-> radio. root, Linux");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
     eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N]");
@@ -643,6 +645,9 @@ fn main() {
         }
         "tun" => {
             tun(&args[2..]);
+        }
+        "datapath" => {
+            datapath(&args[2..]);
         }
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
@@ -1994,6 +1999,172 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
 
 fn fmt_mac(m: [u8; 6]) -> String {
     m.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+}
+
+/// The data plane: carry IP between the kernel and the radio.
+///
+/// One loop over `poll`, not two threads. A blocking read on either descriptor starves the
+/// other, and two threads would need a lock around a radio that can only send one frame at
+/// a time anyway.
+///
+/// ## Three filters, and what each is actually worth
+///
+/// **Frames from our own MAC are dropped.** Whether a monitor interface hears its own
+/// injections is adapter-dependent, and on the MT7612U used here it does **not**: a run
+/// that transmitted six frames counted `own 0`. So this filter earned nothing on this
+/// hardware and stays anyway, because if an adapter does loop back, every packet we send is
+/// re-injected into the kernel, answered, and sent again — and a feedback loop is a much
+/// worse failure than a redundant comparison. Measured, not assumed, and the counter is
+/// printed so the next adapter can be checked rather than guessed at.
+///
+/// **Other peers' unicast is not ours to deliver.** In a cluster of three, a monitor sees
+/// A talking to B. Handing that to our stack gives us traffic addressed to somebody else.
+///
+/// **A packet the kernel hands us may have nowhere to go.** AWDL has no address
+/// resolution: a destination is either multicast, or a link-local whose MAC can be
+/// reversed out of it, or undeliverable. Counted and dropped rather than guessed —
+/// a frame sent to an invented MAC goes to nobody and looks like packet loss.
+#[cfg(target_os = "linux")]
+fn datapath(args: &[String]) {
+    use libawdl::data::{decapsulate, dst_mac_for_ipv6, is_ipv6_multicast, Encap, ETHERTYPE_IPV6};
+    use libawdl_hal::{poll::wait_readable, rawsock::RawSock, tun::Tun};
+    use std::os::fd::AsRawFd;
+
+    let verbose = args.iter().any(|a| a == "--verbose");
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+
+    let Some(mon) = positional.first() else {
+        eprintln!("awdl datapath <mon-iface> <our-mac> [tun-name] [secs] [--verbose]");
+        std::process::exit(2);
+    };
+    let Some(our_mac) = positional.get(1).and_then(|s| parse_mac(s)) else {
+        eprintln!("need our AWDL MAC as the second argument, e.g. 00:c0:ca:b0:60:4c");
+        eprintln!("peers compute our IPv6 from it, so it must be the address we advertise.");
+        std::process::exit(2);
+    };
+    let name = positional.get(2).map(|s| s.as_str()).unwrap_or("awdl0");
+    let secs: u64 = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    let tun = match Tun::open(name) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e:?}");
+            std::process::exit(1);
+        }
+    };
+    let sock = match RawSock::open(mon) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e:?}");
+            std::process::exit(1);
+        }
+    };
+
+    let addr = std::net::Ipv6Addr::from(libawdl::data::link_local_from_mac(our_mac));
+    println!("datapath: {name} <-> {mon}, as {}", fmt_mac(our_mac));
+    println!("configure the interface in ANOTHER shell, in this order:");
+    println!("  sysctl -w net.ipv6.conf.{name}.addr_gen_mode=1");
+    println!("  ip link set {name} up");
+    println!("  ip -6 addr add {addr}/64 dev {name} scope link");
+    println!();
+
+    let mut tbuf = vec![0u8; 4096];
+    let mut rbuf = vec![0u8; 4096];
+    let (mut sent, mut recvd, mut no_route, mut own, mut not_ours, mut not_awdl) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut d11_seq: u16 = 0;
+    let mut awdl_seq: u16 = 0;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        let ready = match wait_readable(tun.as_raw_fd(), sock.as_raw_fd(), 250) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e:?}");
+                break;
+            }
+        };
+
+        // Kernel -> radio.
+        if ready.first {
+            match tun.read(&mut tbuf) {
+                Ok(n) => {
+                    let pkt = &tbuf[..n];
+                    match dst_mac_for_ipv6(pkt) {
+                        Some(dst) => {
+                            let f = Encap::unicast(our_mac, dst)
+                                .frame(d11_seq, awdl_seq, ETHERTYPE_IPV6, pkt);
+                            match sock.tx(&f) {
+                                Ok(()) => {
+                                    sent += 1;
+                                    d11_seq = (d11_seq + 1) & 0x0fff;
+                                    awdl_seq = awdl_seq.wrapping_add(1);
+                                    if verbose {
+                                        println!("tx {n:>4}B -> {}", fmt_mac(dst));
+                                    }
+                                }
+                                Err(e) => eprintln!("tx: {e:?}"),
+                            }
+                        }
+                        None => {
+                            no_route += 1;
+                            if verbose {
+                                println!("drop {n}B: no AWDL route to that address");
+                            }
+                        }
+                    }
+                }
+                Err(e) => eprintln!("tun read: {e:?}"),
+            }
+        }
+
+        // Radio -> kernel.
+        if ready.second {
+            match sock.rx(&mut rbuf) {
+                Ok(Some(n)) => {
+                    let pkt = &rbuf[..n];
+                    let parsed = Radiotap::parse(pkt)
+                        .and_then(|rt| rt.payload(pkt))
+                        .and_then(decapsulate);
+                    match parsed {
+                        Some(d) if d.src == our_mac => own += 1,
+                        Some(d) if d.dst != our_mac && !is_ipv6_multicast(d.dst) => not_ours += 1,
+                        Some(d) => match tun.write(d.payload) {
+                            Ok(_) => {
+                                recvd += 1;
+                                if verbose {
+                                    println!(
+                                        "rx {:>4}B <- {}  seq {}",
+                                        d.payload.len(),
+                                        fmt_mac(d.src),
+                                        d.header.sequence
+                                    );
+                                }
+                            }
+                            Err(e) => eprintln!("tun write: {e:?}"),
+                        },
+                        None => not_awdl += 1,
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("rx: {e:?}"),
+            }
+        }
+    }
+
+    println!();
+    println!("sent      {sent:>8}   kernel -> radio");
+    println!("received  {recvd:>8}   radio -> kernel");
+    println!("no route  {no_route:>8}   dropped: not multicast and no MAC in the address");
+    println!("own       {own:>8}   our own frames, heard back on the monitor and ignored");
+    println!("not ours  {not_ours:>8}   another peer's unicast");
+    println!("not awdl  {not_awdl:>8}   everything else on the channel");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn datapath(_args: &[String]) {
+    eprintln!("awdl datapath is Linux only: it needs /dev/net/tun and an AF_PACKET socket.");
+    std::process::exit(1);
 }
 
 #[cfg(test)]

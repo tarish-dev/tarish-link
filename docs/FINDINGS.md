@@ -2881,6 +2881,91 @@ The parts, not the pipe. There is no loop yet that reads the tun, encapsulates, 
 does the reverse — and doing it properly needs `poll()` on both descriptors, because a
 blocking read on either starves the other.
 
+## 52. ★ The data plane runs — kernel packets on the air, read back by our own parser
+
+`awdl datapath <mon> <our-mac> [name] [secs]` closes the loop: one `poll` over the tun and
+the raw socket, encapsulating in one direction and decapsulating in the other.
+
+### The run
+
+```
+sysctl -w net.ipv6.conf.awdl0.addr_gen_mode=1
+ip link set awdl0 up
+ip -6 addr add fe80::2c0:caff:feb0:604c/64 dev awdl0 scope link
+ping6 -c 3 -I awdl0 ff02::1
+```
+
+```
+tx   48B -> 33:33:00:00:00:02      router solicitation, sent by the kernel on link-up
+tx  104B -> 33:33:00:00:00:01      the pings
+...
+sent             6   kernel -> radio
+received         0   radio -> kernel
+no route         0
+own              0
+not ours         0
+not awdl      7234   everything else on the channel
+```
+
+The multicast mapping is right in both cases — `ff02::1` to `33:33:00:00:00:01`, `ff02::2`
+to `33:33:00:00:00:02` — and it was never hard-coded; `dst_mac_for_ipv6` derived it from
+the packet.
+
+**The proof is reading the air back with our own parser**, not the counter:
+
+```
+--- 2952 frames: 69 AWDL action, 4 AWDL data, 2879 other 802.11
+AWDL data plane: 4 frames (4 multicast), 496 payload bytes, highest seq 4
+  carries IPv6   4
+```
+
+Four of the six (the capture was shorter than the run) came back off the air as well-formed
+AWDL data frames. The same code that decodes Apple's encapsulation decodes ours, which is a
+stronger statement than a round-trip against ourselves would be.
+
+Incidentally: 69 action frames from three senders — `06:a9:3e:a7:66:1b`,
+`8e:98:6f:eb:2e:ce`, `ae:e8:8d:d4:c9:31` — so there were live Apple devices in the room
+throughout.
+
+### What the run does NOT show
+
+`ping6` reported `3 received, 0% packet loss`, and that is **not** a round trip. The kernel
+loops multicast back to itself on a local interface; no peer answered. `received 0` is the
+honest number, and it is expected — nothing in the room was sending data frames addressed
+to us or to a group we joined.
+
+### ★ A claim I wrote and the measurement refuted
+
+The loop drops frames whose source is our own MAC, and the comment explaining why said that
+without it "every packet we send is immediately re-injected into the kernel, which answers
+it, which sends it again", and that "the first version of this looped a single mDNS query
+into thousands of frames."
+
+**That last sentence was invented.** It never happened. It is the kind of detail that makes
+a comment persuasive, and it was fabricated to justify a filter I had written on general
+principle.
+
+The measurement says `own 0`: on the MT7612U the monitor interface does **not** hear its own
+injections, so the filter earned nothing here. It stays, because whether an adapter loops
+back is adapter-dependent and a feedback loop is far worse than a redundant comparison — but
+the comment now says that, and the counter is printed so the next adapter can be checked
+instead of assumed.
+
+### Architecture note
+
+`poll` went into `libawdl-hal::poll` rather than the CLI. The CLI has no `libc` dependency
+and should not acquire one to run a loop; syscalls belong in the HAL. `EINTR` is reported as
+"neither descriptor ready" rather than as an error, because a signal arriving during a poll
+is not a failure — treating it as one means resizing a terminal kills the data plane.
+
+### What is still missing
+
+Nothing has been received from a peer, because nothing has been sent to us. That needs the
+control plane and the data plane running **together**: `awdl beacon` holds the cluster and
+`awdl datapath` carries the traffic, and today they are separate processes contending for
+one radio. Joining them is the next piece, and it is also the point at which mDNS over AWDL
+becomes testable against a real Apple device.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

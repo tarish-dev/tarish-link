@@ -124,3 +124,67 @@ fn the_short_header_is_eight_bytes_and_says_so() {
     assert_eq!(h, [0x03, 0x04, 0xe3, 0x01, 0x00, 0x00, 0x86, 0xdd]);
     assert_ne!(h[4], 3, "byte 4 == 3 would mark the long form");
 }
+
+// ---------------------------------------------------------------------------------------
+// Addressing: the part that makes sending possible at all.
+// ---------------------------------------------------------------------------------------
+
+use libawdl::data::{dst_mac_for_ipv6, mac_from_link_local, multicast_mac};
+
+/// The real frame gives both directions of the EUI-64 rule at once, which is why it is
+/// worth testing against a capture rather than against a hand-built address.
+#[test]
+fn the_eui64_rule_inverts_on_a_real_frame() {
+    let d = decapsulate(REAL_FRAME).unwrap();
+    let ip_src: [u8; 16] = d.payload[8..24].try_into().unwrap();
+
+    assert_eq!(mac_from_link_local(ip_src), Some(d.src), "recovered from the address alone");
+    assert_eq!(link_local_from_mac(d.src), ip_src, "and back again");
+}
+
+/// The captured frame's destination is `ff02::fb` and its destination MAC is
+/// `33:33:00:00:00:fb`. The mapping is asserted against those, not against RFC prose.
+#[test]
+fn multicast_maps_the_way_the_real_frame_does() {
+    let d = decapsulate(REAL_FRAME).unwrap();
+    let ip_dst: [u8; 16] = d.payload[24..40].try_into().unwrap();
+
+    assert_eq!(ip_dst[0], 0xff, "ff02::fb is multicast");
+    assert_eq!(multicast_mac(ip_dst), Some(d.dst));
+    assert_eq!(d.dst, [0x33, 0x33, 0x00, 0x00, 0x00, 0xfb]);
+
+    // And the whole decision, from the packet alone -- which is what the send path does.
+    assert_eq!(dst_mac_for_ipv6(d.payload), Some(d.dst));
+}
+
+/// An address that is not EUI-64-derived carries no MAC, and inventing one sends the frame
+/// to nobody. A stable-privacy link-local is the case that actually occurs: the kernel adds
+/// one to `awdl0` unless `addr_gen_mode` is set to 1 first — finding 51.
+#[test]
+fn an_address_carrying_no_mac_is_refused_rather_than_guessed() {
+    // fe80::66b6:3871:d3dc:2e0d -- the real stable-privacy address the kernel generated.
+    let privacy = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x66, 0xb6, 0x38, 0x71, 0xd3, 0xdc, 0x2e, 0x0d,
+    ];
+    assert_eq!(privacy[0], 0xfe, "it passes the fe80 test");
+    assert_eq!(mac_from_link_local(privacy), None, "and fails on the missing ff:fe");
+
+    // A global address is not a link-local at all.
+    let global = [0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    assert_eq!(mac_from_link_local(global), None);
+
+    // Non-multicast, non-EUI-64: nothing to send to, and the send path must drop it.
+    let mut pkt = vec![0x60, 0, 0, 0, 0, 0, 17, 255];
+    pkt.extend_from_slice(&[0u8; 16]);
+    pkt.extend_from_slice(&global);
+    assert_eq!(pkt.len(), 40);
+    assert_eq!(dst_mac_for_ipv6(&pkt), None);
+}
+
+#[test]
+fn a_truncated_or_non_ipv6_packet_is_not_addressed() {
+    assert_eq!(dst_mac_for_ipv6(&[0x60, 0, 0]), None, "shorter than a v6 header");
+    let mut v4 = vec![0x45u8; 40];
+    v4[0] = 0x45;
+    assert_eq!(dst_mac_for_ipv6(&v4), None, "IPv4 -- and no AWDL frame has ever carried it");
+}

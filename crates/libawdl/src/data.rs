@@ -276,3 +276,50 @@ pub fn link_local_from_mac(mac: [u8; 6]) -> [u8; 16] {
     a[15] = mac[5];
     a
 }
+
+/// Recover a peer's AWDL MAC from its link-local address — the inverse of
+/// [`link_local_from_mac`].
+///
+/// This is what makes sending possible at all. A packet arrives from the kernel addressed
+/// to `fe80::…`, and there is nothing to ask: AWDL has no ARP, no neighbour discovery that
+/// would help, and no address advertisement anywhere in the protocol. The destination MAC
+/// has to be *computed back* out of the address.
+///
+/// Returns `None` for anything that is not a modified-EUI-64 link-local, rather than
+/// guessing: an address from SLAAC privacy extensions or set by hand carries no MAC, and a
+/// frame sent to a MAC invented from one goes to nobody.
+pub fn mac_from_link_local(addr: [u8; 16]) -> Option<[u8; 6]> {
+    if addr[0] != 0xfe || addr[1] != 0x80 {
+        return None;
+    }
+    // Bytes 2..8 must be zero for a plain link-local, and 11..13 must be the inserted
+    // ff:fe that marks the address as EUI-64-derived. A stable-privacy address passes the
+    // fe80 test and fails this one, which is the whole point of checking.
+    if addr[2..8] != [0; 6] || addr[11] != 0xff || addr[12] != 0xfe {
+        return None;
+    }
+    Some([addr[8] ^ 0x02, addr[9], addr[10], addr[13], addr[14], addr[15]])
+}
+
+/// The Ethernet multicast mapping of an IPv6 multicast address: `33:33` then its last four
+/// bytes. RFC 2464 §7.
+pub fn multicast_mac(addr: [u8; 16]) -> Option<[u8; 6]> {
+    if addr[0] != 0xff {
+        return None;
+    }
+    Some([0x33, 0x33, addr[12], addr[13], addr[14], addr[15]])
+}
+
+/// Where to send an IPv6 packet the kernel handed us, decided from the packet alone.
+///
+/// Multicast maps by RFC 2464; unicast is reversed out of the address by
+/// [`mac_from_link_local`]. Anything else returns `None` and the caller should drop the
+/// packet — which is the honest outcome, because AWDL offers no way to resolve an address
+/// it was never told about.
+pub fn dst_mac_for_ipv6(pkt: &[u8]) -> Option<[u8; 6]> {
+    if pkt.len() < 40 || pkt[0] >> 4 != 6 {
+        return None;
+    }
+    let dst: [u8; 16] = pkt.get(24..40)?.try_into().ok()?;
+    multicast_mac(dst).or_else(|| mac_from_link_local(dst))
+}

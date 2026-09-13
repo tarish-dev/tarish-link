@@ -492,6 +492,21 @@ EUI-64 has nothing to work from and the kernel falls back to stable-privacy. Fin
 `awdl tun <name> [secs] [mac]` opens the interface and prints exactly these commands for a
 given MAC.
 
-**There is no data-plane loop yet** — nothing reads the tun, encapsulates, injects and does
-the reverse. That needs `poll()` on both descriptors, since a blocking read on either
-starves the other.
+`awdl datapath <mon> <our-mac> [name] [secs]` runs the loop: one `poll` over the tun and the
+raw socket, encapsulating one way and decapsulating the other. Verified on the Pi — a
+`ping6 -I awdl0 ff02::1` left as well-formed AWDL data frames that our own parser read back
+off the air.
+
+Three filters, and the loop is wrong without the last two:
+
+- frames from our own MAC. Adapter-dependent: the MT7612U does **not** hear its own
+  injections (`own 0` measured), so this earns nothing there and stays because a feedback
+  loop is worse than a redundant comparison
+- another peer's unicast, which is not ours to deliver into our own stack
+- packets with nowhere to go. AWDL has no address resolution, so a destination is multicast,
+  or a link-local whose MAC reverses out of it, or undeliverable
+
+**Still missing: the control plane and the data plane in one process.** `awdl beacon` holds
+the cluster and `awdl datapath` carries traffic, and they are separate processes contending
+for one radio. Nothing has been received from a peer yet, because nothing has been sent to
+us — and that needs both halves running at once.

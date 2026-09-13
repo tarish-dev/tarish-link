@@ -62,6 +62,11 @@ pub mod rawsock;
 #[cfg(target_os = "linux")]
 pub mod tun;
 
+/// Waiting on the radio and the netdev together. A syscall, so it belongs here rather
+/// than giving the CLI a `libc` dependency to run its loop.
+#[cfg(target_os = "linux")]
+pub mod poll;
+
 pub use caps::{Caps, Tier, TsfPrecision, SOCIAL_CHANNELS};
 
 /// A MAC TSF reading, microseconds, as the radio reports it.
