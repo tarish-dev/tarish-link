@@ -557,6 +557,7 @@ fn usage() -> ! {
     eprintln!("                                         how much of the air do we understand");
     eprintln!("  awdl bytemap <file.pcap>... [tag]      which bytes of a tag ever VARY");
     eprintln!("  awdl correlate <file.pcap>...          match unknown bytes against KNOWN fields");
+    eprintln!("  awdl tun <name> [secs] [mac]           open the awdl0 netdev. needs root, Linux");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
     eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N]");
@@ -639,6 +640,9 @@ fn main() {
         }
         "correlate" => {
             correlate(&args[2..]);
+        }
+        "tun" => {
+            tun(&args[2..]);
         }
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
@@ -1915,6 +1919,74 @@ fn correlate(files: &[String]) {
     if shown == 0 {
         println!("(nothing above 50% survives the filter)");
     }
+}
+
+/// Open the `awdl0` netdev and hold it, so the interface can be inspected from elsewhere.
+///
+/// A diagnostic, not the data plane. It proves three things that are easy to assume: the
+/// tun module is loaded, we have CAP_NET_ADMIN, and the name is free. Those are the
+/// failures that otherwise surface much later as "the peer sent us nothing".
+///
+/// It deliberately does NOT bring the interface up or assign an address. Both are the
+/// caller's job and the commands are printed instead, because an address that does not
+/// match the one peers compute from our MAC means they send to somebody else -- and that
+/// failure looks exactly like nothing listening on the port.
+#[cfg(target_os = "linux")]
+fn tun(args: &[String]) {
+    use libawdl_hal::tun::Tun;
+
+    let name = args.first().map(|s| s.as_str()).unwrap_or("awdl0");
+    let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+
+    let t = match Tun::open(name) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e:?}");
+            std::process::exit(1);
+        }
+    };
+    println!("opened {} -- it exists only while this process holds it", t.name());
+
+    if let Some(mac) = args.get(2).and_then(|s| parse_mac(s)) {
+        let a = libawdl::data::link_local_from_mac(mac);
+        let groups: Vec<String> = a.chunks(2).map(|c| format!("{:02x}{:02x}", c[0], c[1])).collect();
+        println!();
+        println!("the address peers will compute for {}:", fmt_mac(mac));
+        println!("  {}", groups.join(":"));
+        println!();
+        println!("so the interface needs exactly that, and a rule, or nothing is consulted:");
+        println!("  ip link set {name} up");
+        println!("  ip -6 addr add {}/64 dev {name} scope link", groups.join(":"));
+        println!("  ip -6 route add fe80::/64 dev {name} table 200");
+        println!("  ip -6 rule add iif {name} table 200");
+    }
+
+    println!();
+    println!("holding for {secs}s -- check it with:  ip -6 addr show {name}");
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    println!("released");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tun(_args: &[String]) {
+    eprintln!("awdl tun is Linux only: it is /dev/net/tun and a TUNSETIFF ioctl.");
+    std::process::exit(1);
+}
+
+fn parse_mac(s: &str) -> Option<[u8; 6]> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    let mut m = [0u8; 6];
+    for (d, p) in m.iter_mut().zip(parts) {
+        *d = u8::from_str_radix(p, 16).ok()?;
+    }
+    Some(m)
+}
+
+fn fmt_mac(m: [u8; 6]) -> String {
+    m.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }
 
 #[cfg(test)]

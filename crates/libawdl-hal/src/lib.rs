@@ -57,6 +57,11 @@ pub mod nl80211;
 #[cfg(target_os = "linux")]
 pub mod rawsock;
 
+/// The `awdl0` netdev. Linux-only: this is `/dev/net/tun` and a `TUNSETIFF` ioctl, and
+/// there is no portable equivalent worth pretending about.
+#[cfg(target_os = "linux")]
+pub mod tun;
+
 pub use caps::{Caps, Tier, TsfPrecision, SOCIAL_CHANNELS};
 
 /// A MAC TSF reading, microseconds, as the radio reports it.
