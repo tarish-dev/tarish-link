@@ -1354,7 +1354,24 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             //
             // The real fix is SO_TIMESTAMP -- ask the kernel when the frame arrived rather
             // than asking the clock when we noticed. This is the cheap approximation.
-            if let Ok(Some(rx)) = radio.rx(2) {
+            // DRAIN, do not take one frame and move on.
+            //
+            // `arrived_us` is stamped when `rx` returns, so it measures when we noticed,
+            // not when the frame landed. Reading a single frame per pass is fine in a
+            // quiet room and wrong in a busy one: a capture here counted ~270 frames a
+            // second while the loop iterates every few milliseconds, so any hiccup leaves
+            // a backlog in the socket buffer, and every frame behind it gets stamped late
+            // by however long the queue is. That turns into spread, which reads as drift,
+            // which reads as "the estimate degraded" -- measured at 248 ms and 285 ms
+            // against a 65 ms slot, while the same runs briefly adopted at 28 ms.
+            //
+            // Bounded so a saturated channel cannot hold the loop past its next window.
+            // The real fix is SO_TIMESTAMP: ask the kernel when the frame arrived rather
+            // than asking the clock when we got to it. This keeps the queue short enough
+            // that the question matters less.
+            let mut drained = 0;
+            while let Ok(Some(rx)) = radio.rx(if drained == 0 { 2 } else { 0 }) {
+                drained += 1;
                 let now_us = epoch.elapsed().as_micros() as u64;
                 // A data frame is not an action frame, so it never reaches parse_awdl and
                 // would otherwise be silently discarded by a loop that only looks for
@@ -1369,6 +1386,9 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                     if src != addr {
                         cluster.observe(now_us, src, &sync, elect.as_ref());
                     }
+                }
+                if drained >= 32 {
+                    break;
                 }
             }
             // Re-evaluated every pass, not latched. An earlier version set this once and
@@ -1486,11 +1506,13 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     }
     if follow {
         eprintln!(
-            "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, adopted={adopted}",
+            "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, \
+             {} master change(s), adopted={adopted}",
             cluster.clock.observations(),
             cluster.master.map(libawdl::dot11::Mac),
             cluster.clock.phase_us(),
-            cluster.clock.spread_us()
+            cluster.clock.spread_us(),
+            cluster.master_changes
         );
     }
     if let Some(e) = first_error {

@@ -248,3 +248,117 @@ fn jitter_wider_than_a_slot_is_still_rejected() {
     }
     assert!(!c.is_usable(), "spread {:?} should be rejected", c.spread_us());
 }
+
+/// Two clusters in one room must not pool their anchors — finding 55.
+///
+/// Measured on hardware before the fix: consecutive 30-second runs reported spreads of
+/// 188,932 µs and 367,798 µs, each naming a *different* master, against a 65,536 µs slot.
+/// The cause was `self.master` being assigned from every frame, which made it flap on
+/// alternate frames and let both masters' frames satisfy the `master == src` anchoring test.
+#[test]
+fn a_weaker_cluster_does_not_displace_the_one_we_follow() {
+    use libawdl::election::ElectionParamsV2;
+    use libawdl::sync::{ChannelSequence, SyncParams};
+
+    let strong = [0xaa; 6];
+    let weak = [0xcc; 6];
+    let sync_of = |master: [u8; 6], counter: u16| SyncParams {
+        tx_channel: 149, tx_counter: 0, master_channel: 149, guard_time: 0,
+        aw_period: 16, action_frame_period: 110, flags: 0x1800,
+        aw_ext_length: 16, aw_common_length: 16, aw_remaining: 16,
+        ext_min: 3, ext_max_multicast: 3, ext_max_unicast: 3, ext_max_af: 3,
+        master, presence_mode: 4, reserved_28: 0, aw_counter: counter,
+        ap_beacon_alignment_delta: 0,
+        channel_sequence: Some(ChannelSequence::apple_shaped(149, None)),
+        trailing: [0, 0],
+    };
+
+    let mut cl = Cluster::new();
+    // Settle on the strong cluster.
+    for k in 0..8u64 {
+        cl.observe(1_000_000 + k * CYCLE, strong, &sync_of(strong, 0),
+                   Some(&ElectionParamsV2::claiming(strong, 600, 3)));
+    }
+    assert_eq!(cl.master, Some(strong));
+    assert_eq!(cl.clock.observations(), 8);
+    assert_eq!(cl.master_changes, 1, "None -> strong is one change");
+    let spread_before = cl.clock.spread_us();
+
+    // A weaker cluster, arriving at a wildly different phase. Before the fix each of these
+    // switched the master and anchored, wrecking the estimate.
+    for k in 0..8u64 {
+        cl.observe(1_000_000 + k * CYCLE + CYCLE / 3, weak, &sync_of(weak, 0),
+                   Some(&ElectionParamsV2::claiming(weak, 60, 3)));
+    }
+    assert_eq!(cl.master, Some(strong), "a metric of 60 does not displace 600");
+    assert_eq!(cl.clock.observations(), 8, "and its frames anchored nothing");
+    assert_eq!(cl.master_changes, 1, "no switch happened");
+    assert_eq!(cl.clock.spread_us(), spread_before, "the estimate is untouched");
+}
+
+/// A genuinely better cluster IS adopted, and the old anchors are discarded rather than
+/// averaged with the new ones — they were measured against a different timeline.
+#[test]
+fn a_stronger_cluster_is_adopted_and_the_old_anchors_are_dropped() {
+    use libawdl::election::ElectionParamsV2;
+    use libawdl::sync::{ChannelSequence, SyncParams};
+
+    let weak = [0xcc; 6];
+    let strong = [0xaa; 6];
+    let sync_of = |master: [u8; 6]| SyncParams {
+        tx_channel: 149, tx_counter: 0, master_channel: 149, guard_time: 0,
+        aw_period: 16, action_frame_period: 110, flags: 0x1800,
+        aw_ext_length: 16, aw_common_length: 16, aw_remaining: 16,
+        ext_min: 3, ext_max_multicast: 3, ext_max_unicast: 3, ext_max_af: 3,
+        master, presence_mode: 4, reserved_28: 0, aw_counter: 0,
+        ap_beacon_alignment_delta: 0,
+        channel_sequence: Some(ChannelSequence::apple_shaped(149, None)),
+        trailing: [0, 0],
+    };
+
+    let mut cl = Cluster::new();
+    for k in 0..5u64 {
+        cl.observe(1_000_000 + k * CYCLE, weak, &sync_of(weak),
+                   Some(&ElectionParamsV2::claiming(weak, 60, 3)));
+    }
+    assert_eq!(cl.clock.observations(), 5);
+
+    cl.observe(9_000_000, strong, &sync_of(strong),
+               Some(&ElectionParamsV2::claiming(strong, 600, 3)));
+    assert_eq!(cl.master, Some(strong));
+    assert_eq!(cl.master_metric, Some(600));
+    assert_eq!(cl.master_changes, 2, "None -> weak -> strong");
+    assert_eq!(
+        cl.clock.observations(), 1,
+        "the weak cluster's five anchors were discarded, not averaged with the new one"
+    );
+}
+
+/// An equal metric must not displace the incumbent, or two matched clusters flap forever.
+#[test]
+fn an_equal_metric_leaves_the_incumbent_alone() {
+    use libawdl::election::ElectionParamsV2;
+    use libawdl::sync::{ChannelSequence, SyncParams};
+
+    let a = [0xaa; 6];
+    let b = [0xbb; 6];
+    let sync_of = |master: [u8; 6]| SyncParams {
+        tx_channel: 149, tx_counter: 0, master_channel: 149, guard_time: 0,
+        aw_period: 16, action_frame_period: 110, flags: 0x1800,
+        aw_ext_length: 16, aw_common_length: 16, aw_remaining: 16,
+        ext_min: 3, ext_max_multicast: 3, ext_max_unicast: 3, ext_max_af: 3,
+        master, presence_mode: 4, reserved_28: 0, aw_counter: 0,
+        ap_beacon_alignment_delta: 0,
+        channel_sequence: Some(ChannelSequence::apple_shaped(149, None)),
+        trailing: [0, 0],
+    };
+
+    let mut cl = Cluster::new();
+    cl.observe(1_000_000, a, &sync_of(a), Some(&ElectionParamsV2::claiming(a, 530, 3)));
+    for k in 1..6u64 {
+        cl.observe(1_000_000 + k * CYCLE, b, &sync_of(b),
+                   Some(&ElectionParamsV2::claiming(b, 530, 3)));
+    }
+    assert_eq!(cl.master, Some(a), "530 does not beat 530");
+    assert_eq!(cl.master_changes, 1);
+}

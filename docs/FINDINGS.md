@@ -3092,6 +3092,76 @@ goes to zero).
 That is the cheapest possible guard for a duplication that is otherwise invisible until it
 is a field failure.
 
+## 55. ★ Two bugs kept us out of every cluster — and one may have skewed the 2×2
+
+`--follow` was reporting cluster-clock spreads of 188,932 µs and 367,798 µs against a
+65,536 µs slot, with `adopted=false`. Both causes are now fixed and the spread is **1,519
+µs**.
+
+### Bug 1 — `self.master` was assigned from every frame
+
+```rust
+self.master = Some(e.master);   // unconditionally
+```
+
+A room with two clusters names two different masters, so this flapped on alternate frames.
+And the anchoring test is `self.master == Some(src)` — so **both** masters' frames anchored
+the clock, pooling offsets measured against two unrelated timelines.
+
+The rule is AWDL's own: follow the better metric. A weaker cluster is now ignored rather
+than averaged in, an *equal* metric does not displace the incumbent (or two matched clusters
+flap forever), and when the master genuinely changes the old anchors are **discarded** —
+they were measured against a different cluster's timeline. `master_changes` is now reported,
+because a run that changes master repeatedly is not synchronising to anything and the
+symptom without that counter is a spread figure that looks like jitter.
+
+This took the master changes from constant to 1 per run, and the run began briefly adopting
+at 28,297 µs before degrading again — which said the remaining fault was elsewhere.
+
+### Bug 2 — one frame per pass, in a room sending 270 a second ★
+
+`arrived_us` is stamped when `rx` returns, so it measures **when we noticed**, not when the
+frame landed. The loop read a single frame per iteration. A capture counted ~270 AWDL frames
+per second while the loop iterates every few milliseconds, so any hiccup left a backlog in
+the socket buffer — and every frame behind it was stamped late by however long the queue
+was.
+
+That is not jitter, it is a queue, and it grows. It showed up as spread, which reads as
+drift, which reads as "the estimate degraded".
+
+Draining the socket each pass — bounded at 32 so a saturated channel cannot hold the loop
+past its next window — fixed it outright:
+
+| | before | after |
+|---|---|---|
+| spread, run 1 | 248,450 µs | **2,489 µs** |
+| spread, run 2 | 285,558 µs | **1,519 µs** |
+| adopted | false | **true** |
+| master changes | 1-2 | 1 |
+
+Two orders of magnitude, and the estimate now holds for the whole run.
+
+`SO_TIMESTAMP` remains the correct fix — ask the kernel when the frame arrived rather than
+asking the clock when we got to it. Draining keeps the queue short enough that the question
+matters much less, which is why it is not urgent.
+
+### ★ What this means for the 2×2, and it is uncomfortable
+
+Findings 45 and 46 concluded that a settled Apple cluster does not re-elect, from eight runs
+across metrics 50 to 600 with zero adoptions. **Every one of those runs was made with a
+cluster clock this badly degraded**, which means our frames were aimed at windows computed
+from a phase estimate wrong by hundreds of milliseconds — most likely landing while the
+peers were on another channel.
+
+"The peer ignored us" and "the peer never heard us" are indistinguishable from our side, and
+that is exactly the confusion this repository keeps paying for.
+
+This does **not** overturn the conclusion. FH succeeded with the same defect, and a peer that
+never heard us should not have adopted us either. But the negative results are much weaker
+than they looked, and the honest position is that **the settled-cluster question is open
+again** and worth re-running now that `adopted=true` is achievable. The re-run is cheap and
+the outcome measure is unchanged.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

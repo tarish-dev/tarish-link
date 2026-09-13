@@ -162,6 +162,16 @@ impl ClusterClock {
         }
     }
 
+    /// Forget every anchor.
+    ///
+    /// Called when the anchors stop being comparable — a different master, a different
+    /// presence mode. An offset is measured against one cluster's timeline and means
+    /// nothing against another's, so keeping them is worse than having none: the spread
+    /// goes wide, `is_usable` says no, and the reason looks like jitter.
+    pub fn reset(&mut self) {
+        self.offsets.clear();
+    }
+
     /// The estimated phase: where in our clock the cycle begins, modulo a cycle.
     ///
     /// **The newest sighting wins.** OWL's `awdl_sync_update_last` re-anchors on every
@@ -287,6 +297,12 @@ pub struct Cluster {
     pub master_metric: Option<u32>,
     /// The slots the master says it occupies.
     pub master_slots: Vec<usize>,
+    /// How many times we have changed which cluster we follow.
+    ///
+    /// Worth reporting rather than hiding. A run in a busy room that changes master
+    /// repeatedly is not synchronising to anything, and the symptom without this counter is
+    /// a spread figure that looks like jitter and is actually two clusters.
+    pub master_changes: u32,
     pub clock: ClusterClock,
 }
 
@@ -309,11 +325,37 @@ impl Cluster {
         if let Some(e) = election {
             // Follow the cluster's own opinion of who is master rather than picking the
             // loudest sender: a node at distance 2 still names the root correctly.
-            self.master = Some(e.master);
-            if e.master == src {
-                self.master_metric = Some(e.self_metric);
-            } else if e.master_metric != 0 {
-                self.master_metric = Some(e.master_metric);
+            //
+            // BUT DO NOT TAKE EVERY FRAME'S WORD FOR IT. A room with two clusters names
+            // two different masters, and assigning `self.master` unconditionally makes it
+            // flap on alternate frames -- which then lets BOTH masters' frames anchor the
+            // clock, since the anchoring test is `self.master == Some(src)`. Offsets from
+            // two unrelated timelines pool together and the spread goes to hundreds of
+            // milliseconds against a 65 ms slot. Measured on hardware at 188 ms and 368 ms
+            // in consecutive runs, each naming a different master. Finding 55.
+            //
+            // The rule is AWDL's own: follow the better metric. A weaker cluster is
+            // ignored rather than averaged in, and an EQUAL metric does not displace the
+            // incumbent -- otherwise two clusters that happen to match would flap forever.
+            let claimed = if e.master == src { e.self_metric } else { e.master_metric };
+            let switch = match (self.master, self.master_metric) {
+                (None, _) => true,
+                (Some(m), _) if m == e.master => true,
+                (Some(_), Some(have)) => claimed > have,
+                (Some(_), None) => true,
+            };
+            if switch {
+                if self.master != Some(e.master) {
+                    // A different cluster: every anchor we hold was measured against the
+                    // old one's timeline and is now meaningless.
+                    self.clock.reset();
+                    self.master_slots.clear();
+                    self.master_changes += 1;
+                }
+                self.master = Some(e.master);
+                if claimed != 0 {
+                    self.master_metric = Some(claimed);
+                }
             }
         }
 
