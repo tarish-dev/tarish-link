@@ -420,7 +420,78 @@ contest is not a defect in `beats()`.
 **Two iPhones re-form a cluster in under ten seconds.** Any experiment that establishes a
 condition *before* opening the capture has already missed it.
 
-There is no data plane here yet. `data.rs` decodes the encapsulation —
-`802.11 QoS Data → LLC/SNAP → AWDL data header → IPv6` — but nothing in the tree creates an
-interface, so libawdl is a control-plane library today. An `awdl0` netdev is what an AirDrop
-implementation would bind its listener to.
+## 6. The data plane
+
+Measured across the 428 AWDL data frames in `captures/`; every constant below was invariant
+in all of them, and the long form the parser supports appeared **0 times**.
+
+```
+802.11 QoS Data, 26 bytes
+  88 00              FC: QoS Data, neither ToDS nor FromDS
+  00 00              duration, set by the radio
+  <dst 6>            addr1
+  <src 6>            addr2
+  00 25 00 ff 94 73  addr3 -- the well-known AWDL BSSID, all 428 frames
+  <seq ctrl 2>       4 bits fragment, 12 bits sequence
+  06 00 | 00 00      QoS control. TID 6 in 226 frames, TID 0 in 149
+
+LLC/SNAP, 8 bytes
+  aa aa 03           LLC
+  00 17 f2           Apple's OUI -- NOT the standard 00:00:00
+  08 00              protocol ID
+
+AWDL data header, short form, 8 bytes
+  03 04              all 428 frames
+  <sequence 2>       little-endian, per-peer
+  00 00              form marker. 0x03 at the first byte would mark the long form
+  86 dd              ethertype. IPv6 in all 428, never IPv4
+
+then the IP packet.
+```
+
+**The SNAP is the trap.** A standard SNAP puts an ethertype at its last two bytes; here
+those bytes are `08 00`, which reads as IPv4, and every frame is IPv6. The real ethertype
+is four bytes further on. So **check** the SNAP rather than skipping eight bytes — most QoS
+Data in these captures belongs to other vendors.
+
+### Addresses are computed, not advertised
+
+AWDL carries no IP address anywhere. A peer's address is the **modified EUI-64** of its AWDL
+MAC, which is how a sender knows where to send with no resolution step:
+
+```
+8a:c3:f7:4b:ce:de   ->   fe80::88c3:f7ff:fe4b:cede
+```
+
+`ff:fe` inserted in the middle, **and** bit 1 of the first octet flipped. Doing only the
+first gives a well-formed address belonging to nobody.
+
+### The interface
+
+`hal::tun` opens `/dev/net/tun` with `TUNSETIFF`, `IFF_TUN | IFF_NO_PI`. TUN rather than TAP
+because the payload that goes inside the AWDL header is the IP packet; an Ethernet header
+would be discarded immediately. `IFF_NO_PI` is not optional — without it every read carries
+four bytes of prefix and the IPv6 version nibble lands in the wrong place.
+
+Bringing it up takes three commands **in this order**, and the first is the one that bites:
+
+```bash
+sysctl -w net.ipv6.conf.awdl0.addr_gen_mode=1   # BEFORE up; only read at that moment
+ip link set awdl0 up
+ip -6 addr add fe80::88c3:f7ff:fe4b:cede/64 dev awdl0 scope link
+ip -6 route add fe80::/64 dev awdl0 table 200
+ip -6 rule add iif awdl0 table 200
+```
+
+Without the sysctl the kernel adds a **second** link-local of its own,
+`scope link stable-privacy`, and may use it as the source address — so peers reach us at the
+derived address and our replies come from one they have never heard of. `addr_gen_mode` reads
+back as `0` (EUI-64), which looks right; a TUN has no hardware address (`link/none`), so
+EUI-64 has nothing to work from and the kernel falls back to stable-privacy. Finding 51.
+
+`awdl tun <name> [secs] [mac]` opens the interface and prints exactly these commands for a
+given MAC.
+
+**There is no data-plane loop yet** — nothing reads the tun, encapsulates, injects and does
+the reverse. That needs `poll()` on both descriptors, since a blocking read on either
+starves the other.

@@ -1949,14 +1949,21 @@ fn tun(args: &[String]) {
 
     if let Some(mac) = args.get(2).and_then(|s| parse_mac(s)) {
         let a = libawdl::data::link_local_from_mac(mac);
-        let groups: Vec<String> = a.chunks(2).map(|c| format!("{:02x}{:02x}", c[0], c[1])).collect();
+        // Canonical compressed form -- what `ip` prints back, so the output can be
+        // compared against `ip -6 addr show` without squinting.
+        let addr = std::net::Ipv6Addr::from(a);
         println!();
         println!("the address peers will compute for {}:", fmt_mac(mac));
-        println!("  {}", groups.join(":"));
+        println!("  {addr}");
         println!();
         println!("so the interface needs exactly that, and a rule, or nothing is consulted:");
+        // addr_gen_mode FIRST: it is only read when the interface comes up, and without it
+        // the kernel adds a stable-privacy link-local beside ours and may use that as the
+        // source address -- replies then come from an address no peer has heard of.
+        println!("  sysctl -w net.ipv6.conf.{name}.addr_gen_mode=1   # BEFORE up, or the");
+        println!("                                                  # kernel adds its own");
         println!("  ip link set {name} up");
-        println!("  ip -6 addr add {}/64 dev {name} scope link", groups.join(":"));
+        println!("  ip -6 addr add {addr}/64 dev {name} scope link");
         println!("  ip -6 route add fe80::/64 dev {name} table 200");
         println!("  ip -6 rule add iif {name} table 200");
     }

@@ -2779,6 +2779,108 @@ both steps together is **zero bytes**. The right lesson is not to estimate a dec
 the size of the unknown: finding 48 was cheap because a published standard described the
 field, and nothing published describes these.
 
+## 51. ★ The data plane — and the second link-local the kernel gives you for free
+
+libawdl could join a cluster, hold a schedule and be elected master, and could not carry a
+byte. `data.rs` parsed the encapsulation; nothing built it, and `grep TUNSETIFF` found
+nothing.
+
+### The encapsulation, measured across 428 frames
+
+```
+802.11 QoS Data, 26 bytes   88 00 | dur | dst | src | 00:25:00:ff:94:73 | seq | 06 00
+LLC/SNAP, 8                 aa aa 03 | 00 17 f2 | 08 00
+AWDL data header, 8         03 04 | seq LE | 00 00 | 86 dd
+then IPv6
+```
+
+Every constant was invariant in all 428 AWDL data frames in `captures/`: bytes 0,1 of the
+header are `03 04`, the BSSID is `00:25:00:ff:94:73`, the ethertype is IPv6 and **never**
+IPv4, and the long form the parser supports appears **0 times**. Recorded with the sample
+size, because 428 frames from a few Apple devices and one Pixel is not the protocol.
+
+**The SNAP is not a standard one, and that is a trap with teeth.** A normal SNAP carries OUI
+`00:00:00` then an ethertype. AWDL carries **Apple's** OUI `00:17:f2` and protocol ID
+`0x0800` — so the two bytes sitting where the ethertype belongs say *IPv4* while every frame
+is IPv6, and the real ethertype is four bytes further on. `decapsulate` therefore **checks**
+the SNAP instead of skipping eight bytes: most QoS Data in these captures belongs to other
+vendors, and skipping blind lands the ethertype in somebody else's payload.
+
+### Addresses are computed, never advertised
+
+AWDL carries no addresses anywhere. A peer's IPv6 is the **modified EUI-64** of its AWDL
+MAC, which is how a sender knows where to send with no resolution step at all. Verified
+against a captured frame: source MAC `8a:c3:f7:4b:ce:de`, IPv6 source
+`fe80::88c3:f7ff:fe4b:cede`.
+
+Two transformations, and doing one of them is the easy mistake: `ff:fe` goes in the middle
+**and** bit 1 of the first octet flips (`0x8a` → `0x88`). Skip the flip and the address is
+well-formed, belongs to nobody, and fails silently.
+
+### The test with nowhere to hide
+
+A real 130-byte frame — an mDNS A query for `Android_0637B1C2.local` to `ff02::fb` — is
+decapsulated and then **rebuilt from its parts, requiring byte equality**. A wrong constant
+cannot survive that. Its IPv6 header is checked against itself too: stated payload length 48
+plus the 40-byte fixed header is exactly the 88 bytes present.
+
+### ★ The kernel adds a second link-local, and prefers it
+
+`hal::tun` opens `/dev/net/tun` with `TUNSETIFF`. `awdl0` appears:
+
+```
+69: awdl0: <POINTOPOINT,MULTICAST,NOARP> mtu 1500 state DOWN
+    link/none
+```
+
+Bring it up and assign the derived address, and it has **two**:
+
+```
+inet6 fe80::88c3:f7ff:fe4b:cede/64 scope link              <- ours
+inet6 fe80::66b6:3871:d3dc:2e0d/64 scope link stable-privacy
+```
+
+Peers compute the EUI-64 address and send to it, so traffic arrives — and the kernel may
+pick the **stable-privacy** address as the source for our replies, which then come from an
+address the peer has never heard of. Discovery would work and every answer would be
+dropped, which is indistinguishable from a protocol bug.
+
+`addr_gen_mode` reads back as **0**, meaning EUI-64, and that looks like the right setting.
+It is not: a TUN has **no hardware address** — `link/none` — so EUI-64 has nothing to derive
+from and the kernel falls back to stable-privacy. The fix is mode **1** (none), set **before
+the interface comes up**, because that is the only time it is read:
+
+```bash
+sysctl -w net.ipv6.conf.awdl0.addr_gen_mode=1
+ip link set awdl0 up
+ip -6 addr add fe80::88c3:f7ff:fe4b:cede/64 dev awdl0 scope link
+```
+
+Then `ip -6 addr show awdl0` lists exactly one address. Verified on the Pi.
+
+`IFF_NO_PI` belongs in the same family: without it every read carries four bytes of flags
+and protocol, the IPv6 version nibble lands in the wrong place, and it presents as the peer
+sending garbage.
+
+### Two process notes from building it
+
+**`cfg(target_os = "linux")` means the development machine never compiles it.** A clean
+`cargo build` on macOS proves nothing about `tun.rs` — it is excluded. It had to be built on
+the Pi, and was.
+
+**`cargo: command not found` over SSH is not a missing toolchain.** Non-interactive SSH gets
+no login PATH, so `~/.cargo/bin` is absent — the same trap `CLAUDE.md` documents for
+`bf-run`. The first "clean build" on the Pi was cargo not existing, and an empty grep read
+as success. Then a `rsync crates/` with a trailing slash flattened the crate directories
+into the tree root, and the stale `target/` from that layout kept reporting a missing method
+that was present in the source. `cargo clean` resolved it.
+
+### What is still missing
+
+The parts, not the pipe. There is no loop yet that reads the tun, encapsulates, injects, and
+does the reverse — and doing it properly needs `poll()` on both descriptors, because a
+blocking read on either starves the other.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

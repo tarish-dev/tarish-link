@@ -21,6 +21,27 @@
 //! carry the link-local of *our* AWDL address or peers will compute one we are not
 //! listening on.
 //!
+//! **The kernel will add its own link-local, and it will be the wrong one.** Measured on the
+//! Pi: bring `awdl0` up and it acquires a *second* address,
+//! `fe80::66b6:3871:d3dc:2e0d scope link stable-privacy`, beside the derived one. Peers
+//! compute the EUI-64 address and send to it, while the kernel may choose the
+//! stable-privacy address as the *source* for our replies — so traffic arrives and
+//! answers come from an address the peer has never heard of.
+//!
+//! `addr_gen_mode` reads back as `0`, meaning EUI-64, which looks correct and is not: a
+//! TUN has no hardware address at all (`ip link` shows `link/none`), so EUI-64 has nothing
+//! to derive from and the kernel falls back to stable-privacy. Set the mode to **1**
+//! (none) and do it **before** the interface comes up, because it is only consulted at
+//! that point:
+//!
+//! ```text
+//!   sysctl -w net.ipv6.conf.awdl0.addr_gen_mode=1
+//!   ip link set awdl0 up
+//!   ip -6 addr add <derived>/64 dev awdl0 scope link
+//! ```
+//!
+//! With that, `ip -6 addr show awdl0` lists exactly one address. Verified.
+//!
 //! **A route without an `ip rule` is never consulted.** Android routes by fwmark and the
 //! per-network table starts empty; the failure looks exactly like nothing listening on the
 //! port, which is the single most expensive false diagnosis in this project's history.
