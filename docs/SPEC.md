@@ -506,7 +506,26 @@ Three filters, and the loop is wrong without the last two:
 - packets with nowhere to go. AWDL has no address resolution, so a destination is multicast,
   or a link-local whose MAC reverses out of it, or undeliverable
 
-**Still missing: the control plane and the data plane in one process.** `awdl beacon` holds
-the cluster and `awdl datapath` carries traffic, and they are separate processes contending
-for one radio. Nothing has been received from a peer yet, because nothing has been sent to
-us — and that needs both halves running at once.
+### Both planes in one process
+
+`awdl beacon --datapath awdl0` runs the control plane and the data plane in one loop, which
+is not a convenience:
+
+- **two processes cannot both inject on one phy.** The mt76 answers the second with `EAGAIN`
+  and writes nothing to dmesg
+- **a peer listens only during its availability windows.** A data frame sent when the kernel
+  hands it over goes out while the peer is deaf, and the sender sees a successful transmit
+  and no reply — indistinguishable from being ignored
+
+So outbound packets are **queued and drained immediately after each beacon**, which puts
+them inside a window the cluster attends. Measured: every data frame went out **0.03–0.08 ms**
+after a beacon, 8 of 8 inside one 65.536 ms extended window. Finding 53.
+
+The queue is bounded at 64 and drops the *oldest* — on a link where a packet may wait a
+cycle, the stale end is the part worth losing — and drains at most 4 per window, because
+emptying it into one window would overrun into the next slot.
+
+**Still missing: anything received from a peer.** `0 delivered` so far, which is expected —
+we declined the election, so no Apple device had reason to send us anything. That experiment
+needs us inside a cluster (transmitting before the peer arrives, finding 46) and an mDNS
+query on `ff02::fb` that a real device answers.

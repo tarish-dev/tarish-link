@@ -562,7 +562,7 @@ fn usage() -> ! {
     eprintln!("                                         RUN THE PIPE: tun <-> radio. root, Linux");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -624,6 +624,9 @@ fn main() {
                 args.iter().position(|a| a == "--tenure")
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok()),
+                args.iter().position(|a| a == "--datapath")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str()),
             );
         }
         "follow" => {
@@ -1186,7 +1189,8 @@ fn check_baseline(path: &str, floors: &std::collections::BTreeMap<u8, Floor>) ->
 /// test is whether a real peer *acts* on them, and the cheapest evidence is the election:
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>) {
+#[allow(clippy::too_many_arguments)]
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1217,6 +1221,54 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     // own, and it tells us what it is in every frame. See libawdl::follow.
     let mut cluster = libawdl::follow::Cluster::new();
     let mut adopted = false;
+
+    // The data plane shares this loop and this radio. It is not a second process, because
+    // two processes cannot both inject on one phy -- the mt76 answers the second with
+    // EAGAIN and says nothing in dmesg.
+    //
+    // OUTBOUND PACKETS ARE QUEUED, NOT SENT ON ARRIVAL, and that is the whole reason this
+    // had to merge with the beacon rather than run beside it. An AWDL peer listens only
+    // during its availability windows; a data frame sent the moment the kernel hands it
+    // over goes out while the peer is deaf, and the sender sees a successful transmit and
+    // no reply. So the queue drains in the same windows the beacons go out in.
+    let tundev = match datapath {
+        #[cfg(target_os = "linux")]
+        Some(name) => match libawdl_hal::tun::Tun::open(name) {
+            Ok(t) => {
+                let a = std::net::Ipv6Addr::from(libawdl::data::link_local_from_mac(addr));
+                eprintln!("  --datapath {name}: carrying IPv6, queued and drained in-window");
+                eprintln!("    configure it elsewhere, in this order:");
+                eprintln!("      sysctl -w net.ipv6.conf.{name}.addr_gen_mode=1");
+                eprintln!("      ip link set {name} up");
+                eprintln!("      ip -6 addr add {a}/64 dev {name} scope link");
+                Some(t)
+            }
+            Err(e) => {
+                eprintln!("{e:?}");
+                std::process::exit(1);
+            }
+        },
+        #[cfg(not(target_os = "linux"))]
+        Some(_) => {
+            eprintln!("--datapath is Linux only: it needs /dev/net/tun.");
+            std::process::exit(1);
+        }
+        None => None,
+    };
+    // Bounded deliberately. An unbounded queue turns a burst the radio cannot keep up with
+    // into unbounded memory and ever-staler packets; dropping the OLDEST is right for a
+    // link where a late packet is worth less than a fresh one.
+    const OUTBOUND_MAX: usize = 64;
+    /// How many queued packets to drain per window visit. One beacon plus a few data
+    /// frames fits an extended availability window; emptying a full queue into one window
+    /// would overrun it and transmit into the next slot, which is the thing this project
+    /// spent three build cycles learning not to do.
+    const DRAIN_PER_WINDOW: usize = 4;
+    let mut outbound: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+    let mut tbuf = vec![0u8; 4096];
+    let (mut dp_sent, mut dp_recvd, mut dp_noroute, mut dp_dropped) = (0u64, 0u64, 0u64, 0u64);
+    let mut awdl_data_seq: u16 = 0;
+    let mut d11_data_seq: u16 = 0;
     if compete {
         b.metric = libawdl::beacon::METRIC_COMPETE;
     }
@@ -1299,6 +1351,12 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             // than asking the clock when we noticed. This is the cheap approximation.
             if let Ok(Some(rx)) = radio.rx(2) {
                 let now_us = epoch.elapsed().as_micros() as u64;
+                // A data frame is not an action frame, so it never reaches parse_awdl and
+                // would otherwise be silently discarded by a loop that only looks for
+                // election state.
+                if tundev.is_some() {
+                    deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd);
+                }
                 if let Some((src, sync, elect)) = parse_awdl(&rx.bytes) {
                     // Never synchronise to ourselves. Monitor mode hands our own
                     // transmissions straight back, and adopting them would lock the
@@ -1344,6 +1402,16 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             // deaf for most of a cycle.
             // Hop in short steps for the same reason: a long sleep is a long deaf spell,
             // and the next frame's timestamp is only as good as how promptly we read it.
+            //
+            // The gap between windows is also when the kernel's packets are collected. The
+            // tun is read here and the frames are BUILT here, but not sent -- see the queue
+            // note above.
+            if let Some(t) = tundev.as_ref() {
+                enqueue_from_tun(
+                    t, addr, &mut tbuf, &mut outbound, OUTBOUND_MAX,
+                    &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
+                );
+            }
             let hop = wait.min(3_000);
             std::thread::sleep(std::time::Duration::from_micros(hop));
             continue;
@@ -1368,6 +1436,22 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                 }
             }
         }
+        // IN-WINDOW DRAIN. The beacon has just gone out, so we are inside a slot the
+        // cluster attends and the peer is listening. This is the only moment a data frame
+        // is worth sending.
+        for _ in 0..DRAIN_PER_WINDOW {
+            let Some(f) = outbound.pop_front() else { break };
+            match radio.tx(&f, TxParams::default()) {
+                Ok(()) => dp_sent += 1,
+                Err(e) => {
+                    failed += 1;
+                    if first_error.is_none() {
+                        first_error = Some(format!("{e:?}"));
+                    }
+                }
+            }
+        }
+
         b.advance();
         n += 1;
         last_tx_us = epoch.elapsed().as_micros() as u64;
@@ -1388,6 +1472,13 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     }
 
     eprintln!("\nsent {sent_mif} MIF, {sent_psf} PSF, {failed} failed");
+    if tundev.is_some() {
+        eprintln!(
+            "datapath: {dp_sent} sent in-window, {dp_recvd} delivered, {dp_noroute} unroutable, \
+             {dp_dropped} dropped (queue full), {} still queued",
+            outbound.len()
+        );
+    }
     if follow {
         eprintln!(
             "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, adopted={adopted}",
@@ -2166,6 +2257,99 @@ fn datapath(_args: &[String]) {
     eprintln!("awdl datapath is Linux only: it needs /dev/net/tun and an AF_PACKET socket.");
     std::process::exit(1);
 }
+
+/// Collect whatever the kernel has for us and build frames, WITHOUT sending them.
+///
+/// Reading is non-blocking by construction: this is only called from the gap between
+/// availability windows, and it takes at most a handful of packets per visit so that a
+/// busy interface cannot hold the loop past the next window. Missing a window is worse
+/// than a packet waiting one more cycle.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn enqueue_from_tun(
+    tun: &libawdl_hal::tun::Tun,
+    our_mac: [u8; 6],
+    buf: &mut [u8],
+    queue: &mut std::collections::VecDeque<Vec<u8>>,
+    max: usize,
+    d11_seq: &mut u16,
+    awdl_seq: &mut u16,
+    unroutable: &mut u64,
+    dropped: &mut u64,
+) {
+    use libawdl::data::{dst_mac_for_ipv6, Encap, ETHERTYPE_IPV6};
+    use libawdl_hal::poll::wait_readable;
+    use std::os::fd::AsRawFd;
+
+    for _ in 0..4 {
+        // Polled with a zero timeout rather than read blindly: a TUN read with nothing
+        // waiting blocks, and blocking here means going deaf and missing the window.
+        match wait_readable(tun.as_raw_fd(), tun.as_raw_fd(), 0) {
+            Ok(r) if r.first => {}
+            _ => return,
+        }
+        let n = match tun.read(buf) {
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        let pkt = &buf[..n];
+        let Some(dst) = dst_mac_for_ipv6(pkt) else {
+            *unroutable += 1;
+            continue;
+        };
+        let frame =
+            Encap::unicast(our_mac, dst).frame(*d11_seq, *awdl_seq, ETHERTYPE_IPV6, pkt);
+        *d11_seq = (*d11_seq + 1) & 0x0fff;
+        *awdl_seq = awdl_seq.wrapping_add(1);
+        if queue.len() >= max {
+            // Oldest first. On a link where a packet may wait a whole cycle, the stale end
+            // of the queue is the part worth losing.
+            queue.pop_front();
+            *dropped += 1;
+        }
+        queue.push_back(frame);
+    }
+}
+
+/// Hand a received AWDL data frame to the kernel, if it is one and if it is ours.
+#[cfg(target_os = "linux")]
+fn deliver_data_frame(
+    bytes: &[u8],
+    our_mac: [u8; 6],
+    tun: Option<&libawdl_hal::tun::Tun>,
+    delivered: &mut u64,
+) {
+    use libawdl::data::{decapsulate, is_ipv6_multicast};
+
+    let Some(tun) = tun else { return };
+    let Some(d) = Radiotap::parse(bytes).and_then(|rt| rt.payload(bytes)).and_then(decapsulate)
+    else {
+        return;
+    };
+    // Ours, or a group we are in. Our own frames are excluded for the reason in
+    // `datapath`: whether a monitor hears its own injections is adapter-dependent, and a
+    // feedback loop is much worse than a redundant comparison.
+    if d.src == our_mac || (d.dst != our_mac && !is_ipv6_multicast(d.dst)) {
+        return;
+    }
+    if tun.write(d.payload).is_ok() {
+        *delivered += 1;
+    }
+}
+
+// Stubs so the beacon loop compiles on a development machine, where there is no
+// /dev/net/tun and --datapath exits before reaching either of these.
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+fn enqueue_from_tun(
+    _t: &(), _m: [u8; 6], _b: &mut [u8],
+    _q: &mut std::collections::VecDeque<Vec<u8>>, _max: usize,
+    _d: &mut u16, _a: &mut u16, _u: &mut u64, _dr: &mut u64,
+) {
+}
+
+#[cfg(not(target_os = "linux"))]
+fn deliver_data_frame(_bytes: &[u8], _our_mac: [u8; 6], _tun: Option<&()>, _delivered: &mut u64) {}
 
 #[cfg(test)]
 mod tests {

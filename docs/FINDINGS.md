@@ -2966,6 +2966,72 @@ control plane and the data plane running **together**: `awdl beacon` holds the c
 one radio. Joining them is the next piece, and it is also the point at which mDNS over AWDL
 becomes testable against a real Apple device.
 
+## 53. ★ One process, both planes — and data frames land 30 microseconds after a beacon
+
+`awdl beacon --datapath awdl0` runs the control plane and the data plane in one loop. They
+had to merge rather than run side by side, for two reasons and only the second is obvious.
+
+**Two processes cannot both inject on one phy.** The mt76 answers the second with `EAGAIN`
+and writes nothing to dmesg — the same trap `rawsock` already documents for a managed vif
+left up.
+
+**An AWDL peer listens only during its availability windows.** A data frame sent the moment
+the kernel hands it over goes out while the peer is deaf, and the sender sees a successful
+transmit and no reply. That is indistinguishable from the peer ignoring us, and it is the
+failure this project has misdiagnosed more than any other.
+
+So outbound packets are **queued, not sent on arrival**, and drained immediately after each
+beacon — which is by construction inside a window the cluster attends.
+
+### Measured, because the claim is worthless otherwise
+
+A 40-second run, `ping6 -c 5 -I awdl0 ff02::1`, capturing on the same monitor interface:
+
+```
+sent 39 MIF, 76 PSF, 0 failed
+datapath: 9 sent in-window, 0 delivered, 0 unroutable, 0 dropped, 0 still queued
+cluster: 25 anchors, master Some(06:37:6f:45:5c:68), spread 99418 us, adopted=false
+```
+
+Then, for each data frame of ours on the air, the time since our previous beacon:
+
+```
+0.03  0.03  0.03  0.03  0.03  0.04  0.05  0.08   ms
+within one extended AW (65.536 ms) of a beacon of ours: 8/8
+median 0.03 ms
+```
+
+**Thirty microseconds.** An extended availability window is 65.536 ms, so every data frame
+went out in the same window as the beacon that preceded it, with three orders of magnitude
+to spare. `crates/libawdl-cli/examples/inwindow.rs` is the measurement.
+
+### The queue's two deliberate limits
+
+**Bounded at 64, dropping the OLDEST.** An unbounded queue turns a burst the radio cannot
+keep up with into unbounded memory and ever-staler packets. On a link where a packet may
+wait a whole cycle, the stale end is the part worth losing.
+
+**Four packets per window visit.** One beacon plus a few data frames fits an extended
+window; draining a full queue into one window would overrun it and transmit into the next
+slot — which is precisely the mistake that cost three build cycles in finding 48's
+neighbourhood, and it would be self-inflicted here.
+
+The tun is read only from the gap *between* windows, polled with a zero timeout and capped
+at four packets per visit. A blocking read there means going deaf and missing the window,
+and missing a window is worse than a packet waiting one more cycle.
+
+### `0 delivered`, and why that is the expected number
+
+Nothing arrived from a peer. It should not have: we advertised metric 65 and declined the
+election, `adopted=false`, so no Apple device had any reason to send us anything. The
+receive path is exercised only by frames addressed to us or to a group we are in, and
+neither existed.
+
+**That is the next experiment, not a defect.** It needs us to be in a cluster — which
+finding 46 says means transmitting before the peer arrives — and then an mDNS query on
+`ff02::fb` that a real device answers. At that point the receive counter becomes the
+measurement that matters, and libawdl is doing the whole job `libmosey` does today.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
