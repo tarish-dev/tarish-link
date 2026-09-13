@@ -87,6 +87,21 @@ and it is the one thing that was already specified elsewhere. The number that ma
 building a transmitter is the **84.9%**, and the work queue is the opaque-bytes column,
 largest first.
 
+### What is left is not decodable from the corpus — finding 50
+
+`awdl correlate` matches every undecoded byte window against every field already
+understood, inside the same frame. Across all 40 captures **every match above 50% is a
+known field at its own offset**: it re-finds `master_counter`, `self_counter`, `distance`
+and `aw_counter` where they live, and finds nothing else. Corpus-internal analysis is
+exhausted.
+
+The remaining 15.1% is a hash that cannot be computed (tag 6, 348,377 bytes — finding 25),
+constant-zero bytes that no specification names, and low-cardinality device-stable bitmaps.
+None of those yields to more reading. **The transmitter is the only remaining instrument**:
+send frames with the always-zero bytes set to garbage and see whether Apple peers still
+sync and adopt. If they do, those bytes are proven ignored and choosing zero becomes
+knowledge instead of imitation.
+
 ### The floor, and why the headline number is not the one to ratchet
 
 **The percentage is byte-weighted over whatever captures happen to be in `captures/`.** Add

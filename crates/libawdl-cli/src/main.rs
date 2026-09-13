@@ -556,6 +556,7 @@ fn usage() -> ! {
     eprintln!("  awdl coverage <file.pcap>... [--baseline F] [--update-baseline F]");
     eprintln!("                                         how much of the air do we understand");
     eprintln!("  awdl bytemap <file.pcap>... [tag]      which bytes of a tag ever VARY");
+    eprintln!("  awdl correlate <file.pcap>...          match unknown bytes against KNOWN fields");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
     eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N]");
@@ -635,6 +636,9 @@ fn main() {
         }
         "bytemap" => {
             bytemap(&args[2..]);
+        }
+        "correlate" => {
+            correlate(&args[2..]);
         }
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
@@ -1751,6 +1755,166 @@ fn bytemap(args: &[String]) {
     println!("captures come from a few Apple models, one Pixel and one Pi -- a field every");
     println!("one of them happens to share reads as padding here and is not. Weigh a run of");
     println!("dots by its n: 37,829 samples is evidence, 66 is barely a hint.");
+}
+
+/// Match every undecoded byte window against every field we already understand, within
+/// the SAME frame.
+///
+/// This is the method that identified tag 12's relayed master counter (finding 49), and
+/// it beat staring at the bytes by a wide margin -- staring produced two exact-looking
+/// relations from three samples of one device, and neither survived the corpus.
+///
+/// THE TRAP, and it is why the variation filter is not optional. Most unknown bytes are
+/// zero and most known fields are zero most of the time, so a naive comparison reports
+/// pairs of zeros as 100% matches. The first run of this printed four such pairings for
+/// tag 33 and they were all a constant zero byte agreeing with a mostly-zero field.
+/// Requiring both sides to take three distinct values is NOT enough on its own -- a field
+/// taking 1293 values while sitting at zero in 96% of frames still matches any mostly-zero
+/// byte. So the score is computed only over the frames where the known field is NOT at its
+/// most common value. Two fields that are really the same agree there too; two fields that
+/// merely share a popular value do not, and drop from 96% to nothing.
+///
+/// Comparing inside one frame is the other half. Two counters sampled from different
+/// frames drift apart for reasons that have nothing to do with whether they are the same
+/// counter, and a match found across frames would need a story about timing. A match
+/// inside one frame does not.
+fn correlate(files: &[String]) {
+    use libawdl::election::ElectionParamsV2;
+    use libawdl::state::DataPathState;
+    use libawdl::sync::SyncParams;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // (tag, "off..off+n") -> known field -> (matches, total)
+    let mut score: BTreeMap<(u8, String, &'static str), (u64, u64)> = BTreeMap::new();
+    let mut spread: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
+    // Scored a second time over only the frames where the known field is off its modal
+    // value. This is the number that decides; the raw rate is kept for contrast.
+    let mut offmode: BTreeMap<(u8, String, &'static str), (u64, u64)> = BTreeMap::new();
+    let mut mode_count: BTreeMap<&'static str, BTreeMap<u32, u64>> = BTreeMap::new();
+    let mut frames: Vec<(Vec<(u8, Vec<u8>)>, Vec<(&'static str, u32)>)> = Vec::new();
+
+    for f in files {
+        let Ok(mut cap) = pcap::Capture::from_file(f) else {
+            eprintln!("skipping {f}: not a capture");
+            continue;
+        };
+        while let Ok(pkt) = cap.next_packet() {
+            let Seen::Awdl { af, .. } = classify(pkt.data) else { continue };
+
+            let mut known: Vec<(&'static str, u32)> = Vec::new();
+            let mut tlvs: Vec<(u8, Vec<u8>)> = Vec::new();
+            for t in af.tlvs() {
+                tlvs.push((t.tag, t.value.to_vec()));
+                match t.tag {
+                    4 => {
+                        if let Some(s) = SyncParams::parse(t.value) {
+                            known.push(("sync.tx_counter", s.tx_counter.into()));
+                            known.push(("sync.aw_counter", s.aw_counter.into()));
+                            known.push(("sync.aw_remaining", s.aw_remaining.into()));
+                            known.push(("sync.ap_beacon_delta", s.ap_beacon_alignment_delta.into()));
+                        }
+                    }
+                    24 => {
+                        if let Some(e) = ElectionParamsV2::parse(t.value) {
+                            known.push(("ev2.master_counter", e.master_counter));
+                            known.push(("ev2.self_counter", e.self_counter));
+                            known.push(("ev2.self_metric", e.self_metric));
+                            known.push(("ev2.master_metric", e.master_metric));
+                            known.push(("ev2.distance", e.distance));
+                        }
+                    }
+                    12 => {
+                        if let Some(d) = DataPathState::parse(t.value) {
+                            if let Some(c) = d.ext_clock_ms() { known.push(("dps.clock_ms", c)) }
+                            if let Some(a) = d.ext_aw_counter() { known.push(("dps.aw_counter", a)) }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if known.is_empty() { continue }
+            for (kn, kv) in &known {
+                spread.entry((*kn).to_string()).or_default().insert(*kv);
+                *mode_count.entry(kn).or_default().entry(*kv).or_insert(0) += 1;
+            }
+            frames.push((tlvs.clone(), known.clone()));
+
+            for (tag, v) in &tlvs {
+                // Tag 2 is DNS and fully named; there is nothing here to look for.
+                if *tag == 2 { continue }
+                for off in 0..v.len() {
+                    for width in [1usize, 2, 4] {
+                        if off + width > v.len() { continue }
+                        let mut buf = [0u8; 4];
+                        buf[..width].copy_from_slice(&v[off..off + width]);
+                        let cv = u32::from_le_bytes(buf);
+                        let key = format!("t{tag}[{off}..{}]", off + width);
+                        spread.entry(key.clone()).or_default().insert(cv);
+                        for (kn, kv) in &known {
+                            let e = score.entry((*tag, key.clone(), kn)).or_insert((0, 0));
+                            e.1 += 1;
+                            if cv == *kv { e.0 += 1 }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass, now that the modal value of each known field is known.
+    let modes: BTreeMap<&'static str, u32> = mode_count
+        .iter()
+        .filter_map(|(k, m)| m.iter().max_by_key(|(_, n)| **n).map(|(v, _)| (*k, *v)))
+        .collect();
+    for (tlvs, known) in &frames {
+        for (tag, v) in tlvs {
+            if *tag == 2 { continue }
+            for off in 0..v.len() {
+                for width in [1usize, 2, 4] {
+                    if off + width > v.len() { continue }
+                    let mut buf = [0u8; 4];
+                    buf[..width].copy_from_slice(&v[off..off + width]);
+                    let cv = u32::from_le_bytes(buf);
+                    let key = format!("t{tag}[{off}..{}]", off + width);
+                    for (kn, kv) in known {
+                        if modes.get(kn) == Some(kv) { continue }
+                        let e = offmode.entry((*tag, key.clone(), kn)).or_insert((0, 0));
+                        e.1 += 1;
+                        if cv == *kv { e.0 += 1 }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Undecoded byte windows matching a known field, in the same frame.\n");
+    println!("Both sides must take 3+ distinct values: a constant zero byte agreeing with a");
+    println!("mostly-zero field is two zeros, not a match, and that is most of what a naive");
+    println!("run reports.\n");
+    println!("{:<16} {:<22} {:>8} {:>9} {:>9}", "window", "known field", "off-mode", "raw", "frames");
+
+    let mut shown = 0u32;
+    let mut rows: Vec<(f64, String)> = Vec::new();
+    for ((_t, cn, kn), (hit, tot)) in &score {
+        if *tot == 0 { continue }
+        let pct = 100.0 * *hit as f64 / *tot as f64;
+        let cs = spread.get(cn).map_or(0, |s| s.len());
+        let ks = spread.get(*kn).map_or(0, |s| s.len());
+        let (ohit, otot) = offmode.get(&(*_t, cn.clone(), *kn)).copied().unwrap_or((0, 0));
+        if otot < 50 { continue }
+        let opct = 100.0 * ohit as f64 / otot as f64;
+        if opct >= 50.0 && cs >= 3 && ks >= 3 {
+            rows.push((opct, format!("{cn:<16} {kn:<22} {opct:>7.1}% {pct:>8.1}% {otot:>9}")));
+        }
+    }
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    for (_, r) in rows.iter().take(40) {
+        println!("{r}");
+        shown += 1;
+    }
+    if shown == 0 {
+        println!("(nothing above 50% survives the filter)");
+    }
 }
 
 #[cfg(test)]

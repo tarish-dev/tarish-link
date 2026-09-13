@@ -2694,6 +2694,91 @@ the last 32-bit value. That last one advances, but between 1.0 and 3.2 per tick 
 on the session, so it is neither a clock nor a tick counter. A frame or event count is the
 obvious guess and has not been tested.
 
+## 50. ★ Corpus-internal analysis is exhausted — the rest needs the transmitter
+
+Tags 32 and 33 were picked as the next target on the strength of finding 48: a 6 GHz
+operating class and channel are nameable fields sitting inside 150,966 opaque bytes, and
+the reasoning was that tag 7 had gone the same way. **The estimate was wrong, and so was
+the one that followed it.** This records why, because the wrong projection is the useful
+part.
+
+### What tags 32 and 33 actually contain
+
+The class/channel pairs were already decoded — `0x86` = operating class 134, `0x35` =
+channel 53, confirmed against a MacBook's own `system_profiler` and against the capture
+named `6ghz-A-ch53`. What is left is not a field waiting to be read:
+
+```
+tag 32  bytes 6..9   04 08 02   constant in ALL 5,460 TLVs, every device
+        bytes 9,10   only 7 distinct pairs: 01 00, 18 18, 83 8a, c0 c0, c1 c0, db da, f0 f0
+        bytes 11,12  always zero
+tag 33  bytes 0..4   01 00 00 00, never moved
+        byte  6      01, never moved
+        byte  9      three values: 0x00, 0x20, 0x27
+```
+
+Six or seven distinct values across 37,829 frames is an **enum or a bitmap**, not a counter
+and not a clock. That rules out every hypothesis the ruler method of finding 49 can test,
+which is why that method found nothing here.
+
+### `awdl correlate`, and the negative result it produced
+
+The method that cracked tag 12 is now a command: match every 1-, 2- and 4-byte window of
+every tag against every field already understood, **inside the same frame**, so no story
+about timing is needed to explain a match.
+
+Run against the whole corpus, every row above 50% is a **known field at its own offset**:
+
+```
+t5[3..5]     ev2.distance         100.0%     <- tag 5's distance byte
+t4[29..33]   sync.aw_counter       96.2%     <- aw_counter's own location
+t12[31..33]  ev2.master_counter    95.8%     <- finding 49, rediscovered independently
+t24[36..38]  ev2.self_counter      85.9%     <- self_counter's own location
+```
+
+It re-finds everything we know and **nothing we do not**. That is the result: within this
+corpus, every field identifiable by comparison against another field has been identified.
+
+### The filter that had to be built twice, and the nonsense it was producing
+
+The first version reported four 100% matches for tag 33 and they were all worthless: a
+constant zero byte agreeing with a field that is zero most of the time. Requiring both
+sides to take three distinct values removed those — and was still not enough.
+`sync.ap_beacon_delta` takes **1293** distinct values while sitting at zero in most frames,
+so it matched any mostly-zero byte at 84-96%, and eleven such rows crowded out the real
+ones.
+
+The fix is to score only over the frames where the known field is **off its modal value**.
+Two fields that are genuinely the same agree there too; two that merely share a popular
+value collapse. Every `ap_beacon_delta` row went to nothing, and the real identities were
+unaffected. Without that filter this command is an engine for confident nonsense, which is
+worse than no command.
+
+### What this means for the remaining 15.1%
+
+The opaque bytes fall into three groups and only one of them is reachable from a desk:
+
+| | bytes | route |
+|---|---|---|
+| a hash we cannot compute — tag 6 | 348,377 | **none.** Finding 25 settled this |
+| constant-zero bytes named by no spec | ~450,000 | the transmitter |
+| low-cardinality device-stable bitmaps | ~250,000 | the transmitter |
+| already identified, waiting on nothing | 0 | — |
+
+**The transmitter is the only remaining instrument.** For the constant-zero bytes the
+experiment is direct: send frames with them set to garbage and see whether Apple peers
+still sync and adopt. If behaviour does not change, they are proven ignored, and choosing
+zero becomes knowledge rather than imitation — which is exactly the bar finding 47 set and
+that no amount of staring at a corpus can clear.
+
+### The projection that was wrong, twice
+
+"Tags 32/33 are worth 150,966 bytes" counted the opaque total and assumed it was
+decodable. "Steps 1 and 2 reach ~88% with no hardware" compounded it. The true figure for
+both steps together is **zero bytes**. The right lesson is not to estimate a decode from
+the size of the unknown: finding 48 was cheap because a published standard described the
+field, and nothing published describes these.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
