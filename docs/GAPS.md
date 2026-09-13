@@ -41,9 +41,15 @@ command's output, so adding captures improves it rather than dating it.
 
 ## How much of this do we actually understand?
 
-**78% of the control-plane bytes, and the other 22% we copy.** Run `awdl coverage
-captures/*.pcap` to regenerate this; it is measured, not estimated. It was 63% before the
-decoding pass recorded in findings 21-25.
+**79.8% of the control-plane bytes, and the other 20.2% we copy.** Measured over the whole
+corpus — 40 AWDL captures, 37,829 action frames, 14,375,146 TLV bytes — not estimated. It
+was 63% before the decoding pass in findings 21-25.
+
+```bash
+scripts/coverage-check.sh                                  # the ratchet: 0 held, 3 fell
+awdl coverage captures/*.pcap                              # the full table
+awdl coverage captures/*.pcap --update-baseline docs/coverage-floor.txt
+```
 
 Two claims get conflated and only one of them is strong:
 
@@ -58,27 +64,53 @@ first. *Composing* one needs the second, because every byte we cannot name is a 
 have to invent — and the tempting way to invent it is to copy whatever Apple sent, which
 is cargo-culting with no signal when it is wrong.
 
-| tag | | named | note |
-|---|---|---|---|
-| 2 | Service Response | 100% | it is DNS, and a documented encoding |
-| 17 | 802.11 Container | 100% | a standard VHT Capabilities element — finding 23 |
-| 18 | Channel Sequence | 100% | |
-| 21 | Version | 100% | |
-| 16 | Arpa | 97% | the flags byte is not named |
-| 4 | Synchronization Parameters | 93% | the flags word, byte 28, the trailing pair — finding 21 |
-| 5 | Election Parameters | 86% | |
-| 24 | Election Parameters v2 | 80% | only the 8 reserved bytes at offset 28 — findings 22, 26 |
-| 12 | Data Path State | 50% | the extended block and UMI options are opaque |
-| 7 | HT Capabilities | 43% | 802.11 fields named, the variable tail is not — finding 24 |
-| 33 | 6 GHz channels | 24% | |
-| 32 | 6 GHz info | 15% | |
-| 6 | Service Parameters | **0%** | shape known, contents are a hash — and **it does not matter**, finding 25 |
-| 35 | *unrecognised* | **0%** | not in any published table, 2 bytes, `01 01` |
+| tag | | corpus | floor | opaque bytes | note |
+|---|---|---|---|---|---|
+| 2 | Service Response | 100% | 24/24 | 0 | it is DNS, and a documented encoding |
+| 17 | 802.11 Container | 100% | 14/14 | 0 | a standard VHT Capabilities element — finding 23 |
+| 18 | Channel Sequence | 100% | 41/41 | 0 | |
+| 21 | Version | 100% | 2/2 | 0 | |
+| 16 | Arpa | 96.9% | 9/10 | 13,447 | the flags byte is not named |
+| 4 | Synchronization Parameters | 93.2% | 68/73 | 189,145 | the flags word, byte 28, the trailing pair — finding 21 |
+| 5 | Election Parameters | 85.7% | 18/21 | 113,487 | |
+| 24 | Election Parameters v2 | 80.0% | 32/40 | 302,632 | only the 8 reserved bytes at offset 28 — findings 22, 26 |
+| 12 | Data Path State | 51.2% | 21/47 | **658,512** | the extended block and UMI options are opaque |
+| 7 | HT Capabilities | 45.0% | 5/20 | 227,201 | 802.11 fields named, the variable tail is not — finding 24 |
+| 33 | 6 GHz channels | 24.7% | 2/14 | 90,906 | |
+| 32 | 6 GHz info | 15.4% | 2/13 | 60,060 | |
+| 6 | Service Parameters | **0%** | 0/9 | 348,377 | shape known, contents are a hash — and **it does not matter**, finding 25 |
+| 35 | *unrecognised* | **0%** | 0/2 | 132 | no parser. Not in any published table, 2 bytes, `01 01` |
+| 0 | SSTH Request | n/a | — | 0 | zero-length: a presence flag, nothing to understand |
 
-Counting Service Response flatters the figure to 86.9%: it is 40% of all bytes on the air
+Counting Service Response flatters the figure to 86.1%: it is 31% of all bytes on the air
 and it is the one thing that was already specified elsewhere. The number that matters for
-building a transmitter is the 78%.
+building a transmitter is the **79.8%**, and the work queue is the opaque-bytes column,
+largest first.
 
+### The floor, and why the headline number is not the one to ratchet
+
+**The percentage is byte-weighted over whatever captures happen to be in `captures/`.** Add
+one 6 GHz-heavy capture and it falls, with no code change at all. A regression test built
+on it would cry wolf every time the corpus grew, and would then be switched off.
+
+The **floor** is the number that holds still: the worst-classified single TLV of each tag,
+kept as an exact fraction. For one TLV, `of_tlv` is a pure function of its bytes, so a tag's
+floor can only fall for two reasons —
+
+- **the parser got worse**, or
+- **a capture arrived carrying a shape we cannot classify.**
+
+Both deserve to fail, and the second is the point rather than a false positive. A new
+capture containing something we do not understand is exactly what this repository exists to
+notice; averaging it into a headline figure is how 79.8% becomes a number nobody checks.
+
+`docs/coverage-floor.txt` is the committed baseline. `scripts/coverage-check.sh` exits 3
+when a floor falls. **Do not reach for `--update-baseline` to make it quiet** — regenerating
+is how a real gap becomes the new normal.
+
+Note what the floor exposes that the average hides: tag 7 reads 45% across the corpus but
+its floor is 5/20, because the 20-byte shape is barely understood and the 9-byte one carries
+the average. Tag 12 is 51.2% with a floor of 21/47. The floors are where the work is.
 ### "Are you sure of them in every frame?"
 
 A separate question, and the lengths column answers it. Some tags have one shape in all

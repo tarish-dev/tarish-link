@@ -1,0 +1,25 @@
+# libawdl coverage floor -- the WORST-classified TLV of each tag.
+#
+# Regenerate with:  awdl coverage captures/*.pcap --update-baseline docs/coverage-floor.txt
+# Check with:       awdl coverage captures/*.pcap --baseline docs/coverage-floor.txt
+#
+# NOT the headline percentage: that is byte-weighted over the corpus and moves
+# whenever a capture is added. This is a pure function of the parser, so a drop
+# means the parser got worse OR a capture arrived carrying a shape we cannot
+# classify. Both should fail; neither should be averaged away.
+#
+# tag  floor       corpus%   name
+2     24/24         100.0   Service Response
+4     68/73          93.2   Synchronization Parameters
+5     18/21          85.7   Election Parameters
+6     0/9             0.0   Service Parameters
+7     5/20           45.0   HT Capabilities
+12    21/47          51.2   Data Path State
+16    9/10           96.9   Arpa
+17    14/14         100.0   IEEE 802.11 Container
+18    41/41         100.0   Channel Sequence
+21    2/2           100.0   Version
+24    32/40          80.0   Election Parameters v2
+32    2/13           15.4   unrecognised
+33    2/14           24.7   unrecognised
+35    0/2             0.0   unrecognised

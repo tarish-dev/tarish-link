@@ -553,7 +553,8 @@ fn usage() -> ! {
     eprintln!("  awdl stats <file.pcap>   counts only, no per-frame output");
     eprintln!("  awdl timeline <file.pcap> [bucket_s]   election state over time");
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
-    eprintln!("  awdl coverage <file.pcap>...           how much of the air do we understand");
+    eprintln!("  awdl coverage <file.pcap>... [--baseline F] [--update-baseline F]");
+    eprintln!("                                         how much of the air do we understand");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
     eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N]");
@@ -874,11 +875,61 @@ fn dump_tlv<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, tag: u8, fro
 /// it is wrong.
 ///
 /// Weighted by frames, not by tags. A tag in every frame matters more than one seen twice.
-fn coverage(files: &[String]) {
+/// The worst-classified TLV of a tag, kept as an exact fraction.
+///
+/// THE HEADLINE PERCENTAGE IS NOT A RATCHETABLE NUMBER. It is a byte-weighted average over
+/// whatever captures happen to be in the corpus, so adding a 6 GHz-heavy capture drops it
+/// with no code change at all, and a ratchet built on it would cry wolf every time the
+/// corpus grew. This is the number that does not move: for one TLV, `of_tlv` is a pure
+/// function of its bytes, so the worst case across a tag can only fall if the PARSER got
+/// worse or if a capture arrived carrying a shape we cannot classify.
+///
+/// Both of those deserve to fail. The second is not a false positive -- a new capture
+/// containing something we do not understand is exactly the thing this repository exists
+/// to notice, and absorbing it silently into an average is how 78% becomes a number
+/// nobody checks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Floor {
+    named: usize,
+    total: usize,
+}
+
+impl Floor {
+    /// `self < other`, by cross-multiplication rather than float division: the fractions
+    /// are small integers and an == comparison on f64 here would be a coin toss.
+    fn worse_than(&self, other: &Floor) -> bool {
+        self.named * other.total < other.named * self.total
+    }
+}
+
+fn coverage(args: &[String]) {
     use libawdl::coverage::{is_decoded, of_tlv, Coverage};
     use std::collections::BTreeMap;
 
+    let mut files: Vec<String> = Vec::new();
+    let mut baseline: Option<String> = None;
+    let mut update: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--baseline" => {
+                baseline = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--update-baseline" => {
+                update = args.get(i + 1).cloned();
+                i += 2;
+            }
+            f => {
+                files.push(f.to_string());
+                i += 1;
+            }
+        }
+    }
+    let files = &files[..];
+
     let mut per_tag: BTreeMap<u8, (Coverage, u64)> = BTreeMap::new();
+    let mut floors: BTreeMap<u8, Floor> = BTreeMap::new();
     // "Are you sure of them in every frame?" is a second question, and shape variance is
     // how to answer it: a tag that is 9 bytes from one device and 20 from another is not
     // a fixed struct, whatever a table says its fields are.
@@ -894,9 +945,19 @@ fn coverage(files: &[String]) {
             let Seen::Awdl { af, .. } = classify(pkt.data) else { continue };
             frames += 1;
             for t in af.tlvs() {
+                let c = of_tlv(t.tag, t.value);
                 let e = per_tag.entry(t.tag).or_insert((Coverage::default(), 0));
-                e.0.add(of_tlv(t.tag, t.value));
+                e.0.add(c);
                 e.1 += 1;
+                // A zero-length tag is a presence flag: there is nothing to classify and
+                // 0/0 is not a fraction. Excluded rather than counted as 0%.
+                if c.total() > 0 {
+                    let f = Floor { named: c.named, total: c.total() };
+                    let slot = floors.entry(t.tag).or_insert(f);
+                    if f.worse_than(slot) {
+                        *slot = f;
+                    }
+                }
                 *lengths.entry(t.tag).or_default().entry(t.value.len()).or_insert(0) += 1;
             }
         }
@@ -911,8 +972,8 @@ fn coverage(files: &[String]) {
     let mut control = Coverage::default();
     println!("{frames} AWDL action frames\n");
     println!(
-        "{:<4} {:<28} {:>7} {:>9} {:>9} {:>6}  {}",
-        "tag", "name", "TLVs", "named", "opaque", "%", "lengths seen"
+        "{:<4} {:<28} {:>7} {:>9} {:>9} {:>6} {:>9}  {}",
+        "tag", "name", "TLVs", "named", "opaque", "%", "floor", "lengths seen"
     );
     for (tag, (c, n)) in &per_tag {
         total.add(*c);
@@ -932,14 +993,19 @@ fn coverage(files: &[String]) {
             v.join(" ")
         }).unwrap_or_default();
         let pct = if c.total() == 0 { "  n/a".to_string() } else { format!("{:>5.1}", c.percent_named()) };
+        let floor = floors
+            .get(tag)
+            .map(|f| format!("{}/{}", f.named, f.total))
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<4} {:<28} {:>7} {:>9} {:>9} {}  {}{}",
+            "{:<4} {:<28} {:>7} {:>9} {:>9} {} {:>9}  {}{}",
             tag,
             libawdl::tlv::tag_name(*tag),
             n,
             c.named,
             c.opaque,
             pct,
+            floor,
             shapes,
             if is_decoded(*tag) { "" } else { "   NO PARSER" }
         );
@@ -957,6 +1023,124 @@ fn coverage(files: &[String]) {
     println!("Every one of those bytes round-trips exactly. That is a separate claim from");
     println!("understanding them, and it is the weaker one. A zero-length tag (0, SSTH");
     println!("Request) is a presence flag and has no bytes to understand.");
+
+    if let Some(path) = update {
+        write_baseline(&path, &floors, &per_tag);
+        println!("\nbaseline written to {path}");
+        return;
+    }
+    if let Some(path) = baseline {
+        std::process::exit(check_baseline(&path, &floors));
+    }
+}
+
+/// The committed floor, one line per tag, as `tag named/total`.
+///
+/// Text rather than JSON so a diff says what moved. Regenerating it is a deliberate act:
+/// a floor that drops is either a parser regression or a capture we do not understand,
+/// and both want a human deciding which.
+fn write_baseline(
+    path: &str,
+    floors: &std::collections::BTreeMap<u8, Floor>,
+    per_tag: &std::collections::BTreeMap<u8, (libawdl::coverage::Coverage, u64)>,
+) {
+    let mut out = String::new();
+    out.push_str("# libawdl coverage floor -- the WORST-classified TLV of each tag.\n");
+    out.push_str("#\n");
+    out.push_str("# Regenerate with:  awdl coverage captures/*.pcap --update-baseline docs/coverage-floor.txt\n");
+    out.push_str("# Check with:       awdl coverage captures/*.pcap --baseline docs/coverage-floor.txt\n");
+    out.push_str("#\n");
+    out.push_str("# NOT the headline percentage: that is byte-weighted over the corpus and moves\n");
+    out.push_str("# whenever a capture is added. This is a pure function of the parser, so a drop\n");
+    out.push_str("# means the parser got worse OR a capture arrived carrying a shape we cannot\n");
+    out.push_str("# classify. Both should fail; neither should be averaged away.\n");
+    out.push_str("#\n");
+    out.push_str("# tag  floor       corpus%   name\n");
+    for (tag, f) in floors {
+        let pct = per_tag
+            .get(tag)
+            .map(|(c, _)| c.percent_named())
+            .unwrap_or(0.0);
+        out.push_str(&format!(
+            "{:<5} {:<11} {:>7.1}   {}\n",
+            tag,
+            format!("{}/{}", f.named, f.total),
+            pct,
+            libawdl::tlv::tag_name(*tag)
+        ));
+    }
+    std::fs::write(path, out).expect("write baseline");
+}
+
+/// Returns a process exit code: 0 clean, 3 on drift, 2 if the baseline is unreadable.
+///
+/// Exit 3 for drift matches the convention the integration scripts already use, where 3
+/// means "something changed and you must decide", as distinct from 1 meaning "broken".
+fn check_baseline(path: &str, floors: &std::collections::BTreeMap<u8, Floor>) -> i32 {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        eprintln!("\ncannot read baseline {path}");
+        return 2;
+    };
+    let mut want: std::collections::BTreeMap<u8, Floor> = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let (Some(tag), Some(frac)) = (it.next(), it.next()) else { continue };
+        let Ok(tag) = tag.parse::<u8>() else { continue };
+        let Some((n, t)) = frac.split_once('/') else { continue };
+        let (Ok(named), Ok(total)) = (n.parse::<usize>(), t.parse::<usize>()) else { continue };
+        want.insert(tag, Floor { named, total });
+    }
+
+    let mut regressed = Vec::new();
+    let mut improved = Vec::new();
+    let mut fresh = Vec::new();
+    for (tag, now) in floors {
+        match want.get(tag) {
+            Some(base) if now.worse_than(base) => regressed.push((*tag, *base, *now)),
+            Some(base) if base.worse_than(now) => improved.push((*tag, *base, *now)),
+            Some(_) => {}
+            None => fresh.push((*tag, *now)),
+        }
+    }
+
+    println!();
+    for (tag, base, now) in &improved {
+        println!(
+            "IMPROVED  tag {tag:<3} {}  {}/{} -> {}/{}",
+            libawdl::tlv::tag_name(*tag), base.named, base.total, now.named, now.total
+        );
+    }
+    for (tag, now) in &fresh {
+        println!(
+            "NEW TAG   tag {tag:<3} {}  {}/{} -- not in the baseline",
+            libawdl::tlv::tag_name(*tag), now.named, now.total
+        );
+    }
+    for (tag, base, now) in &regressed {
+        println!(
+            "REGRESSED tag {tag:<3} {}  {}/{} -> {}/{}",
+            libawdl::tlv::tag_name(*tag), base.named, base.total, now.named, now.total
+        );
+    }
+
+    if !regressed.is_empty() {
+        println!();
+        println!("A floor fell. Either the parser classifies less than it did, or a capture in");
+        println!("the corpus carries a shape it cannot classify. Find out which before running");
+        println!("--update-baseline: regenerating is how a real gap becomes the new normal.");
+        return 3;
+    }
+    if improved.is_empty() && fresh.is_empty() {
+        println!("coverage floor held on {} tags", floors.len());
+    } else {
+        println!();
+        println!("No regressions. Record the improvements with --update-baseline.");
+    }
+    0
 }
 
 /// Put frames on the air.
@@ -1426,4 +1610,49 @@ fn parse_awdl(
         }
     }
     Some((d.src.0, sync?, elect))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Floor;
+
+    /// The floors that actually occur have unequal denominators, which is the whole reason
+    /// this is a cross-multiplication and not `named as f64 / total as f64`. Tag 7's floor
+    /// is 5/20 and tag 12's is 21/47; comparing those as floats is fine until two of them
+    /// are equal-but-not-bitwise-equal and a ratchet starts flapping.
+    #[test]
+    fn floors_compare_as_fractions_not_floats() {
+        let tag7 = Floor { named: 5, total: 20 }; // 25.0%
+        let tag12 = Floor { named: 21, total: 47 }; // 44.7%
+        assert!(tag7.worse_than(&tag12));
+        assert!(!tag12.worse_than(&tag7));
+    }
+
+    /// Equal fractions written differently must not read as a regression. 1/3 and 2/6 are
+    /// the same floor, and a tag whose TLV length doubles between captures produces exactly
+    /// this shape.
+    #[test]
+    fn equal_fractions_with_different_denominators_are_not_a_regression() {
+        let a = Floor { named: 1, total: 3 };
+        let b = Floor { named: 2, total: 6 };
+        assert!(!a.worse_than(&b));
+        assert!(!b.worse_than(&a));
+    }
+
+    /// A tag that names nothing is the floor, and it is not worse than itself -- otherwise
+    /// tag 6 (0/9, a hash we cannot compute) would fail the ratchet on every run.
+    #[test]
+    fn naming_nothing_is_stable_rather_than_perpetually_regressing() {
+        let six = Floor { named: 0, total: 9 };
+        assert!(!six.worse_than(&six));
+        assert!(six.worse_than(&Floor { named: 1, total: 9 }));
+    }
+
+    /// Fully named is the ceiling and never reads as worse, whatever it is compared against.
+    #[test]
+    fn a_fully_named_tag_is_never_worse() {
+        let full = Floor { named: 41, total: 41 };
+        assert!(!full.worse_than(&Floor { named: 68, total: 73 }));
+        assert!(Floor { named: 68, total: 73 }.worse_than(&full));
+    }
 }
