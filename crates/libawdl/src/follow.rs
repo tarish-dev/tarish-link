@@ -297,6 +297,17 @@ pub struct Cluster {
     pub master_metric: Option<u32>,
     /// The slots the master says it occupies.
     pub master_slots: Vec<usize>,
+    /// Our own address, so a peer naming US can be told from a cluster to follow.
+    pub self_addr: Option<[u8; 6]>,
+    /// Peers that have named us master, and how many frames each spent saying so.
+    ///
+    /// **This is an outcome, not a cluster.** Before it existed, a peer adopting us set
+    /// `master` to our own address — after which nothing could ever anchor the clock,
+    /// because the anchoring test is `master == src` and our own frames are filtered out.
+    /// `adopted` then went false and the run looked starved. Being adopted turned itself
+    /// into a broken measurement, which is close to the worst failure a measurement can
+    /// have.
+    pub adopters: std::collections::BTreeMap<[u8; 6], u32>,
     /// How many times we have changed which cluster we follow.
     ///
     /// Worth reporting rather than hiding. A run in a busy room that changes master
@@ -311,6 +322,17 @@ impl Cluster {
         Cluster::default()
     }
 
+    /// A tracker that knows its own address, and so can tell being adopted from finding a
+    /// cluster. Prefer this to [`new`](Self::new) anywhere real frames are involved.
+    pub fn for_us(addr: [u8; 6]) -> Cluster {
+        Cluster { self_addr: Some(addr), ..Cluster::default() }
+    }
+
+    /// How many frames peers have spent naming us master, across all of them.
+    pub fn adoption_frames(&self) -> u32 {
+        self.adopters.values().sum()
+    }
+
     /// Fold in one received frame.
     ///
     /// `sync` and `election` come from the same frame; passing parts of different frames
@@ -323,6 +345,16 @@ impl Cluster {
         election: Option<&ElectionParamsV2>,
     ) {
         if let Some(e) = election {
+            // A PEER NAMING US IS NOT A CLUSTER TO FOLLOW. It is the thing we are trying
+            // to cause. Recorded and stepped over: following it would set `master` to our
+            // own address, and since only the master's own frames anchor the clock and our
+            // own frames are filtered, the estimate would be frozen at zero observations
+            // for the rest of the run.
+            if self.self_addr == Some(e.master) {
+                *self.adopters.entry(src).or_insert(0) += 1;
+                return;
+            }
+
             // Follow the cluster's own opinion of who is master rather than picking the
             // loudest sender: a node at distance 2 still names the root correctly.
             //

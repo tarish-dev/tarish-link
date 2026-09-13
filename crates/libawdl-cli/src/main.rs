@@ -1219,7 +1219,9 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     // Listening as well as transmitting. Everything before this aimed at OUR cycle, whose
     // phase is decided by when the process started; a cluster already on the air has its
     // own, and it tells us what it is in every frame. See libawdl::follow.
-    let mut cluster = libawdl::follow::Cluster::new();
+    // for_us, not new: a peer naming our address is an outcome to record, not a cluster
+    // to follow. See Cluster::adopters.
+    let mut cluster = libawdl::follow::Cluster::for_us(addr);
     let mut adopted = false;
 
     // The data plane shares this loop and this radio. It is not a second process, because
@@ -1533,6 +1535,26 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     }
 
     eprintln!("\nsent {sent_mif} MIF, {sent_psf} PSF, {failed} failed");
+    // Printed unconditionally, including the zero. It is the outcome measure of every
+    // election experiment this project runs, and a missing line reads as "not looked at".
+    eprintln!(
+        "adopted by {} peer(s), {} frame(s) naming us master{}",
+        cluster.adopters.len(),
+        cluster.adoption_frames(),
+        if cluster.adopters.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ": {}",
+                cluster
+                    .adopters
+                    .iter()
+                    .map(|(m, n)| format!("{} x{n}", libawdl::dot11::Mac(*m)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    );
     if tundev.is_some() {
         eprintln!(
             "datapath: {dp_sent} sent in-window, {dp_recvd} delivered, {dp_noroute} unroutable, \

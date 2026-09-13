@@ -412,3 +412,55 @@ fn being_inside_a_master_window_means_send_now() {
     let w = cl.us_until_master_window(in_slot_3).expect("a wait");
     assert!(w > 0 && w < CYCLE, "waits for slot 8, not a full cycle: {w}");
 }
+
+/// A peer naming US master is an outcome, not a cluster — and must not break the clock.
+///
+/// Before this, being adopted set `master` to our own address. Only the master's own frames
+/// anchor the clock and our own frames are filtered out, so the estimate froze at zero
+/// observations and `adopted` went false: success turned itself into a void run. Observed on
+/// hardware, where a peer named us master six times and the trial voided itself.
+#[test]
+fn a_peer_naming_us_is_recorded_and_does_not_become_our_master() {
+    use libawdl::election::ElectionParamsV2;
+    use libawdl::sync::{ChannelSequence, SyncParams};
+
+    let us = [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c];
+    let real_master = [0xaa; 6];
+    let peer = [0x4e, 0x90, 0xde, 0xc0, 0x5a, 0x51];
+    let sync_of = |master: [u8; 6]| SyncParams {
+        tx_channel: 149, tx_counter: 0, master_channel: 149, guard_time: 0,
+        aw_period: 16, action_frame_period: 110, flags: 0x1800,
+        aw_ext_length: 16, aw_common_length: 16, aw_remaining: 16,
+        ext_min: 3, ext_max_multicast: 3, ext_max_unicast: 3, ext_max_af: 3,
+        master, presence_mode: 4, reserved_28: 0, aw_counter: 0,
+        ap_beacon_alignment_delta: 0,
+        channel_sequence: Some(ChannelSequence::apple_shaped(149, None)),
+        trailing: [0, 0],
+    };
+
+    let mut cl = Cluster::for_us(us);
+    for k in 0..6u64 {
+        cl.observe(k * CYCLE, real_master, &sync_of(real_master),
+                   Some(&ElectionParamsV2::claiming(real_master, 600, 3)));
+    }
+    assert!(cl.clock.is_usable());
+    let anchors = cl.clock.observations();
+
+    // Now a peer adopts us.
+    for k in 0..6u64 {
+        cl.observe(10 * CYCLE + k * CYCLE, peer, &sync_of(us),
+                   Some(&ElectionParamsV2::claiming(us, 600, 3)));
+    }
+
+    assert_eq!(cl.adopters.get(&peer), Some(&6), "recorded, per peer");
+    assert_eq!(cl.adoption_frames(), 6);
+    assert_eq!(cl.master, Some(real_master), "we did not start following ourselves");
+    assert_eq!(cl.clock.observations(), anchors, "and the clock is untouched");
+    assert!(cl.clock.is_usable(), "being adopted must not void the run");
+
+    // A tracker with no self address cannot tell the difference, which is why `for_us`
+    // exists and `new` is for tests that do not care.
+    let mut naive = Cluster::new();
+    naive.observe(0, peer, &sync_of(us), Some(&ElectionParamsV2::claiming(us, 600, 3)));
+    assert_eq!(naive.master, Some(us), "the old behaviour, kept honest");
+}
