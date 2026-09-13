@@ -216,15 +216,22 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             Coverage { named, opaque: len - named }
         }
 
-        // HT Capabilities: the IEEE 802.11 fields are named -- capability info, A-MPDU
-        // parameters, and the MCS bitmap -- and the two leading bytes and the variable
-        // tail are not.
+        // HT Capabilities. The "variable tail" was never a separate thing: AWDL sends a
+        // TRUNCATED Supported MCS Set, whose octets are in the standard order, so every
+        // byte past the A-MPDU parameters is a field IEEE 802.11-2020 §9.4.2.55.4 names.
+        // Reserved octets count as named too -- reserved has a defined correct value and
+        // we can choose it, which is the test this module applies.
+        //
+        // Only the two leading bytes stay opaque. They are `00 00` in every frame measured
+        // and no source names them, which is not the same as knowing they are padding.
         7 => {
             use crate::state::HtCapabilities;
             if HtCapabilities::parse(v).is_none() {
                 return all_opaque;
             }
-            Coverage { named: 5, opaque: len - 5 }
+            // info 2 + A-MPDU 1, then however much of the 16-octet MCS set is present.
+            let named = 3 + len.saturating_sub(5).min(16);
+            Coverage { named, opaque: len - named }
         }
 
         // Service Parameters: the field boundaries are known and the CONTENTS are not.

@@ -41,7 +41,7 @@ command's output, so adding captures improves it rather than dating it.
 
 ## How much of this do we actually understand?
 
-**79.8% of the control-plane bytes, and the other 20.2% we copy.** Measured over the whole
+**81.4% of the control-plane bytes, and the other 18.6% we copy.** Measured over the whole
 corpus — 40 AWDL captures, 37,829 action frames, 14,375,146 TLV bytes — not estimated. It
 was 63% before the decoding pass in findings 21-25.
 
@@ -75,7 +75,7 @@ is cargo-culting with no signal when it is wrong.
 | 5 | Election Parameters | 85.7% | 18/21 | 113,487 | |
 | 24 | Election Parameters v2 | 80.0% | 32/40 | 302,632 | only the 8 reserved bytes at offset 28 — findings 22, 26 |
 | 12 | Data Path State | 51.2% | 21/47 | **658,512** | the extended block and UMI options are opaque |
-| 7 | HT Capabilities | 45.0% | 5/20 | 227,201 | 802.11 fields named, the variable tail is not — finding 24 |
+| 7 | HT Capabilities | 82.0% | 6/8 | 74,478 | only the two leading bytes — the "tail" was a truncated MCS set, finding 48 |
 | 33 | 6 GHz channels | 24.7% | 2/14 | 90,906 | |
 | 32 | 6 GHz info | 15.4% | 2/13 | 60,060 | |
 | 6 | Service Parameters | **0%** | 0/9 | 348,377 | shape known, contents are a hash — and **it does not matter**, finding 25 |
@@ -84,7 +84,7 @@ is cargo-culting with no signal when it is wrong.
 
 Counting Service Response flatters the figure to 86.1%: it is 31% of all bytes on the air
 and it is the one thing that was already specified elsewhere. The number that matters for
-building a transmitter is the **79.8%**, and the work queue is the opaque-bytes column,
+building a transmitter is the **81.4%**, and the work queue is the opaque-bytes column,
 largest first.
 
 ### The floor, and why the headline number is not the one to ratchet
@@ -108,9 +108,11 @@ notice; averaging it into a headline figure is how 79.8% becomes a number nobody
 when a floor falls. **Do not reach for `--update-baseline` to make it quiet** — regenerating
 is how a real gap becomes the new normal.
 
-Note what the floor exposes that the average hides: tag 7 reads 45% across the corpus but
-its floor is 5/20, because the 20-byte shape is barely understood and the 9-byte one carries
-the average. Tag 12 is 51.2% with a floor of 21/47. The floors are where the work is.
+Note what the floor exposes that the average hides. Tag 7 read 45% across the corpus with a
+floor of 5/20, because the 20-byte shape was barely understood and the 9-byte one carried
+the average — and chasing that floor is what turned up finding 48, which took the tag to
+82% and the floor to 6/8. Tag 12 is still 51.2% with a floor of 21/47. The floors are where
+the work is.
 ### "Are you sure of them in every frame?"
 
 A separate question, and the lengths column answers it. Some tags have one shape in all

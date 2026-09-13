@@ -212,9 +212,12 @@ fn the_v2_counters_are_a_tenure_as_master() {
 
 /// Tag 7 carries a standard HT Capability Information field, whatever its total length.
 ///
-/// Three shapes from three devices. The named part is identical in position in all of
-/// them; only the tail differs, which is the evidence that the tail is a separate thing
-/// and not a longer version of the same fields.
+/// Three shapes from three devices, and they are ONE structure of three lengths.
+///
+/// This was read the other way round — a fixed named part with an undecoded tail appended
+/// — and the differing lengths were taken as evidence for it. They are evidence against
+/// it. AWDL sends a truncated IEEE 802.11 Supported MCS Set, so 8, 9 and 20 bytes are the
+/// same field stopping in three different places. See [`HtCapabilities::mcs_set`].
 #[test]
 fn ht_capabilities_decode_across_three_shapes() {
     use libawdl::state::HtCapabilities;
@@ -243,8 +246,31 @@ fn ht_capabilities_decode_across_three_shapes() {
     assert!(long.lsig_txop_protection());
     assert_eq!(long.min_mpdu_start_spacing_us(), 8.0);
     assert_eq!(long.rx_mcs_bitmap, 0xffff);
-    assert_eq!(long.trailing.len(), 13, "and thirteen bytes nobody has decoded");
+    assert_eq!(long.trailing.len(), 13);
     assert_eq!(long.encode(), APPLE_HT_LONG);
+
+    // The thirteen bytes that "nobody has decoded" are the rest of the Supported MCS Set.
+    // Three independent fields land exactly where 802.11-2020 puts them, which is the
+    // evidence: a wrong layout does not produce a legal data rate AND a legal Tx MCS
+    // parameter byte AND all-zero reserved octets by accident.
+    let mcs = long.mcs_set();
+    assert_eq!(mcs.len(), 15, "15 of the standard 16 octets; the last is truncated away");
+    assert_eq!(&mcs[0..10], &[0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0], "Rx MCS bitmask, 0-15");
+    assert_eq!(long.rx_highest_data_rate_mbps(), Some(150), "octets 10-11, in Mb/s");
+    assert_eq!(long.tx_mcs_set_defined(), Some(true), "octet 12 B0");
+    assert_eq!(long.tx_rx_mcs_set_not_equal(), Some(false), "B1: Tx and Rx sets agree");
+    assert_eq!(long.tx_max_spatial_streams(), Some(1), "B2-B3, held as streams minus one");
+    assert_eq!(&mcs[13..], &[0, 0], "the reserved octets, and they are reserved-valued");
+
+    // 150 Mb/s is a rate HT can actually express, which is the point: two streams at
+    // 20 MHz with a short guard interval, or one at 40 MHz. It agrees with the info word
+    // above, where 40 MHz and both short guard intervals are set.
+    assert!(long.supports_40mhz() && long.short_gi_40());
+
+    // The short forms stop before the rate, and say so rather than inventing one.
+    assert_eq!(short.mcs_set().len(), 4);
+    assert_eq!(short.rx_highest_data_rate_mbps(), None, "truncated before octet 10");
+    assert_eq!(short.tx_mcs_set_defined(), None);
 
     // libmosey: the same radio claim, a different A-MPDU spacing.
     let mosey = HtCapabilities::parse(LIBMOSEY_HT).expect("parses");

@@ -2550,6 +2550,78 @@ handful of Apple models, one Pixel and one Pi. A field every one of them happens
 reads as padding here and is not. Weigh a run of dots by its `n`: 37,829 samples is
 evidence, tag 35's 66 is barely a hint.
 
+## 48. ★ Tag 7's "undecoded tail" was a truncated MCS set — 227,201 bytes to 74,478
+
+`awdl bytemap` said tag 7 was two shapes of pure constant and one that varied in two
+bytes, which is not what an undecoded field looks like. Following that up resolved the tag
+without reverse engineering anything.
+
+### What it was recorded as
+
+Three lengths — 8, 9 and 20 — with five named bytes and the rest opaque, documented as *"a
+fixed named part, and a variable tail nobody has decoded"*. The differing lengths were read
+as **evidence** for that shape: if the tail were part of the same field it would be the
+same size.
+
+### What it is
+
+One structure that stops in three different places. AWDL sends a **truncated IEEE
+802.11-2020 §9.4.2.55.4 Supported MCS Set**, and every octet present is in the standard
+order:
+
+```
+00 00 | 6f 88 | 1b | ff ff 00 00 00 00 00 00 00 00 | 96 00 | 01 | 00 00
+ ?      info   AMPDU  Rx MCS bitmask, octets 0-9     rate    tx   rsvd
+```
+
+- octets 0-9 — Rx MCS bitmask. `ff ff` then zeros: MCS 0-15, two spatial streams
+- octets 10-11 — **Rx Highest Supported Data Rate, `0x0096` = 150 Mb/s**
+- octet 12 — Tx MCS parameters. `0x01`: Tx MCS set defined, Tx and Rx sets equal
+- octets 13-15 — reserved, and reserved-valued. The 16th is truncated away
+
+The 9-byte form carries MCS octets 0-3 and the 8-byte form octets 0-2. Same field, three
+truncation points, which is exactly what a length that "varies by device" looks like when
+the structure is variable-length by design.
+
+### Why this is not a story fitted to the bytes
+
+Three independent fields land where the standard puts them, and each one is separately
+checkable:
+
+- **150 Mb/s is a rate HT can express** — two streams at 20 MHz with a short guard
+  interval, or one at 40 MHz — and it agrees with the info word in the same TLV, where
+  40 MHz and both short guard intervals are set.
+- **`0x01` is a legal Tx MCS parameter byte**, and its meaning (Tx set defined, equal to
+  Rx) is consistent with the Rx bitmask beside it.
+- **The reserved octets are zero.**
+
+A wrong layout does not produce a legal data rate, a coherent Tx parameter byte and
+correctly-zeroed reserved octets by accident. Compare finding 23, where tag 17's VHT body
+went the same way: a published standard, read rather than reverse engineered.
+
+### What it cost and what is left
+
+| | before | after |
+|---|---|---|
+| tag 7 named | 45.0% | **82.0%** |
+| tag 7 floor | 5/20 | **6/8** |
+| tag 7 opaque bytes | 227,201 | **74,478** |
+| control-plane total | 79.8% | **81.4%** |
+
+What remains opaque is the two leading bytes, `00 00` in every frame measured and named by
+no source. Constant is not the same as understood — finding 47 — so they stay opaque rather
+than being called padding.
+
+### The lesson worth keeping
+
+**A varying length was treated as evidence of a separate field, and it was evidence of a
+variable-length field.** The reading was never tested against the obvious alternative, and
+the obvious alternative was in a published standard we had already used once, for tag 17.
+
+The ratchet from finding 46's commit is what pointed here: the *average* said tag 7 was 45%
+and unremarkable, while the **floor** said 5/20 and put it second-worst on the board. Tag 7
+was picked for exactly that reason, and the floor was right.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

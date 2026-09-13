@@ -75,3 +75,28 @@ fn service_response_is_the_one_tag_we_fully_understand() {
     let c = of_tlv(2, &[0u8; 40]);
     assert_eq!(c.opaque, 0);
 }
+
+/// HT Capabilities, once the "undecoded tail" turned out to be the rest of a standard
+/// field. Truncation is the whole story: the same structure stops in three places.
+#[test]
+fn ht_capabilities_are_named_for_as_much_mcs_set_as_they_carry() {
+    use fixture_election::{APPLE_HT_LONG, APPLE_HT_SHORT};
+
+    // Two leading bytes opaque in every shape -- `00 00` everywhere measured, which is not
+    // the same as knowing what they are. Everything else is an 802.11 field.
+    let long = of_tlv(7, APPLE_HT_LONG);
+    assert_eq!(long.total(), 20);
+    assert_eq!(long.opaque, 2, "only the two unnamed leading bytes");
+    assert_eq!(long.named, 18);
+
+    let short = of_tlv(7, APPLE_HT_SHORT);
+    assert_eq!(short.total(), 9);
+    assert_eq!(short.opaque, 2);
+    assert_eq!(short.named, 7);
+
+    // A TLV longer than the structure does not get credit for the excess: 5 header bytes
+    // plus at most 16 MCS octets is all that 802.11 defines.
+    let over = of_tlv(7, &[0u8; 40]);
+    assert_eq!(over.named, 3 + 16);
+    assert_eq!(over.opaque, 40 - 19, "past the MCS set we are back to guessing");
+}

@@ -372,7 +372,12 @@ pub struct HtCapabilities {
     pub ampdu_params: u8,
     /// The first two octets of the Supported MCS Set: one bit per MCS index, 0..15.
     pub rx_mcs_bitmap: u16,
-    /// Everything after byte 7. Length varies by device and is undecoded.
+    /// Octets 2.. of the Supported MCS Set — **not a separate field**.
+    ///
+    /// This was recorded as "length varies by device and is undecoded", and the three
+    /// shapes were read as evidence that the tail was a different thing appended to the
+    /// named part. It is not: AWDL sends a **truncated Supported MCS Set**, and the octets
+    /// present are in the standard order. See [`HtCapabilities::mcs_set`].
     pub trailing: Vec<u8>,
 }
 
@@ -476,6 +481,63 @@ impl HtCapabilities {
             }
         }
         n
+    }
+
+    /// The Supported MCS Set, as far as this TLV carries it — IEEE 802.11-2020 §9.4.2.55.4.
+    ///
+    /// **AWDL TRUNCATES IT**, and that is the whole reason tag 7 has three lengths. The
+    /// standard field is 16 octets; Apple sends 4 of them in the 9-byte form and 15 in the
+    /// 20-byte one, and libmosey sends 4. Everything present is in the standard order,
+    /// which is what makes the long form readable:
+    ///
+    /// ```text
+    ///   octets 0-9   Rx MCS bitmask, one bit per MCS index 0..76
+    ///   octets 10-11 Rx Highest Supported Data Rate, B0-B9, in Mb/s
+    ///   octet  12    Tx MCS parameters
+    ///   octets 13-15 reserved
+    /// ```
+    ///
+    /// It was read the other way for a while — a named part with an undecoded tail
+    /// appended — and the three lengths were taken as evidence for that. They are evidence
+    /// against it: a truncation explains all three with one structure, and the values land
+    /// where the standard puts them. 150 Mb/s at octets 10-11 of Apple's long form is not
+    /// a coincidence that a wrong layout would produce.
+    pub fn mcs_set(&self) -> Vec<u8> {
+        let mut o = self.rx_mcs_bitmap.to_le_bytes().to_vec();
+        o.extend_from_slice(&self.trailing);
+        o.truncate(16);
+        o
+    }
+
+    /// Octets 10-11, B0-B9: the highest rate the sender can receive, in Mb/s.
+    ///
+    /// `None` when the TLV stops before them, which is the common case — only the 20-byte
+    /// form carries this.
+    pub fn rx_highest_data_rate_mbps(&self) -> Option<u16> {
+        let m = self.mcs_set();
+        let lo = u16::from(*m.get(10)?);
+        let hi = u16::from(*m.get(11)?);
+        Some((lo | (hi << 8)) & 0x03ff)
+    }
+
+    /// Octet 12 of the MCS set, when present.
+    fn tx_mcs_params(&self) -> Option<u8> {
+        self.mcs_set().get(12).copied()
+    }
+
+    /// Octet 12, B0. Clear means the sender declares no Tx MCS set at all.
+    pub fn tx_mcs_set_defined(&self) -> Option<bool> {
+        Some(self.tx_mcs_params()? & 0b1 != 0)
+    }
+
+    /// Octet 12, B1. Set means the Tx and Rx MCS sets differ, and B2-B3 then matter.
+    pub fn tx_rx_mcs_set_not_equal(&self) -> Option<bool> {
+        Some(self.tx_mcs_params()? & 0b10 != 0)
+    }
+
+    /// Octet 12, B2-B3. The field holds streams minus one, so it is returned as a count.
+    pub fn tx_max_spatial_streams(&self) -> Option<u8> {
+        Some(((self.tx_mcs_params()? >> 2) & 0b11) + 1)
     }
 }
 
