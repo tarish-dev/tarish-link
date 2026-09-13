@@ -2622,6 +2622,78 @@ The ratchet from finding 46's commit is what pointed here: the *average* said ta
 and unremarkable, while the **floor** said 5/20 and put it second-worst on the board. Tag 7
 was picked for exactly that reason, and the floor was right.
 
+## 49. ★ Tag 12's extended block — a relayed counter, a clock, and an AW counter
+
+Tag 12 was the largest opaque block on the board: 658,512 bytes, 51.2% named, floor 21/47.
+It is now 309,702 and 77.1%, floor 35/47, and the method is worth more than the result.
+
+### Do not stare at the bytes — measure them against a byte you already know
+
+The 47-byte shape ends in four 32-bit values that no source names. Staring at them
+produced a confident wrong answer inside five minutes: three consecutive samples from one
+device gave `D - 192*B = 5120` and `E - B = 499`, both exact, which looks like a
+structure. Run against the whole corpus, **neither relation held** — they were two short
+windows of one device fitted to three points.
+
+What worked was different. Tag 24's `master_counter` ticks every 192 Availability Windows
+(finding 22), which is 3.145728 s. That makes it a **ruler**, and the question becomes how
+fast each unknown moves against it.
+
+### The layout
+
+```text
+  27..29  extended_flags     u16   0x117d | (k << 10), k in 0..3
+  29..31  always 00 00       u16
+  31..35  master_counter     u32   relayed -- EQUAL to tag 24's in 100% of 24,915 frames
+  35..39  millisecond clock  u32   3145.766 ms per tick measured vs 3145.728 theoretical
+  39..43  AW counter         u32   exactly 192 per tick; 16-bit valued, wraps at 65536
+  43..47  not identified     u32   advances 1.0 to 3.2 per tick, varying by session
+```
+
+**The field boundary was two bytes out at first**, and the error was self-concealing:
+`UMI_OPTIONS` is set with a length of 4, so the extended flags word starts at 27, not 23.
+Read two bytes early, the flags word looks exactly like the low half of a 32-bit counter
+whose high half is conveniently zero — which is why `A` appeared to be a counter taking
+only four values. Decoding the *flags* properly is what explained it: `0x117d | (k << 10)`
+is a two-bit subfield in an otherwise constant word, stable per device.
+
+### How each identification was made, and how strong it is
+
+**`master_counter`, certain.** Compared *within the same frame* against tag 24, so there is
+no sampling skew to explain a match away: equal in **100% of 24,915 frames**. It matches
+the sender's own `self_counter` in only 56.4% — exactly the split expected, since those
+coincide when and only when the sender is the master. So a node that invents this value is
+lying about somebody else.
+
+**The millisecond clock, strong.** Adjacent frames are the wrong measurement: two frames
+either side of a tick give ΔB = 1 with almost no elapsed time, so an adjacent-pair test
+measures sampling jitter. Over long spans it averages out — median **3145.766 ms per tick**
+against 3145.728, six independent sessions inside 0.01%.
+
+**The AW counter, strong.** Exactly 192 per tick over the span in 7 of 12 sessions, and the
+five misses are the same sessions where the clock is also off, i.e. spans with a
+disturbance in them. One device held `D - 192*B` **exactly constant across ~500 frames in
+seven separate sessions**; the rest cluster on two or three adjacent values, which is where
+in the tick the frame went out. It is *not* tag 4's `aw_counter` — those two are equal in
+**0%** of frames carrying both, so it counts the same thing from a different origin.
+
+### Two analysis bugs, both of which produced plausible numbers
+
+- **Pooling rows per sender across captures.** The same MAC appears in captures taken days
+  apart, so a span could straddle a session boundary where the device's clock restarts. It
+  showed up as a **negative** millisecond rate, which is the only reason it was caught.
+  Keyed per capture, the rates snap to 3145.5-3145.8.
+- **Hand-decoding `0x000215f6` as 137206.** It is 136694. The wrong value made the first
+  interval 2634 ms instead of 3146, which weakened the clock hypothesis rather than
+  strengthening it — an arithmetic slip that happened to argue against the right answer.
+
+### What is still opaque in tag 12
+
+The extended flags word (2 bytes), the two zero bytes beside it, the UMI options blob, and
+the last 32-bit value. That last one advances, but between 1.0 and 3.2 per tick depending
+on the session, so it is neither a clock nor a tick counter. A frame or event count is the
+obvious guess and has not been tested.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

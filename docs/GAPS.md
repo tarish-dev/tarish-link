@@ -41,7 +41,7 @@ command's output, so adding captures improves it rather than dating it.
 
 ## How much of this do we actually understand?
 
-**81.4% of the control-plane bytes, and the other 18.6% we copy.** Measured over the whole
+**84.9% of the control-plane bytes, and the other 15.1% we copy.** Measured over the whole
 corpus — 40 AWDL captures, 37,829 action frames, 14,375,146 TLV bytes — not estimated. It
 was 63% before the decoding pass in findings 21-25.
 
@@ -74,7 +74,7 @@ is cargo-culting with no signal when it is wrong.
 | 4 | Synchronization Parameters | 93.2% | 68/73 | 189,145 | the flags word, byte 28, the trailing pair — finding 21 |
 | 5 | Election Parameters | 85.7% | 18/21 | 113,487 | |
 | 24 | Election Parameters v2 | 80.0% | 32/40 | 302,632 | only the 8 reserved bytes at offset 28 — findings 22, 26 |
-| 12 | Data Path State | 51.2% | 21/47 | **658,512** | the extended block and UMI options are opaque |
+| 12 | Data Path State | 77.1% | 35/47 | 309,702 | extended flags, UMI options and one unidentified u32 — finding 49 |
 | 7 | HT Capabilities | 82.0% | 6/8 | 74,478 | only the two leading bytes — the "tail" was a truncated MCS set, finding 48 |
 | 33 | 6 GHz channels | 24.7% | 2/14 | 90,906 | |
 | 32 | 6 GHz info | 15.4% | 2/13 | 60,060 | |
@@ -84,7 +84,7 @@ is cargo-culting with no signal when it is wrong.
 
 Counting Service Response flatters the figure to 86.1%: it is 31% of all bytes on the air
 and it is the one thing that was already specified elsewhere. The number that matters for
-building a transmitter is the **81.4%**, and the work queue is the opaque-bytes column,
+building a transmitter is the **84.9%**, and the work queue is the opaque-bytes column,
 largest first.
 
 ### The floor, and why the headline number is not the one to ratchet
@@ -111,8 +111,8 @@ is how a real gap becomes the new normal.
 Note what the floor exposes that the average hides. Tag 7 read 45% across the corpus with a
 floor of 5/20, because the 20-byte shape was barely understood and the 9-byte one carried
 the average — and chasing that floor is what turned up finding 48, which took the tag to
-82% and the floor to 6/8. Tag 12 is still 51.2% with a floor of 21/47. The floors are where
-the work is.
+82% and the floor to 6/8, and finding 49 did the same for tag 12 — 51.2% to 77.1%, floor
+21/47 to 35/47. The floors are where the work is.
 ### "Are you sure of them in every frame?"
 
 A separate question, and the lengths column answers it. Some tags have one shape in all

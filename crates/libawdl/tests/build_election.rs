@@ -367,3 +367,64 @@ fn flags_bit_eleven_governs_the_trailing_field() {
 
 #[path = "fixture_sync.rs"]
 mod fixture_sync2;
+
+/// Data Path State's extended block, from a real Apple frame — finding 49.
+///
+/// `02:3b:e8`-class iPhone, 47 bytes, captured in `two-iphones-awdl.pcap`. The whole TLV
+/// is accounted for here except the four bytes at the end that are still unidentified,
+/// which is the point of asserting the whole thing rather than the new fields alone.
+const APPLE_DPS_47: &[u8] = &[
+    0x23, 0x9f, 0x51, 0x41, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8a,
+    0xc3, 0xf7, 0x4b, 0xce, 0xde, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7d, 0x19, 0x00, 0x00, 0xa6,
+    0x00, 0x00, 0x00, 0xf6, 0x15, 0x02, 0x00, 0x80, 0x90, 0x00, 0x00, 0x99, 0x02, 0x00, 0x00,
+];
+
+#[test]
+fn data_path_state_extended_block_decodes() {
+    use libawdl::state::DataPathState;
+
+    let s = DataPathState::parse(APPLE_DPS_47).expect("parses");
+    assert_eq!(s.flags, 0x9f23);
+    assert_eq!(s.country.as_deref(), Some("QA"));
+    assert_eq!(s.social_channel_raw, Some(7));
+    assert_eq!(s.infra_address, Some([0x8a, 0xc3, 0xf7, 0x4b, 0xce, 0xde]));
+
+    // UMI_OPTIONS is set with a length of 4, which is why the extended flags word begins
+    // at 27 and not at 23. Reading it two bytes early makes the flags word look like the
+    // low half of a 32-bit counter, which is exactly what happened first.
+    assert_eq!(s.umi_options.as_deref(), Some(&[0u8, 0, 0, 0][..]));
+    assert_eq!(s.extended_flags, Some(0x197d));
+    assert_eq!(s.extended_tail.len(), 18);
+
+    assert_eq!(s.ext_master_counter(), Some(166), "the master's tenure, relayed");
+    assert_eq!(s.ext_clock_ms(), Some(136_694), "a free-running millisecond clock");
+    assert_eq!(s.ext_aw_counter(), Some(36_992), "an Availability Window counter");
+    assert_eq!(s.ext_unknown_14(), Some(665), "still unidentified");
+
+    // The AW counter and the master counter are two views of one clock: 192 AWs per tick.
+    // 192 * 166 + 5120 = 36992, and that 5120 offset is this session's origin.
+    assert_eq!(s.ext_aw_counter().unwrap(), 192 * s.ext_master_counter().unwrap() + 5120);
+
+    // Round-trips, which is the weaker claim but still has to hold.
+    assert_eq!(s.encode(), APPLE_DPS_47);
+}
+
+/// The extended accessors refuse to invent values when the block is short, rather than
+/// reading past it. A 13-byte Data Path State has no extended block at all.
+#[test]
+fn a_short_data_path_state_has_no_extended_fields() {
+    use libawdl::state::DataPathState;
+
+    // The 13-byte shape, which is our own beacon's: country, social channel, AWDL
+    // address, and nothing else. No UMI, no extended block.
+    let short = DataPathState::parse(&[
+        0x04, 0x03, 0x51, 0x41, 0x00, 0x95, 0x00, 0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c,
+    ])
+    .expect("parses");
+    assert_eq!(short.country.as_deref(), Some("QA"));
+    assert_eq!(short.awdl_address, Some([0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c]));
+    assert_eq!(short.extended_flags, None);
+    assert_eq!(short.ext_master_counter(), None);
+    assert_eq!(short.ext_clock_ms(), None);
+    assert_eq!(short.ext_aw_counter(), None);
+}

@@ -14,7 +14,7 @@
 5     18/21          85.7   Election Parameters
 6     0/9             0.0   Service Parameters
 7     6/8            82.0   HT Capabilities
-12    21/47          51.2   Data Path State
+12    35/47          77.1   Data Path State
 16    9/10           96.9   Arpa
 17    14/14         100.0   IEEE 802.11 Container
 18    41/41         100.0   Channel Sequence

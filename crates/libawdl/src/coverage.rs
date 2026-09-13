@@ -166,7 +166,28 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             if s.flags & flag::UMI != 0 {
                 c.named += 2;
             }
-            // Everything else -- UMI options, the extended flags word and its tail.
+            if s.flags & flag::UMI_OPTIONS != 0 {
+                // The length prefix IS a length -- we can choose it. Its contents are not
+                // decoded, so they are not.
+                c.named += 2;
+                c.opaque += s.umi_options.as_ref().map_or(0, |o| o.len());
+            }
+            if s.flags & flag::EXTENDED != 0 {
+                // The extended flags word takes four values across the corpus and is
+                // stable per device, so it is a flags word whose bits we cannot name --
+                // and per finding 47 a value we would have to copy is not a named one.
+                c.opaque += 2;
+                let tail = s.extended_tail.len();
+                // Two always-zero bytes, then three identified 32-bit fields, then one
+                // that is not identified. Finding 49.
+                c.opaque += tail.min(2);
+                if tail > 2 {
+                    c.named += (tail - 2).min(12);
+                }
+                if tail > 14 {
+                    c.opaque += tail - 14;
+                }
+            }
             c.opaque += len.saturating_sub(c.total());
             c
         }

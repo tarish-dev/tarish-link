@@ -182,6 +182,64 @@ impl DataPathState {
         Some(s)
     }
 
+    /// The extended block past the flags word, decoded — see finding 49.
+    ///
+    /// It was carried whole and undecoded because upstream marks several extended fields
+    /// "meaning unknown". Three of the four 32-bit values in it are now identified, and
+    /// the method was to measure them against a field already known rather than to stare
+    /// at the bytes: `master_counter` from tag 24 ticks every 192 Availability Windows,
+    /// which is 3.145728 s, so it is a ruler.
+    ///
+    /// ```text
+    ///   tail[0..2]    always 00 00
+    ///   tail[2..6]    the master's counter, relayed  -- EQUAL to tag 24's, 100% of 24,915
+    ///   tail[6..10]   a millisecond clock            -- 3145.766 ms per tick measured
+    ///   tail[10..14]  an Availability Window counter -- exactly 192 per tick
+    ///   tail[14..18]  not identified
+    /// ```
+    fn ext(&self, at: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(self.extended_tail.get(at..at + 4)?.try_into().ok()?))
+    }
+
+    /// The master's tenure, relayed — the same value tag 24 carries in `master_counter`.
+    ///
+    /// Equal in **100% of 24,915 frames** carrying both, and equal to the sender's own
+    /// `self_counter` in only 56.4% — which is the split you would expect, since those
+    /// two coincide exactly when the sender is the master. So this is somebody else's
+    /// number and a node that invents one is lying about its master.
+    pub fn ext_master_counter(&self) -> Option<u32> {
+        self.ext(2)
+    }
+
+    /// A free-running millisecond clock.
+    ///
+    /// Measured against `master_counter` over long spans — short ones measure sampling
+    /// jitter, because two frames either side of a tick give one tick and almost no
+    /// elapsed time. Median **3145.766 ms per tick** against a theoretical 3145.728, with
+    /// six independent sessions inside 0.01%.
+    pub fn ext_clock_ms(&self) -> Option<u32> {
+        self.ext(6)
+    }
+
+    /// An Availability Window counter — one per AW, so 192 per `master_counter` tick.
+    ///
+    /// **Not** the same counter as tag 4's `aw_counter`: those two are equal in 0% of
+    /// frames carrying both, so this one has a different origin. It holds 16-bit values
+    /// in a 32-bit field and wraps at 65536.
+    ///
+    /// One device held `D - 192*B` exactly constant across ~500 frames in seven separate
+    /// sessions. Others cluster on two or three adjacent values, which is where in a tick
+    /// the frame happened to go out, not drift.
+    pub fn ext_aw_counter(&self) -> Option<u32> {
+        self.ext(10)
+    }
+
+    /// Unidentified. It advances, but at a rate that varies by session — between 1.0 and
+    /// 3.2 per `master_counter` tick — so it is not a clock and not a tick counter.
+    pub fn ext_unknown_14(&self) -> Option<u32> {
+        self.ext(14)
+    }
+
     /// Whether this device says it is associated to an access point.
     pub fn is_associated(&self) -> bool {
         self.flags & flag::INFRA_BSSID != 0
