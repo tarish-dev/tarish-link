@@ -362,3 +362,53 @@ fn an_equal_metric_leaves_the_incumbent_alone() {
     assert_eq!(cl.master, Some(a), "530 does not beat 530");
     assert_eq!(cl.master_changes, 1);
 }
+
+/// Being inside one of the master's windows means transmit NOW, not at the next centre.
+///
+/// The bug this pins cost a 30-second run all but four of its transmissions: aiming at a
+/// slot centre means overshooting it by a microsecond waits a full 1.049 s cycle, and with
+/// a phase that re-anchors on every frame the target keeps moving out from under you.
+#[test]
+fn being_inside_a_master_window_means_send_now() {
+    use libawdl::election::ElectionParamsV2;
+    use libawdl::sync::{ChannelSequence, SyncParams};
+
+    let master = [0xaa; 6];
+    let sync = SyncParams {
+        tx_channel: 149, tx_counter: 0, master_channel: 149, guard_time: 0,
+        aw_period: 16, action_frame_period: 110, flags: 0x1800,
+        aw_ext_length: 16, aw_common_length: 16, aw_remaining: 16,
+        ext_min: 3, ext_max_multicast: 3, ext_max_unicast: 3, ext_max_af: 3,
+        master, presence_mode: 4, reserved_28: 0, aw_counter: 0,
+        ap_beacon_alignment_delta: 0,
+        channel_sequence: Some(ChannelSequence::apple_shaped(149, None)),
+        trailing: [0, 0],
+    };
+
+    let mut cl = Cluster::new();
+    // Anchor at a known phase: counter 0, a full window remaining, arriving at t=0 means
+    // the cycle begins at 0.
+    for k in 0..6u64 {
+        cl.observe(k * CYCLE, master, &sync, Some(&ElectionParamsV2::claiming(master, 600, 3)));
+    }
+    assert!(cl.clock.is_usable());
+    assert_eq!(cl.master_slots, vec![2, 8, 10], "Apple's shape");
+
+    // Slot 2 spans [2*SLOT, 3*SLOT). Just past its centre is still inside it.
+    let just_past_centre = 2 * SLOT_US + SLOT_US / 2 + 1_000;
+    assert_eq!(cl.clock.slot_at(just_past_centre), Some(2));
+    assert_eq!(
+        cl.us_until_master_window(just_past_centre), Some(0),
+        "inside slot 2 -- a microsecond past the centre must not cost a whole cycle"
+    );
+
+    // Near the end of the window, still inside.
+    assert_eq!(cl.us_until_master_window(3 * SLOT_US - 100), Some(0));
+
+    // Slot 3 is not one of the master's, so from there we wait -- and for less than a full
+    // cycle, because slot 8 comes round first.
+    let in_slot_3 = 3 * SLOT_US + 1_000;
+    assert_eq!(cl.clock.slot_at(in_slot_3), Some(3));
+    let w = cl.us_until_master_window(in_slot_3).expect("a wait");
+    assert!(w > 0 && w < CYCLE, "waits for slot 8, not a full cycle: {w}");
+}

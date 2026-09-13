@@ -1306,6 +1306,15 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     // reading, which is what makes them agree with each other -- a master's timing has to
     // be self-consistent, and does not have to agree with anybody else's.
     let epoch = std::time::Instant::now();
+    // The kernel stamps frames in CLOCK_REALTIME microseconds; the loop thinks in
+    // microseconds since `epoch`. One base captured at the same moment converts between
+    // them. The two clocks drift relative to each other, but over a run of seconds that is
+    // far below the millisecond scale that matters here -- and an NTP step, which is the
+    // one thing that would break it, is visible as a discontinuity rather than as slow rot.
+    let epoch_realtime_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
     eprintln!("beaconing as {} on channel {channel} for {secs}s", libawdl::dot11::Mac(addr));
     eprintln!("  election counter starts at {}", b.tenure_base);
     eprintln!(
@@ -1365,14 +1374,41 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             // which reads as "the estimate degraded" -- measured at 248 ms and 285 ms
             // against a 65 ms slot, while the same runs briefly adopted at 28 ms.
             //
-            // Bounded so a saturated channel cannot hold the loop past its next window.
-            // The real fix is SO_TIMESTAMP: ask the kernel when the frame arrived rather
-            // than asking the clock when we got to it. This keeps the queue short enough
-            // that the question matters less.
-            let mut drained = 0;
-            while let Ok(Some(rx)) = radio.rx(if drained == 0 { 2 } else { 0 }) {
-                drained += 1;
+            // BOUNDED BY THE SLACK BEFORE THE NEXT WINDOW, and that bound is not optional.
+            //
+            // The first version drained unconditionally at the top of every pass. In a room
+            // sending 270 frames a second there is always another frame, so the loop spent
+            // its time receiving and almost never reached the transmit branch: a 75-second
+            // run sent SEVEN frames where a 30-second run had previously sent 86. The clock
+            // was excellent and there was nothing on the air to hear it.
+            //
+            // Receiving is what makes the next transmission well-aimed; it is not the job.
+            // So the transmit deadline is computed first and the drain gets whatever is
+            // left, which is most of the time and none of it when a window is imminent.
+            let slack_us = {
                 let now_us = epoch.elapsed().as_micros() as u64;
+                match cluster.us_until_master_window(now_us) {
+                    Some(w) if adopted => w,
+                    _ => b.us_until_next_advertised_window(now_us),
+                }
+            };
+            // Under 4 ms to a window: go and transmit, hear nothing this pass.
+            let budget_ms = if slack_us < 4_000 { 0 } else { 2 };
+            let max_drain = if slack_us < 4_000 { 0 } else { 32 };
+
+            let mut drained = 0;
+            while drained < max_drain {
+            if let Ok(Some(rx)) = radio.rx(if drained == 0 { budget_ms } else { 0 }) {
+                drained += 1;
+                // THE KERNEL'S ARRIVAL TIME, not ours. Reading the clock here measures
+                // when we got round to this frame, so a backlog in the socket buffer is
+                // added to every frame behind it -- which showed up as a cluster-clock
+                // spread oscillating between 9 ms and 105 ms purely with how busy the
+                // transmit side was. Falling back to our own clock is honest but degraded.
+                let now_us = rx
+                    .host_us
+                    .map(|t| t.saturating_sub(epoch_realtime_us))
+                    .unwrap_or_else(|| epoch.elapsed().as_micros() as u64);
                 // A data frame is not an action frame, so it never reaches parse_awdl and
                 // would otherwise be silently discarded by a loop that only looks for
                 // election state.
@@ -1387,9 +1423,9 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                         cluster.observe(now_us, src, &sync, elect.as_ref());
                     }
                 }
-                if drained >= 32 {
-                    break;
-                }
+            } else {
+                break;
+            }
             }
             // Re-evaluated every pass, not latched. An earlier version set this once and
             // kept aiming with an estimate that had since degraded from 0 to 156 ms of

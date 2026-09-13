@@ -3162,6 +3162,74 @@ than they looked, and the honest position is that **the settled-cluster question
 again** and worth re-running now that `adopted=true` is achievable. The re-run is cheap and
 the outcome measure is unchanged.
 
+## 56. ★ Ask the kernel when the frame arrived — the transmit/listen tension was a bug
+
+Finding 55 fixed the cluster clock by draining the receive queue every pass. That worked
+and broke something else, and the pair is worth recording together because the second
+failure was invisible in the number the first one fixed.
+
+### Draining fixed the clock and starved the transmitter
+
+```
+              frames sent      spread      adopted
+before            86 / 30s   285,558 us      false
+after draining     7 / 75s     1,519 us      true
+```
+
+A beautiful clock and nothing on the air to use it. In a room sending ~270 frames a second
+there is always another frame, so the loop spent its time receiving and almost never reached
+the transmit branch. **Receiving is what makes the next transmission well-aimed; it is not
+the job.**
+
+Bounding the drain by the slack before the next window helped and did not fix it, because
+the real cost was elsewhere.
+
+### Aiming at a slot centre means missing the slot
+
+`us_until_master_window` took the minimum of `us_until_slot_centre` over the master's slots.
+That returns the time to the **next** centre — so overshooting a centre by one microsecond
+waits a full 1.049 s cycle. With a phase that re-anchors on every frame, the target moves out
+from under you and every window is missed by a hair.
+
+A window is 65 ms wide and the entire point of knowing the phase is to transmit inside it.
+**If we are already in one of the master's slots, the answer is now.** Aiming at the centre
+is for when we are outside.
+
+That restored the frame rate — and the clock immediately went bad again, oscillating between
+9 ms and 105 ms as the transmit side got busier. Which is the real shape of the problem:
+every millisecond spent transmitting is a millisecond the receive queue grows.
+
+### The fix is not a balance, it is `SO_TIMESTAMP` ★
+
+`arrived_us` was being read from the process clock after `recv` returned, which measures
+**when we got round to the frame**. A backlog adds itself to every frame behind it, so the
+clock's quality was a function of how busy the transmitter was — two things that have no
+business being coupled.
+
+Asking the kernel for the arrival time decouples them completely. A frame read late still
+carries the time it landed.
+
+```
+              frames sent      spread      adopted
+kernel time      57 / 30s      5,378 us      true
+                 45 / 30s      9,043 us      true
+```
+
+Both numbers good at once, for the first time. The code comment had named `SO_TIMESTAMP` as
+"the real fix" two commits earlier while shipping the approximation; it took the
+approximation failing in a new direction to make it worth doing.
+
+The kernel stamps in `CLOCK_REALTIME` and the loop thinks in microseconds since its own
+`Instant`, so one base captured at start converts between them. The two drift, but far below
+the millisecond scale that matters, and the one thing that would break it — an NTP step —
+appears as a discontinuity rather than as slow rot.
+
+### The lesson, which is the same one as finding 47
+
+A measurement that improves the number you are looking at can wreck the number you are not.
+`spread` went from 285,558 µs to 1,519 µs and the run became *useless*, and nothing in that
+figure said so. The frame count was in the same log, one line above.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

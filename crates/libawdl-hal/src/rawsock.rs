@@ -110,6 +110,88 @@ impl RawSock {
         Ok(())
     }
 
+    /// Ask the kernel to stamp each frame with its arrival time.
+    ///
+    /// **This is the difference between a timestamp and a guess.** Without it the only
+    /// time available is when `recv` returned, which measures when the process got round to
+    /// reading — so a backlog in the socket buffer is added to every frame behind it.
+    /// Measured on hardware: a cluster-clock spread that should be single-digit
+    /// milliseconds oscillated between 9 ms and 105 ms purely with how busy the transmit
+    /// side was, because transmitting stole the time that kept the queue short.
+    ///
+    /// With this, a frame read late still carries the time it actually landed, and the
+    /// tension between transmitting and listening disappears instead of being tuned.
+    pub fn enable_timestamps(&self) -> Result<()> {
+        let on: libc::c_int = 1;
+        // SAFETY: a correctly-sized int for SO_TIMESTAMP.
+        let rc = unsafe {
+            libc::setsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_TIMESTAMP,
+                &on as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(Error::Radio(format!(
+                "SO_TIMESTAMP on {}: {}",
+                self.iface,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Receive one frame with the kernel's arrival time, in microseconds since the epoch.
+    ///
+    /// Falls back to `None` for the time if the control message is absent — which happens
+    /// when [`enable_timestamps`](Self::enable_timestamps) was not called, and is reported
+    /// rather than silently replaced with "now", because a wrong timestamp is worse than a
+    /// missing one.
+    pub fn rx_at(&self, buf: &mut [u8]) -> Result<Option<(usize, Option<u64>)>> {
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        };
+        // Room for one SCM_TIMESTAMP cmsg. 64 bytes is generous for a timeval plus header.
+        let mut control = [0u8; 64];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = control.len() as _;
+
+        // SAFETY: msghdr is fully initialised above and the buffers outlive the call.
+        let n = unsafe { libc::recvmsg(self.fd, &mut msg, 0) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::EAGAIN) => Ok(None),
+                _ => Err(Error::Radio(format!("recvmsg on {}: {e}", self.iface))),
+            };
+        }
+
+        // SAFETY: msg was populated by recvmsg; CMSG_FIRSTHDR returns null when empty.
+        let mut at = None;
+        unsafe {
+            let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+            while !cmsg.is_null() {
+                if (*cmsg).cmsg_level == libc::SOL_SOCKET
+                    && (*cmsg).cmsg_type == libc::SCM_TIMESTAMP
+                {
+                    let tv = std::ptr::read_unaligned(
+                        libc::CMSG_DATA(cmsg) as *const libc::timeval
+                    );
+                    at = Some(tv.tv_sec as u64 * 1_000_000 + tv.tv_usec as u64);
+                    break;
+                }
+                cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+            }
+        }
+        Ok(Some((n as usize, at)))
+    }
+
     /// Set a receive timeout so [`rx`](Self::rx) cannot block forever.
     pub fn set_rx_timeout(&self, ms: u32) -> Result<()> {
         let tv = libc::timeval {

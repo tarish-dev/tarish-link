@@ -133,6 +133,13 @@ pub struct Slot {
 #[derive(Debug, Clone)]
 pub struct RxFrame {
     pub bytes: Vec<u8>,
+    /// When the KERNEL saw the frame, microseconds since the epoch.
+    ///
+    /// Distinct from `tsf`, which is the radio's own clock and is absent on most adapters
+    /// (0 of 801 frames on the MT7612U). This is the next best thing and it is much better
+    /// than the caller's own clock: reading `Instant::now()` after `recv` measures when the
+    /// process got round to it, so a socket backlog is added to every frame behind it.
+    pub host_us: Option<u64>,
     /// The radio's TSF at reception. **Without this the frame is nearly useless for
     /// synchronisation**, which is why it is not an afterthought in the struct.
     pub tsf: Option<Tsf>,

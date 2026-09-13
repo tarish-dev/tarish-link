@@ -389,7 +389,25 @@ impl Cluster {
         if !self.clock.is_usable() || self.master_slots.is_empty() {
             return None;
         }
-        // The centre, not the boundary: see ClusterClock::us_until_slot_centre.
+        // ALREADY INSIDE ONE? Then the answer is now, not the next centre.
+        //
+        // Aiming at the centre is right when we are outside a window and wrong the moment
+        // we are inside one: `us_until_slot_centre` returns the time to the NEXT centre, so
+        // overshooting by a microsecond costs a full cycle. Measured on hardware, that is
+        // what it cost — a 30-second run against a cluster we were correctly synchronised
+        // to (spread 8.6 ms, adopted) transmitted FOUR frames, because every window was
+        // missed by a hair and then waited 1.049 s for the next.
+        //
+        // A window is 65 ms wide and the whole point of knowing the phase is to transmit
+        // inside it. The caller is responsible for not sending twice in one visit; that is
+        // a smaller problem than never sending at all.
+        if let Some(now_slot) = self.clock.slot_at(now_us) {
+            if self.master_slots.contains(&now_slot) {
+                return Some(0);
+            }
+        }
+        // Outside: aim at the centre, not the boundary — see
+        // ClusterClock::us_until_slot_centre.
         self.master_slots
             .iter()
             .filter_map(|s| self.clock.us_until_slot_centre(now_us, *s))

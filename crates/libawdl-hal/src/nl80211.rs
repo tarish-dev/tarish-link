@@ -306,12 +306,16 @@ impl crate::Radio for Nl80211 {
         #[cfg(target_os = "linux")]
         {
             if self.sock.is_none() {
-                self.sock = Some(crate::rawsock::RawSock::open(&self.monitor)?);
+                let s = crate::rawsock::RawSock::open(&self.monitor)?;
+                // Best effort: a kernel without SO_TIMESTAMP still works, just with the
+                // caller's own clock and the backlog problem that implies.
+                let _ = s.enable_timestamps();
+                self.sock = Some(s);
             }
             let sock = self.sock.as_ref().unwrap();
             sock.set_rx_timeout(timeout_ms)?;
             let mut buf = vec![0u8; 4096];
-            let Some(n) = sock.rx(&mut buf)? else { return Ok(None) };
+            let Some((n, host_us)) = sock.rx_at(&mut buf)? else { return Ok(None) };
             buf.truncate(n);
             // Radiotap carries the three things that make a frame usable for timing, and
             // TSFT is the one that matters most -- a frame without it can be parsed and
@@ -320,7 +324,7 @@ impl crate::Radio for Nl80211 {
                 Some(t) => t,
                 None => (None, None, None),
             };
-            Ok(Some(crate::RxFrame { bytes: buf, tsf, freq_mhz: freq, signal_dbm: signal }))
+            Ok(Some(crate::RxFrame { bytes: buf, host_us, tsf, freq_mhz: freq, signal_dbm: signal }))
         }
         #[cfg(not(target_os = "linux"))]
         {
