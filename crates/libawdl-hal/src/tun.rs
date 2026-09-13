@@ -42,18 +42,16 @@
 //!
 //! With that, `ip -6 addr show awdl0` lists exactly one address. Verified.
 //!
-//! **A route without an `ip rule` is never consulted.** Android routes by fwmark and the
-//! per-network table starts empty; the failure looks exactly like nothing listening on the
-//! port, which is the single most expensive false diagnosis in this project's history.
-//! On Linux the equivalent trap is a link-local route that needs the interface named:
+//! **Routing is NOT a problem here, and an earlier version of this note said it was.**
+//! Android routes by fwmark with an empty per-network table, so a route without an
+//! `ip rule` is never consulted — the single most expensive false diagnosis in this
+//! project's history. That is an Android problem. On Linux the kernel installs
+//! `fe80::/64 proto kernel metric 256` on its own the moment the address is added, and
+//! `ip -6 route show dev awdl0` confirms it. No table, no rule, nothing to add.
 //!
-//! ```text
-//!   ip -6 route add fe80::/64 dev awdl0 table <id>
-//!   ip -6 rule add iif awdl0 table <id>
-//! ```
-//!
-//! This module deliberately does not run those. It opens the device and gets out of the
-//! way, because a HAL that quietly reconfigures routing is a HAL you cannot debug.
+//! The Android trap is still real and still worth carrying forward to a phone port. It
+//! just does not apply to the machine this runs on, and saying otherwise sends someone
+//! looking for a fault that is not there.
 
 use crate::{Error, Result};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -205,4 +203,132 @@ impl AsRawFd for Tun {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.fd.as_raw_fd()
     }
+}
+
+/// `SIOCGIFFLAGS` / `SIOCSIFFLAGS` / `SIOCSIFADDR`.
+const SIOCGIFFLAGS: libc::c_ulong = 0x8913;
+const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
+const SIOCSIFADDR: libc::c_ulong = 0x8916;
+
+/// `struct in6_ifreq` — the AF_INET6 form, which is a different shape from `ifreq` and is
+/// not interchangeable with it.
+#[repr(C)]
+struct In6IfReq {
+    addr: [u8; 16],
+    prefixlen: u32,
+    ifindex: i32,
+}
+
+impl Tun {
+    /// Bring the interface up and give it the address peers will compute for us.
+    ///
+    /// **The order is the whole content of this function** and it is not the order anyone
+    /// writes by hand:
+    ///
+    /// 1. `addr_gen_mode = 1`, **before** the interface comes up. It is read once, at that
+    ///    moment. Skip it and the kernel adds a stable-privacy link-local of its own
+    ///    beside ours and may use *that* as the source address — so peers reach us at the
+    ///    derived address and our replies come from one they have never heard of.
+    ///    Discovery works and every answer is dropped. Finding 51.
+    /// 2. `IFF_UP`.
+    /// 3. the derived address.
+    ///
+    /// Doing 3 before 2 also works; doing 1 after 2 does not, and fails silently, which is
+    /// why this exists as one function rather than three the caller sequences.
+    ///
+    /// The address is **not** a parameter. It is derived from the MAC we advertise, because
+    /// any other value is wrong by construction — AWDL peers compute it, they are never
+    /// told it.
+    pub fn configure(&self, mac: [u8; 6]) -> Result<std::net::Ipv6Addr> {
+        let raw = crate::tun::addr_gen_mode_path(&self.name);
+        // Written before IFF_UP. std::fs rather than an ioctl because this is a sysctl and
+        // there is no ioctl for it.
+        std::fs::write(&raw, "1\n").map_err(|e| {
+            Error::Radio(format!(
+                "write {raw}: {e}. Without addr_gen_mode=1 the kernel adds its own \
+                 link-local and may prefer it as the source address"
+            ))
+        })?;
+
+        // SAFETY: a socket used only as an ioctl handle; closed below.
+        let sock = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
+            return Err(Error::Radio(format!(
+                "AF_INET6 socket: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let close = |s: i32| {
+            // SAFETY: `s` is the descriptor opened above and is not used afterwards.
+            unsafe { libc::close(s) };
+        };
+
+        // IFF_UP, read-modify-write. Setting the flags word wholesale would clear
+        // MULTICAST, which a link carrying mDNS to ff02::fb cannot do without.
+        let mut req = IfReq { name: [0; libc::IF_NAMESIZE], flags: 0, pad: [0; 22] };
+        for (dst, b) in req.name.iter_mut().zip(self.name.as_bytes()) {
+            *dst = *b as libc::c_char;
+        }
+        // SAFETY: correctly shaped ifreq, outlives the call.
+        if unsafe { libc::ioctl(sock, SIOCGIFFLAGS, &mut req as *mut IfReq) } < 0 {
+            let e = std::io::Error::last_os_error();
+            close(sock);
+            return Err(Error::Radio(format!("SIOCGIFFLAGS {}: {e}", self.name)));
+        }
+        req.flags |= libc::IFF_UP as libc::c_short | libc::IFF_RUNNING as libc::c_short;
+        // SAFETY: as above.
+        if unsafe { libc::ioctl(sock, SIOCSIFFLAGS, &mut req as *mut IfReq) } < 0 {
+            let e = std::io::Error::last_os_error();
+            close(sock);
+            return Err(Error::Radio(format!("SIOCSIFFLAGS {} up: {e}", self.name)));
+        }
+
+        // SAFETY: a NUL-terminated name built above.
+        let idx = unsafe { libc::if_nametoindex(req.name.as_ptr()) };
+        if idx == 0 {
+            close(sock);
+            return Err(Error::Radio(format!("if_nametoindex {}: not found", self.name)));
+        }
+
+        let addr = crate::tun::link_local(mac);
+        let mut areq = In6IfReq { addr, prefixlen: 64, ifindex: idx as i32 };
+        // SAFETY: in6_ifreq is the shape SIOCSIFADDR expects on an AF_INET6 socket.
+        let rc = unsafe { libc::ioctl(sock, SIOCSIFADDR, &mut areq as *mut In6IfReq) };
+        let err = std::io::Error::last_os_error();
+        close(sock);
+        if rc < 0 && err.raw_os_error() != Some(libc::EEXIST) {
+            return Err(Error::Radio(format!(
+                "SIOCSIFADDR {} {:?}: {err}",
+                self.name,
+                std::net::Ipv6Addr::from(addr)
+            )));
+        }
+        Ok(std::net::Ipv6Addr::from(addr))
+    }
+}
+
+fn addr_gen_mode_path(iface: &str) -> String {
+    format!("/proc/sys/net/ipv6/conf/{iface}/addr_gen_mode")
+}
+
+/// The modified-EUI-64 link-local of a MAC.
+///
+/// Duplicated from `libawdl::data::link_local_from_mac` rather than depended on: the HAL
+/// does not know about the protocol crate and should not start now. The rule is four lines
+/// and `libawdl`'s copy is the one with the tests — public here so a test can hold the two
+/// against each other, because a silent divergence would put the interface on an address
+/// no peer computes.
+pub fn link_local(mac: [u8; 6]) -> [u8; 16] {
+    let mut a = [0u8; 16];
+    a[0] = 0xfe;
+    a[1] = 0x80;
+    a[8] = mac[0] ^ 0x02;
+    a[9] = mac[1];
+    a[10] = mac[2];
+    a[11] = 0xff;
+    a[12] = 0xfe;
+    a[13] = mac[3];
+    a[14] = mac[4];
+    a[15] = mac[5];
+    a
 }

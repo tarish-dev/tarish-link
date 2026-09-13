@@ -3032,6 +3032,66 @@ finding 46 says means transmitting before the peer arrives — and then an mDNS 
 `ff02::fb` that a real device answers. At that point the receive counter becomes the
 measurement that matters, and libawdl is doing the whole job `libmosey` does today.
 
+## 54. The interface configures itself — and Linux needed no routing help at all
+
+`awdl beacon --datapath awdl0` now brings the interface up itself instead of printing three
+commands to paste. `Tun::configure(mac)` is one function because the **order** is the whole
+content:
+
+```
+1.  addr_gen_mode = 1     BEFORE up -- read once, at that moment
+2.  IFF_UP
+3.  the derived address
+```
+
+Step 3 before step 2 is fine. Step 1 after step 2 is not, and fails **silently** — which is
+exactly why these are not three things for a caller to sequence.
+
+`IFF_UP` is set read-modify-write, via `SIOCGIFFLAGS` then `SIOCSIFFLAGS`. Writing the flags
+word wholesale would clear `MULTICAST`, and a link whose entire purpose is mDNS to `ff02::fb`
+cannot lose that.
+
+### The run, with nothing configured by hand
+
+```
+  --datapath awdl0: up on fe80::2c0:caff:feb0:604c, IPv6 queued and drained in-window
+
+76: awdl0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500
+    inet6 fe80::2c0:caff:feb0:604c/64 scope link     <- and only this one
+addr_gen_mode: 1
+```
+
+**Exactly one address.** The stable-privacy twin from finding 51 is gone, which is the proof
+that step 1 landed before step 2.
+
+### ★ A correction: routing was never a problem on Linux
+
+The module note said a route without an `ip rule` is never consulted, and offered
+`ip -6 route add … table 200` plus `ip -6 rule add iif awdl0 table 200` as the Linux
+equivalent of the Android trap.
+
+**That was wrong.** `ip -6 route show dev awdl0` after configuring:
+
+```
+fe80::/64 proto kernel metric 256 pref medium
+```
+
+The kernel installs it the moment the address is added. No table, no rule, nothing to add.
+The fwmark problem is real and is *Android's* — carrying it across to Linux sent a reader
+looking for a fault that does not exist, which is its own kind of expensive.
+
+### The duplicated EUI-64 rule, and the test that guards it
+
+`libawdl_hal::tun` needs the link-local rule and the HAL does not depend on the protocol
+crate — reasonably, since it is four lines. So it exists twice, and a divergence would put
+the interface on an address **no peer computes**: the peer would discover us and never get a
+reply. A test in the CLI, which depends on both, holds the copies against each other over
+four MACs including the awkward ones (`ff:ff:ff:ff:ff:ff`, and `02:…` where the flipped bit
+goes to zero).
+
+That is the cheapest possible guard for a duplication that is otherwise invisible until it
+is a field failure.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

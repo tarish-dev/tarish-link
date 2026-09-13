@@ -1235,12 +1235,17 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         #[cfg(target_os = "linux")]
         Some(name) => match libawdl_hal::tun::Tun::open(name) {
             Ok(t) => {
-                let a = std::net::Ipv6Addr::from(libawdl::data::link_local_from_mac(addr));
-                eprintln!("  --datapath {name}: carrying IPv6, queued and drained in-window");
-                eprintln!("    configure it elsewhere, in this order:");
-                eprintln!("      sysctl -w net.ipv6.conf.{name}.addr_gen_mode=1");
-                eprintln!("      ip link set {name} up");
-                eprintln!("      ip -6 addr add {a}/64 dev {name} scope link");
+                // Configured here, not printed for the operator to paste. The order
+                // matters and one of the three steps fails silently when done late --
+                // see Tun::configure.
+                match t.configure(addr) {
+                    Ok(a) => eprintln!("  --datapath {name}: up on {a}, IPv6 queued and drained in-window"),
+                    Err(e) => {
+                        eprintln!("  --datapath {name}: opened but NOT configured: {e:?}");
+                        eprintln!("  the interface exists and carries no address, so nothing will flow.");
+                        std::process::exit(1);
+                    }
+                }
                 Some(t)
             }
             Err(e) => {
@@ -2151,12 +2156,14 @@ fn datapath(args: &[String]) {
         }
     };
 
-    let addr = std::net::Ipv6Addr::from(libawdl::data::link_local_from_mac(our_mac));
-    println!("datapath: {name} <-> {mon}, as {}", fmt_mac(our_mac));
-    println!("configure the interface in ANOTHER shell, in this order:");
-    println!("  sysctl -w net.ipv6.conf.{name}.addr_gen_mode=1");
-    println!("  ip link set {name} up");
-    println!("  ip -6 addr add {addr}/64 dev {name} scope link");
+    let addr = match tun.configure(our_mac) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e:?}");
+            std::process::exit(1);
+        }
+    };
+    println!("datapath: {name} <-> {mon}, as {} on {addr}", fmt_mac(our_mac));
     println!();
 
     let mut tbuf = vec![0u8; 4096];
@@ -2385,6 +2392,27 @@ mod tests {
         let six = Floor { named: 0, total: 9 };
         assert!(!six.worse_than(&six));
         assert!(six.worse_than(&Floor { named: 1, total: 9 }));
+    }
+
+    /// The EUI-64 rule exists twice -- in `libawdl::data` with the tests, and in
+    /// `libawdl_hal::tun` so the HAL need not depend on the protocol crate. A silent
+    /// divergence would configure the interface with an address no peer computes, and the
+    /// symptom would be a peer that discovers us and never gets a reply.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_two_copies_of_the_eui64_rule_agree() {
+        for mac in [
+            [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c],
+            [0x8a, 0xc3, 0xf7, 0x4b, 0xce, 0xde],
+            [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ] {
+            assert_eq!(
+                libawdl::data::link_local_from_mac(mac),
+                libawdl_hal::tun::link_local(mac),
+                "the HAL and the protocol crate disagree for {mac:02x?}"
+            );
+        }
     }
 
     /// Fully named is the ceiling and never reads as worse, whatever it is compared against.

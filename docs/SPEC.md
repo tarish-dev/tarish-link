@@ -473,24 +473,31 @@ because the payload that goes inside the AWDL header is the IP packet; an Ethern
 would be discarded immediately. `IFF_NO_PI` is not optional — without it every read carries
 four bytes of prefix and the IPv6 version nibble lands in the wrong place.
 
-Bringing it up takes three commands **in this order**, and the first is the one that bites:
+`Tun::configure(mac)` does the bring-up, and it is one function because the **order** is the
+content and one of the three steps fails silently when done late:
 
-```bash
-sysctl -w net.ipv6.conf.awdl0.addr_gen_mode=1   # BEFORE up; only read at that moment
-ip link set awdl0 up
-ip -6 addr add fe80::88c3:f7ff:fe4b:cede/64 dev awdl0 scope link
-ip -6 route add fe80::/64 dev awdl0 table 200
-ip -6 rule add iif awdl0 table 200
+```
+1.  addr_gen_mode = 1     BEFORE up. Read once, at that moment
+2.  IFF_UP
+3.  the derived address
 ```
 
-Without the sysctl the kernel adds a **second** link-local of its own,
-`scope link stable-privacy`, and may use it as the source address — so peers reach us at the
-derived address and our replies come from one they have never heard of. `addr_gen_mode` reads
-back as `0` (EUI-64), which looks right; a TUN has no hardware address (`link/none`), so
-EUI-64 has nothing to work from and the kernel falls back to stable-privacy. Finding 51.
+Without step 1 — or with it done after step 2 — the kernel adds a **second** link-local of
+its own, `scope link stable-privacy`, and may use it as the source address. Peers reach us at
+the derived address and our replies come from one they have never heard of: discovery works
+and every answer is dropped. `addr_gen_mode` reads back as `0` (EUI-64), which looks right; a
+TUN has no hardware address (`link/none`), so EUI-64 has nothing to work from and the kernel
+falls back to stable-privacy. Finding 51.
 
-`awdl tun <name> [secs] [mac]` opens the interface and prints exactly these commands for a
-given MAC.
+**No route or rule is needed on Linux.** The kernel installs `fe80::/64 proto kernel metric
+256` itself when the address is added. The `ip rule` requirement is an *Android* fwmark
+problem and does not apply here — an earlier version of these docs said it did.
+
+The address is not a parameter: it is derived from the MAC we advertise, because any other
+value is wrong by construction. The rule exists in `libawdl::data` and again in
+`libawdl_hal::tun` so the HAL need not depend on the protocol crate, and a test holds the
+two copies against each other — a silent divergence would put the interface on an address no
+peer computes.
 
 `awdl datapath <mon> <our-mac> [name] [secs]` runs the loop: one `poll` over the tun and the
 raw socket, encapsulating one way and decapsulating the other. Verified on the Pi — a
