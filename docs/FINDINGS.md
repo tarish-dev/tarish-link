@@ -3162,6 +3162,9 @@ than they looked, and the honest position is that **the settled-cluster question
 again** and worth re-running now that `adopted=true` is achievable. The re-run is cheap and
 the outcome measure is unchanged.
 
+> **Re-run, and the conclusion held** — three valid trials, preconditions checked, REFUSE
+> each time. See finding 57.
+
 ## 56. ★ Ask the kernel when the frame arrived — the transmit/listen tension was a bug
 
 Finding 55 fixed the cluster clock by draining the receive queue every pass. That worked
@@ -3229,6 +3232,86 @@ appears as a discontinuity rather than as slow rot.
 A measurement that improves the number you are looking at can wreck the number you are not.
 `spread` went from 285,558 µs to 1,519 µs and the run became *useless*, and nothing in that
 figure said so. The frame count was in the same log, one line above.
+
+## 57. ★ The settled-cluster result survives a properly controlled test
+
+Finding 55 reopened the question: every run behind "a settled Apple cluster does not
+re-elect" had been made with a cluster clock wrong by hundreds of milliseconds, so our
+frames were probably landing while the peers were on another channel. *"Ignored us"* and
+*"never heard us"* are indistinguishable from our side.
+
+Re-run with the clock fixed, the frame rate restored, and every precondition checked: **the
+conclusion holds.**
+
+### Being adopted was voiding the run that measured it ★
+
+The first attempt voided itself, and the reason is the sharpest self-inflicted wound in this
+project so far.
+
+A peer naming US master set `self.master` to our own address. Only the master's own frames
+anchor the clock, and our own frames are filtered out — so from that moment the estimate
+froze at zero observations and `adopted` went false. **Success turned itself into a void
+run.**
+
+It also explains every `master Some(00:c0:ca:b0:60:4c), 0 anchors` line in the preceding
+logs, which had been read as a tracker bug. They were peers adopting us.
+
+`Cluster::for_us(addr)` now records a frame naming us in `adopters` and steps over it rather
+than following it, and the beacon prints the count unconditionally — zero included, because
+it is the outcome measure of every election experiment here and a missing line reads as
+"not looked at".
+
+### The harness checks its own preconditions now
+
+Every void run in this project looked like a result until something extra was checked by
+hand afterwards. `scripts/compete-trial.sh` checks first and prints VOID with the reason
+instead of a number:
+
+```
+frames sent >= 40           a starved transmitter cannot be adopted
+adopted = true              a bad phase lands frames while the peer is elsewhere
+spread < 32768 us           under half a slot
+our address in the capture  the beacon's counter is not evidence it reached the air
+```
+
+It also captures the room **before** the run, because a trial against an empty or churning
+room measures nothing and reads as a clean refusal afterwards.
+
+### Three valid trials
+
+Room settled throughout: `4e:90:de:c0:5a:51` master from the first bucket, with
+`aa:a0:36:e4:79:8a` as an independent second master.
+
+| trial | frames sent | spread | naming us | verdict |
+|---|---|---|---|---|
+| proper | 119 | 4,366 µs | **14** | REFUSE |
+| rep1 | 156 | **363 µs** | 0 | REFUSE |
+| rep2 | 155 | 9,457 µs | 0 | REFUSE |
+
+**REFUSE, three times**, at metric 600 against a settled cluster, with us correctly
+synchronised and transmitting at full rate — conditions none of the original eight runs met.
+
+### The 14, and why it is not a result
+
+The first trial had `4e:90:de:c0:5a:51` name us master in 14 frames while naming itself in
+108. That is not zero and it was tempting: the threshold is 20, it was the first run after
+the clock fix, and a story about partial adoption writes itself.
+
+**It did not replicate.** Two further trials gave zero. Finding 44 died exactly this way —
+a clean-looking effect in one run that a converse survived and a replication killed — which
+is why rule 6 exists and why the threshold was not moved to fit.
+
+Worth keeping as an open observation rather than a finding: what makes a settled peer name
+a stranger as master in 11% of its frames for one 60-second window and never again? The
+honest answer is that one occurrence is not enough to say.
+
+### What this settles
+
+Finding 45's conclusion stands, and now rests on evidence that is actually controlled. The
+operational consequence is unchanged and is the useful part: **to be adopted, be
+transmitting before the peer arrives.** A settled cluster does not re-elect for a better
+metric — not at 600, not when it can hear us clearly, not when our frames land in its own
+windows.
 
 ## Open, not yet investigated
 

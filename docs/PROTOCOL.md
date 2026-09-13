@@ -45,7 +45,22 @@ document with a real control". It had a converse. That is not a control.
    consecutive FL runs were void on exactly this, and the fourth looked like a clean result
    refuting a hypothesis. See finding 46.
 
-8. **Establish the condition DURING the capture, never before it.** Two iPhones re-form a
+8. **Check OUR OWN preconditions, not only the peers'.** Rules 2 and 7 are about the room.
+   These are about us, and every one of them has voided a run in this project:
+
+   - **did we transmit?** A run that sent 7 frames in 75 s cannot be adopted and is not
+     evidence of anything. Finding 56.
+   - **were we synchronised?** `adopted=true`, spread under half a slot. Frames aimed with
+     a bad phase land while the peer is on another channel, and *"the peer ignored us"* is
+     then indistinguishable from *"the peer never heard us"*. Finding 55.
+   - **did our frames reach the air?** Our own address must appear in the capture. The
+     beacon's own counter says what we asked the radio to do, not what it did.
+
+   `scripts/compete-trial.sh` enforces all of these and prints VOID with the reason rather
+   than an outcome. A harness that can only produce a result is a harness that will produce
+   a wrong one.
+
+9. **Establish the condition DURING the capture, never before it.** Two iPhones re-form a
    cluster in **under ten seconds**, and the harness needs about that long between starting
    the beacon and attaching `tcpdump`. So any toggle performed before the run has already
    expired when the first frame lands. Open the capture first, then have the operator act
