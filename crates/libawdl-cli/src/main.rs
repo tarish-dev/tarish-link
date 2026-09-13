@@ -555,6 +555,7 @@ fn usage() -> ! {
     eprintln!("  awdl tlv   <file.pcap> <tag> [mac]     dump raw TLV values as a Rust fixture");
     eprintln!("  awdl coverage <file.pcap>... [--baseline F] [--update-baseline F]");
     eprintln!("                                         how much of the air do we understand");
+    eprintln!("  awdl bytemap <file.pcap>... [tag]      which bytes of a tag ever VARY");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
     eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N]");
@@ -631,6 +632,9 @@ fn main() {
         }
         "coverage" => {
             coverage(&args[2..]);
+        }
+        "bytemap" => {
+            bytemap(&args[2..]);
         }
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
@@ -1610,6 +1614,143 @@ fn parse_awdl(
         }
     }
     Some((d.src.0, sync?, elect))
+}
+
+/// Which bytes of a tag ever change, measured over the whole corpus.
+///
+/// WHY THIS IS NOT THE SAME QUESTION AS COVERAGE. `coverage` splits bytes into named and
+/// opaque, where opaque means "we cannot say what it is". That conflates two very
+/// different situations:
+///
+///   - a byte that takes 44 different values across the corpus is carrying information
+///     we do not understand. It is a real gap, and copying Apple's value is a guess.
+///   - a byte that has been 0x00 in all 37,829 frames is not obviously carrying anything.
+///     Reproducing it correctly requires no understanding at all.
+///
+/// Both count as opaque today, which makes the opaque total a worse work queue than it
+/// looks: some of it is genuinely unknown and some of it is very probably padding.
+///
+/// The repository already set the precedent for how to resolve that, on tag 18's three
+/// trailing bytes -- "confirmed zero in all 7054 samples, measured, so named as padding
+/// rather than assumed". This command produces that evidence for every tag at once.
+///
+/// WHAT IT CANNOT TELL YOU. Constant across THIS corpus is not constant across the
+/// protocol. Every capture here comes from a handful of Apple device models, one Pixel
+/// and one Pi; a field that identifies something all of them share would look like
+/// padding and is not. The sample size is a floor on confidence, not a proof, and a run
+/// of `.` on a tag seen 66 times means very little next to one seen 37,829 times.
+fn bytemap(args: &[String]) {
+    use std::collections::BTreeMap;
+
+    let mut files: Vec<&str> = Vec::new();
+    let mut only: Option<u8> = None;
+    for a in args {
+        match a.parse::<u8>() {
+            Ok(t) => only = Some(t),
+            Err(_) => files.push(a),
+        }
+    }
+
+    // (tag, len) -> per-offset set of values seen. A 256-bit set per offset: the tags are
+    // short and this stays trivially small next to the captures themselves.
+    let mut seen: BTreeMap<(u8, usize), (Vec<[u64; 4]>, u64)> = BTreeMap::new();
+
+    for f in &files {
+        let Ok(mut cap) = pcap::Capture::from_file(f) else {
+            eprintln!("skipping {f}: not a capture");
+            continue;
+        };
+        while let Ok(pkt) = cap.next_packet() {
+            let Seen::Awdl { af, .. } = classify(pkt.data) else { continue };
+            for t in af.tlvs() {
+                if only.is_some_and(|o| o != t.tag) {
+                    continue;
+                }
+                // Tag 2 is DNS: fully named, variable-length by nature, and a byte map of
+                // it would be a map of whatever names happened to be on the air.
+                if only.is_none() && t.tag == 2 {
+                    continue;
+                }
+                let len = t.value.len();
+                if len == 0 || len > 256 {
+                    continue;
+                }
+                let e = seen.entry((t.tag, len)).or_insert_with(|| (vec![[0u64; 4]; len], 0));
+                e.1 += 1;
+                for (i, b) in t.value.iter().enumerate() {
+                    e.0[i][usize::from(*b) / 64] |= 1u64 << (u32::from(*b) % 64);
+                }
+            }
+        }
+    }
+
+    if seen.is_empty() {
+        eprintln!("no AWDL frames");
+        return;
+    }
+
+    println!("Which bytes ever vary, per tag and per TLV length.\n");
+    println!("  .  one value in every sample -- never varied");
+    println!("  2-9  that many distinct values      +  ten or more");
+    println!();
+
+    for ((tag, len), (offs, n)) in &seen {
+        let name = libawdl::tlv::tag_name(*tag);
+        println!("tag {tag:<3} len {len:<4} n={n:<7} {name}");
+
+        let mut map = String::new();
+        for o in offs {
+            let d: u32 = o.iter().map(|w| w.count_ones()).sum();
+            map.push(match d {
+                0 | 1 => '.',
+                2..=9 => char::from(b'0' + d as u8),
+                _ => '+',
+            });
+        }
+        // Wrapped at 64 with an offset ruler, so a run of dots can be read back to a
+        // byte offset without counting on screen.
+        for (row, chunk) in map.as_bytes().chunks(64).enumerate() {
+            println!("  {:>4}  {}", row * 64, std::str::from_utf8(chunk).unwrap());
+        }
+
+        // The constant runs, with their values -- this is the part that can be acted on.
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut start: Option<usize> = None;
+        for (i, o) in offs.iter().enumerate() {
+            let d: u32 = o.iter().map(|w| w.count_ones()).sum();
+            match (d <= 1, start) {
+                (true, None) => start = Some(i),
+                (false, Some(s)) => {
+                    runs.push((s, i));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            runs.push((s, offs.len()));
+        }
+        for (a, b) in &runs {
+            let vals: Vec<String> = (*a..*b)
+                .map(|i| {
+                    let set = &offs[i];
+                    for v in 0..=255u32 {
+                        if set[v as usize / 64] & (1u64 << (v % 64)) != 0 {
+                            return format!("{v:02x}");
+                        }
+                    }
+                    "--".to_string()
+                })
+                .collect();
+            println!("        constant {a}..{} = {}", b - 1, vals.join(" "));
+        }
+        println!();
+    }
+
+    println!("Constant across THIS corpus is not constant across the protocol. These");
+    println!("captures come from a few Apple models, one Pixel and one Pi -- a field every");
+    println!("one of them happens to share reads as padding here and is not. Weigh a run of");
+    println!("dots by its n: 37,829 samples is evidence, 66 is barely a hint.");
 }
 
 #[cfg(test)]

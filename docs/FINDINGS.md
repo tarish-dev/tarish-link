@@ -2446,6 +2446,110 @@ Until then, the operational consequence is unchanged and is the useful part: **t
 adopted, be transmitting before the peer arrives.** Losing an election we never get to
 contest is not a defect in `beats()`.
 
+## 47. ★ `awdl bytemap` — which opaque bytes are gaps and which are just zero
+
+`coverage` splits bytes into named and opaque, and **opaque conflates two situations that
+want completely different work**:
+
+- a byte taking 44 values across the corpus is carrying information we do not understand.
+  Copying Apple's value is a guess that will be wrong on some device.
+- a byte that has been `0x00` in all 37,829 frames needs no understanding to reproduce.
+
+Counting both as opaque makes the 2,003,899-byte figure a worse work queue than it looks.
+`awdl bytemap captures/*.pcap [tag]` measures the difference: per tag and per TLV length,
+how many distinct values each byte offset ever took.
+
+### The trap this immediately walked into — constant is NOT padding
+
+Tag 24's map reads
+
+```
+tag 24  len 40   n=37829   Election Parameters v2
+     0  ++++++++++++++2.3...+3..+3..........++2.
+        constant 26..35 = 00 00 00 00 00 00 00 00 00 00
+```
+
+A ten-byte run of zeros looks like a reserved block to be labelled and forgotten. **It is
+not.** Bytes 26–27 are the high half of `self_metric`, a fully named `u32` that never
+exceeds 65535 — and 22–23 are the high half of `master_metric` for the same reason. Only
+28–35 are the actual `unknown_28` block.
+
+So a constant run is evidence *only for bytes coverage already calls opaque*, and only
+after checking it does not straddle a named field. Reclassifying on constancy alone would
+have quietly relabelled the high halves of two of the most important fields in the protocol
+as padding. The u32 fields of a protocol carrying small numbers are mostly zeros, and zeros
+are what this measurement finds.
+
+### Tag 16 Arpa, fully accounted — Apple's host name is a UUID v4
+
+```
+tag 16  len 40   n=10038   Arpa
+     0  ..++++++++.++++..+++.4+++.++++++++++++..
+        constant 0..1 = 03 24        constant 10..10 = 2d
+        constant 15..16 = 2d 34      constant 20..20 = 2d
+        constant 25..25 = 2d         constant 38..39 = c0 0c
+```
+
+Every byte of that is now explained. `0x24` = 36, the length of a UUID string; four `2d`
+dashes at offsets 10, 15, 20, 25 are exactly the `8-4-4-4-12` positions counting from the
+string start at offset 2; offset 16 is constant `34` = ASCII `'4'`, the **version nibble of
+a UUID v4**; offset 21 takes exactly four values, which is the variant nibble (`8 9 a b`);
+and `c0 0c` is a DNS compression pointer to offset 12. 1 + 1 + 36 + 2 = 40.
+
+The prediction was made from the dash positions; decoding the bytes confirmed it:
+
+```
+14ca8109-4388-4ebc-925f-27b8a1ea8c97      02:3b:e8:75:9c:03
+5aaca6e6-f79c-41bd-939f-4c8b28715f47      8a:c3:f7:4b:ce:de
+24b2a2df-68d6-4892-8d05-851dfa216349      be:35:be:c9:05:1f
+```
+
+Version nibble `4` in all three, variants `9`, `9`, `8` — which is why offset 21 takes
+exactly four values and not sixteen. Apple's AWDL host name is `<UUID v4>.local`.
+
+It follows that **the host name is as good an identifier as the MAC address, and no
+better**: a v4 UUID is random, so this is a rotating pseudonym rather than anything about
+the device. Nothing here survives an AWDL restart, which is consistent with finding 46,
+where a phone came back with a new address after a toggle.
+
+### Tag 7 is a standard element we are barely crediting
+
+```
+tag 7   len 8    n=900     constant 0..7  = 00 00 ce 11 1b ff 00 00
+tag 7   len 9    n=29144   only offsets 2 and 4 vary, 2 values each
+tag 7   len 20   n=7195    constant 0..19 = 00 00 6f 88 1b ff ff 00 00 00 ...
+```
+
+Two of its three shapes are **completely invariant** and the third varies in two bytes.
+`coverage` credits it 5 named bytes of 20 and calls the other 227,201 opaque — but this is
+an IEEE 802.11 HT Capabilities element, the same situation as tag 17's VHT, which finding
+23 resolved by reading 802.11-2020 rather than reverse engineering anything. Tag 7 is the
+cheapest large win on the board: spec work, no guessing, 227,201 bytes.
+
+### The corpus contains our own transmissions, and they read as certainty
+
+```
+tag 16  len 10   n=2509    constant = 03 06 "tarish"      c0 0c
+tag 16  len 15   n=900     constant = 03 0b "raspberrypi" c0 0c
+tag 12  len 13   n=7553    constant 0..12 = 04 03 51 41 00 95 00 00 c0 ca b0 60 4c
+```
+
+That last one ends in `c0 ca b0 60 4c` — the ALFA's own MAC. Those 7,553 samples are our
+beacon, and of course they never vary: we send the same bytes every time. **A shape that is
+invariant only because we generate it is evidence about us, not about AWDL**, and any
+confidence drawn from its sample count is circular. The same applies to the `tarish` and
+`raspberrypi` host names.
+
+Splitting the corpus by sender before trusting an invariant is the obvious fix and is not
+done yet.
+
+### What it cannot tell you
+
+Constant across this corpus is not constant across the protocol. These captures come from a
+handful of Apple models, one Pixel and one Pi. A field every one of them happens to share
+reads as padding here and is not. Weigh a run of dots by its `n`: 37,829 samples is
+evidence, tag 35's 66 is barely a hint.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
