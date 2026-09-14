@@ -1356,7 +1356,15 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         // place a slot boundary on our own clock -- so a short receive before each decision
         // is what turns "our phase" into "theirs". The timeout is deliberately small: this
         // is a poll between transmissions, not a receive loop.
-        if follow {
+        // ALWAYS LISTEN. Following is about whose phase we AIM at; listening is how we
+        // learn anything at all, including the one thing every election experiment here is
+        // trying to measure.
+        //
+        // This block was gated behind --follow, and a run without it reported "adopted by 0
+        // peer(s)" while the capture of the same run showed two Apple devices naming us
+        // master in 1,223 frames. The counter was not wrong, it was blind — which is worse,
+        // because a zero reads as a measurement.
+        {
             // A SHORT poll, and the reason is arithmetic. We stamp a frame when `rx`
             // returns, not when it reached the antenna, so the poll interval is injected
             // straight into every anchor as quantisation. At 20 ms against a 65 ms slot
@@ -1435,6 +1443,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             let usable = cluster.clock.is_usable();
             if usable != adopted {
                 adopted = usable;
+                if follow {
                 eprintln!(
                     "  {} cluster clock: master {:?}, slots {:?}, spread {:?} us",
                     if usable { "ADOPTED" } else { "DROPPED (estimate degraded)" },
@@ -1442,6 +1451,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                     cluster.master_slots,
                     cluster.clock.spread_us()
                 );
+                }
             }
         }
 

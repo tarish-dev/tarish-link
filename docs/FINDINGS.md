@@ -3370,6 +3370,88 @@ data frames, highest sequence 892 — which matches what that analysis found.
 What *is* suspect is every `AWDL data` count `awdl stats` has printed, across every capture,
 for as long as the command has existed.
 
+## 59. ★★ THE POSITIVE CONTROL — two iPhones adopted us as master, 1,223 frames
+
+The first unambiguous adoption in this project's record, and the first ever run with all four
+preconditions actually met: a verified-empty starting room, a correct cluster clock, a full
+frame rate, and known peer metrics.
+
+Capture: `captures/fh-adopt.pcap`.
+
+### The run
+
+We transmit at metric 600 into a room measured empty — six consecutive 8-second windows,
+zero AWDL frames. Then, 180 seconds in, the operator switches AirDrop on, on both iPhones.
+
+```
+00:c0:ca:b0:60:4c  MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM   us, master throughout
+22:dd:ca:10:6b:b7  ..................*fffffffffff   silent 18 buckets, arrives, FOLLOWS
+da:da:16:dd:96:92  ..................*fffffffffff   same
+```
+
+That is the forming signature of finding 46, unmistakable at 10-second buckets: silent,
+transition, following.
+
+| peer | its metric | frames naming **us** master |
+|---|---|---|
+| `22:dd:ca:10:6b:b7` | 537 | **981** |
+| `da:da:16:dd:96:92` | 540 | **242** |
+
+**1,223 frames against a pre-registered threshold of 20.** Two real Apple devices, both with
+metrics inside the measured Apple range, both deferring to our 600 and following us as the
+root of the cluster.
+
+### What it establishes
+
+**We can win an AWDL election against Apple hardware.** Not synchronise to one — be elected
+by it. OWL cannot: `AWDL_ELECTION_METRIC_INIT 60` with a counter that never moves makes an
+OWL node a structural follower. libmosey sends metric 1.
+
+**The operational rule from finding 46 is confirmed and is the whole story**: a device
+*entering* a room adopts whoever is already claiming master there. Be transmitting before the
+peer arrives and a higher metric is honoured. Three valid trials in finding 57 show the same
+metric against a *settled* cluster does nothing at all. Same frames, same metric, opposite
+outcome — the only variable is who was there first.
+
+**And it is the positive control the reserved-byte experiment needs.** A perturbation
+experiment requires a condition where the unperturbed case reliably succeeds, or a refusal
+means nothing. This is that condition, and it is now reproducible on demand.
+
+### ★ The live counter said zero, and it was blind rather than wrong
+
+The beacon reported `adopted by 0 peer(s), 0 frame(s) naming us master` for the run whose
+capture contains 1,223 such frames.
+
+The receive path — drain, parse, `cluster.observe` — was gated behind `--follow`, and this
+run had no `--follow` because there was nothing to follow in an empty room. So we never
+listened, never observed, and counted nothing.
+
+**A zero reads as a measurement.** "We heard nothing" and "we were not listening" are the
+same number, and that is the second time tonight the same shape of confusion has cost
+something: finding 55's *"the peer ignored us"* versus *"the peer never heard us"*.
+
+Listening is now unconditional. Following is about whose phase we **aim** at, which is a
+separate decision and still `--follow`'s job.
+
+### Method notes worth keeping
+
+**Three runs were lost to cue latency before this one worked.** There is no push
+notification, so a "switch them on now" message reaches the operator whenever they next look,
+and a 170-second window cannot absorb that. The fix was to stop cueing: open a **300-second**
+window and ask for an off-wait-on cycle at any point inside it. The timeline then shows when
+it happened, so the run is interpretable regardless of latency, and the operator is not
+racing a clock they cannot see.
+
+**"AirDrop off" is not instant but is fast.** The phones kept transmitting for a few seconds
+after being switched off — a 12-second pre-capture caught 146 frames of tail and read as "the
+room is not empty". Six 8-second windows afterwards were all zero. Sample until quiet rather
+than sampling once.
+
+**AWDL addresses rotate per session, and one device does not.** The same phone appeared as
+`7a:db:23:79:5a:0e`, then `96:3e:b7:87:06:e3`, then `22:dd:ca:10:6b:b7` across three
+sessions, while `da:da:16:dd:96:92` has been stable all night and across the earlier 2x2.
+Anything keyed on a peer address must tolerate the first and must not assume the second.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
