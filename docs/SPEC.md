@@ -283,11 +283,16 @@ five, one tie going to whoever was on the air first, and in one round a device t
 *after* the incumbent displaced it on entry by carrying a higher value. Power-on order does
 not decide it.
 
-**Every join starts at 65 and climbs** to a settled value seconds later — ten joins out of
-ten. The settled value differs between power cycles of the same handset (517, 536, 510, 518,
-529), so it is computed at join time rather than being a device constant, and 65 looks like a
-floor for a node that has not earned anything yet. A transmitter that announces its full
-metric in its first frame is doing something no Apple device does. Finding 76.
+**The metric periodically drops to 65 and re-climbs** — ten times across fifteen minutes for
+two devices. This is NOT a join ramp: `self_counter` never resets at any of those events
+(`72:01` ran 3571→3593, `e6:a6` 2234→2278, both monotonic), so the node's AWDL state
+continues uninterrupted while only the metric falls to its floor. Toggling AirDrop off and on
+does not reset the counter either.
+
+The value it climbs back to differs each time for the same handset (517, 536, 510, 518, 529),
+so it is recomputed from something that varies. 65 is the floor, and it sits close to the 60
+OWL hardcodes. A transmitter that announces one constant metric forever is doing something no
+Apple device does. Finding 76.
 
 ### Tag 7 — HT Capabilities (7–20 bytes)
 

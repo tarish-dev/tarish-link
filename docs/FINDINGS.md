@@ -4556,34 +4556,44 @@ Five for five, with the one tie broken by incumbency. Round 1 is the interesting
 already up and claiming master, B joined afterwards carrying 523 against A's 517, and **took
 mastership on entry**. So Apple devices displace each other routinely and without ceremony.
 
-### The metric is not static — it starts at 65 and climbs
+### The metric is not static — it drops to 65 and re-climbs, WITHOUT rejoining
 
-Every join, without exception, ten out of ten:
+**Corrected.** The first version of this finding called this a join ramp: "every device
+announces 65 for its first few seconds on the air, then settles." That reading came from
+noticing the resets near the operator's power cycles and assuming the two were the same
+event. The operator noticed the arithmetic did not work — four rounds were performed, five
+ramp cycles appeared — and checking the tenure counter settled it.
+
+**`self_counter` never resets at any of the ten metric-65 events:**
 
 ```
-frame 1     e6:a6   65  ->  frame 18    517
-frame 28    72:01   65  ->  frame 63    523
-frame 482   72:01   65  ->  frame 519   510
-frame 525   e6:a6   65  ->  frame 579   536
-frame 891   e6:a6   65  ->  frame 905   510
-frame 909   72:01   65  ->  frame 965   510
-frame 1308  72:01   65  ->  frame 1349  516
-frame 1378  e6:a6   65  ->  frame 1421  518
-frame 1746  e6:a6   65  ->  frame 1762  529
-frame 1776  72:01   65  ->  frame 1835  533
+                 before            after
+72:01  frame 482    523#3582   ->   65#3582
+72:01  frame 909    510#3586   ->   65#3588
+72:01  frame 1308   510#3588   ->   65#3590
+72:01  frame 1776   516#3592   ->   65#3593
+e6:a6  frame 525    517#2237   ->   65#2239
+e6:a6  frame 891    536#2250   ->   65#2252
+e6:a6  frame 1378   510#2263   ->   65#2265
+e6:a6  frame 1746   518#2276   ->   65#2278
 ```
 
-A device announces **65** for its first few seconds on the air, then settles to a value in the
-familiar 510-541 band. The settled value differs between joins of the *same handset* (`e6:a6`
-was 517, 536, 510, 518, 529 across five power cycles), so it is computed at join time from
-something that varies — not a device constant.
+Monotonic throughout: `72:01` runs 3571 → 3593 and `e6:a6` runs 2234 → 2278 across the whole
+capture. A device that had genuinely left AWDL and rejoined would restart its tenure. These
+did not. **The metric falls to a floor of 65 and climbs back while the node's AWDL state
+continues uninterrupted.**
 
-**65 is close to the 60 OWL hardcodes**, which is probably not a coincidence: it looks like a
-floor value for a node with nothing to recommend it yet.
+Two consequences worth keeping:
 
-Practical consequence for every earlier finding: **every "incumbent metric" quoted in findings
-75 and earlier was a snapshot of a moving value**, taken whenever that capture happened to
-start.
+- **Toggling AirDrop off and on does not reset AWDL tenure.** The counter survived every one
+  of the operator's power cycles, so whatever the UI switch does, it is not a teardown of the
+  node's election state.
+- **The drop is periodic and not tied to joining.** Ten events across roughly fifteen minutes
+  for two devices. One of them (frame 1776) happened with no operator action at all.
+
+The settled value also differs each time the same handset re-climbs — `e6:a6` reached 517,
+536, 510, 518, 529 — so it is recomputed from something that varies, and 65 is the floor it
+recomputes from. That 65 sits close to the 60 OWL hardcodes remains suggestive.
 
 ### The asymmetry, which is now the real question
 
