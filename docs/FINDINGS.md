@@ -3989,6 +3989,53 @@ And it is one device family: two iPhones on iOS v10.0. A Mac or an older device 
 and the corpus cannot say because **every device in it sends tag 24** — which is precisely
 why this needed a transmitter to find out.
 
+## 68. Tag 6 is optional for election — and its structure only partly yields
+
+### Tag 6 is not required to be elected
+
+`libawdl` sends **no tag 6 at all** — `state_tlvs` is documented as "the measured PSF set
+minus tag 6, which we cannot fill". And peers have adopted us **146, 241 and 714** times
+across the day.
+
+So Service Parameters is **optional for the election**, which is the exact opposite of tag 24
+(finding 67, where a missing or malformed one disqualifies you entirely). Two tags, both
+carried by every Apple device, and only one of them is load-bearing for mastership.
+
+**This also means the `--garbage` probe cannot test tag 6.** The instrument measures
+adoption, and adoption does not consult this tag. Answering "does a wrong tag 6 matter"
+requires a *discovery* measure — does the peer list us in AirDrop, does it query us over mDNS
+— which is a different experiment from the one built today. A plan to probe it was proposed
+and withdrawn for exactly this reason.
+
+### What the corpus does say about its structure
+
+```
+len  9:  00 00 00 | 58 01 | 00 00 | 00 00 00 00
+len 13:  00 00 00 | ab 00 | 20 00 | 18 80 20 40 02 10
+len 15:  00 00 00 | ae 00 | 30 00 | 18 88 01 20 40 02 02 10
+```
+
+**The u16 at offset 3 is non-decreasing in 100% of 46,491 transitions**, and constant within
+a capture for nearly every sender — `02:3b:e8` holds 11801 across 267 frames, `22:dd:ca`
+holds 1180 across 985, OWL sends 0. It moves rarely (11845 to 11849 in one capture). That is
+the profile of a **generation counter for the advertised service set**: it changes when the
+services change, not per frame.
+
+**The u16 at offset 5 is not a length or a popcount.** `0x0030` maps to tails of both 6 and 8
+bytes and `0x0000` to tails of 2, 3 and 4. Tail length tracks popcount for 0, 1 and 3 set
+bits and breaks at 2, 4 and 5.
+
+A Bloom-filter reading — `[3 reserved][u32 bitmask][one byte per set bit]` — was tested
+against the whole corpus and **refuted**: 5,438 hits against 41,159 misses, with the
+values-minus-popcount difference spread across -9 to +3. It is not that shape.
+
+### Where that leaves it
+
+Finding 25's assessment stands: the field boundaries are partly visible, the contents are
+not, and it does not matter for anything we currently do. The generation counter is the one
+piece with a plausible name, and naming it in `coverage` would need a discovery experiment to
+show a value can be chosen — which does not exist yet.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
