@@ -45,7 +45,7 @@ command's output, so adding captures improves it rather than dating it.
 
 ## How much of this do we actually understand?
 
-**84.9% of the control-plane bytes, and the other 15.1% we copy.** Measured over the whole
+**89.4% of the control-plane bytes, and the other 10.6% we copy.** Measured over the whole
 corpus — 40 AWDL captures, 37,829 action frames, 14,375,146 TLV bytes — not estimated. It
 was 63% before the decoding pass in findings 21-25.
 
@@ -74,9 +74,9 @@ is cargo-culting with no signal when it is wrong.
 | 17 | 802.11 Container | 100% | 14/14 | 0 | a standard VHT Capabilities element — finding 23 |
 | 18 | Channel Sequence | 100% | 41/41 | 0 | |
 | 21 | Version | 100% | 2/2 | 0 | |
-| 16 | Arpa | 96.9% | 9/10 | 13,447 | the flags byte is not named |
-| 4 | Synchronization Parameters | 93.2% | 68/73 | 189,145 | the flags word, byte 28, the trailing pair — finding 21 |
-| 5 | Election Parameters | 85.7% | 18/21 | 113,487 | |
+| 16 | Arpa | **100%** | 40/40 | 0 | UUID v4 host name (f47); flags byte **proven ignored** (f63) |
+| 4 | Synchronization Parameters | 97.3% | 71/73 | 129,488 | only the flags word left; byte 28 and the trailing pair **proven ignored** (f63) |
+| 5 | Election Parameters | **100%** | 21/21 | 0 | `reserved_4` and the tail **proven ignored** (f63) |
 | 24 | Election Parameters v2 | 90.0% | 36/40 | — | 32..36 proven ignored; **28..32 is a u32 the peer READS** — finding 65 |
 | 12 | Data Path State | 77.1% | 35/47 | 309,702 | extended flags, UMI options and one unidentified u32 — finding 49 |
 | 7 | HT Capabilities | 82.0% | 6/8 | 74,478 | only the two leading bytes — the "tail" was a truncated MCS set, finding 48 |

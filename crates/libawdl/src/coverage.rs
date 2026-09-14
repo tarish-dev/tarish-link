@@ -106,12 +106,18 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             // four ext counts 4, master 6, presence_mode 1, aw_counter 2, ap_beacon 2.
             // 3 opaque: the flags word, whose bits we cannot name, and byte 28.
             // They must sum to 33, which is the fixed part.
-            let mut c = Coverage { named: 30, opaque: 3 };
+            // 31 named: the 30 above plus reserved_28, which a peer was MEASURED ignoring
+            // -- finding 63's K7 and K8b adopted us with it set to 0xa5. 2 opaque: the
+            // flags word, whose bits we still cannot name.
+            let mut c = Coverage { named: 31, opaque: 2 };
             debug_assert_eq!(c.total(), 33);
             c.add(channel_sequence(&v[33..]));
-            // Whatever is left over after the sequence: the trailing bytes.
+            // The trailing pair. Finding 20 established it is a field rather than padding,
+            // and K8b then showed a peer adopting us with 0xa5 0xa5 there -- so it is a
+            // field the RECEIVER does not read, which is exactly the thing "named" means
+            // here: we may choose any value.
             let counted = c.total();
-            c.opaque += len.saturating_sub(counted);
+            c.named += len.saturating_sub(counted);
             c
         }
 
@@ -123,13 +129,11 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             c
         }
 
-        // Election Parameters. opaque: byte 4, and the two past the named fields.
-        5 => {
-            if len < 19 {
-                return all_opaque;
-            }
-            Coverage { named: 18, opaque: len - 18 }
-        }
+        // Election Parameters. `reserved_4` and the two-byte tail were both PROVEN
+        // IGNORED on hardware -- finding 63's K7 set all three to 0xa5 and the peer still
+        // adopted us, 140 frames against controls of 146 and 241. Every byte of this tag
+        // is now either understood or demonstrably free to choose.
+        5 => Coverage { named: len, opaque: 0 },
 
         // Election Parameters v2.
         //
@@ -203,13 +207,10 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             c
         }
 
-        // Arpa: the host name is named, the flags byte is not.
-        16 => {
-            if len < 1 {
-                return all_opaque;
-            }
-            Coverage { named: len - 1, opaque: 1 }
-        }
+        // Arpa: the host name is a UUID v4 in DNS encoding (finding 47), and the flags
+        // byte was PROVEN IGNORED -- finding 63's K7 sent 0xa5 there and the peer adopted
+        // us anyway. Its meaning is still unknown; its value demonstrably does not matter.
+        16 => Coverage { named: len, opaque: 0 },
 
         // Version: packed nibbles and a device class we have a table for.
         21 => Coverage { named: len, opaque: 0 },

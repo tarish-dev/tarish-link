@@ -18,8 +18,10 @@ use libawdl::coverage::{is_decoded, of_tlv};
 fn sync_params_have_five_opaque_bytes_left() {
     let c = of_tlv(4, fixture_sync::APPLE_ASSOCIATED);
     assert_eq!(c.total(), 73);
-    assert_eq!(c.opaque, 5, "the flags word, byte 28, and the trailing pair");
-    assert_eq!(c.named, 68);
+    // Was 5. reserved_28 and the trailing pair were proven ignored on hardware, leaving
+    // only the flags word -- findings 63 and 65.
+    assert_eq!(c.opaque, 2, "the flags word, and only that");
+    assert_eq!(c.named, 71);
 
     let op = of_tlv(18, fixture_sync::APPLE_TAG18);
     assert_eq!(op.opaque, 0, "OpClass qualifiers are operating classes");
