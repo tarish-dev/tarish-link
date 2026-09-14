@@ -669,7 +669,15 @@ fn main() {
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             let Some(tag) = args.get(3).and_then(|s| s.parse::<u8>().ok()) else { usage() };
-            dump_tlv(cap, tag, args.get(4).map(|s| s.as_str()));
+            // `--frames A-B` narrows to a window, which is what turns this from "what
+            // values exist" into "what changed AT this moment". The metric-reset events in
+            // finding 76 are instants; the question they raise is which OTHER bytes move
+            // with them, and that needs a before-window and an after-window to diff.
+            let window = args.iter().position(|a| a == "--frames")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.split_once('-'))
+                .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            dump_tlv(cap, tag, args.get(4).filter(|s| !s.starts_with("--")).map(|s| s.as_str()), window);
         }
         _ => usage(),
     }
@@ -823,7 +831,7 @@ fn profile<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
 /// The count is printed so a one-off can be told from the steady state, and the first
 /// sighting is what gets dumped — a value seen once in 3000 frames is more likely a
 /// transient than a specimen worth building against.
-fn dump_tlv<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, tag: u8, from: Option<&str>) {
+fn dump_tlv<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, tag: u8, from: Option<&str>, window: Option<(u64, u64)>) {
     use std::collections::BTreeMap;
 
     // Keyed on the bytes so identical values collapse; the value keeps enough to judge
@@ -838,8 +846,17 @@ fn dump_tlv<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, tag: u8, fro
     let want = from.map(|m| m.to_ascii_lowercase());
 
     while let Ok(pkt) = cap.next_packet() {
-        frame += 1;
+        // COUNTED THE SAME WAY `read` COUNTS, which it was not before: this incremented on
+        // every packet in the file, so "first at frame 13045" and `read`'s "#1776" were
+        // different units and a frame window copied from one tool selected the wrong part
+        // of the capture in the other. AWDL frames only, matching `awdl_n`.
         let Seen::Awdl { dot11, af, .. } = classify(pkt.data) else { continue };
+        frame += 1;
+        if let Some((lo, hi)) = window {
+            if frame < lo || frame > hi {
+                continue;
+            }
+        }
         let src = dot11.src.to_string().to_ascii_lowercase();
         if let Some(w) = &want {
             if &src != w {

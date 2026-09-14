@@ -4621,6 +4621,84 @@ finding. It is the next thing to try.
 
 ---
 
+## 77. ★★★ The metric floor of 65 is an AW-CLOCK RESTART — found by diffing the other bytes
+
+Finding 76 established that a device's metric periodically drops to 65 and returns, without
+its tenure counter resetting. What it could not say was *what* had happened at that instant.
+
+The operator's suggestion was to stop staring at the metric and diff everything else across
+the event. That answered it in one pass.
+
+### What moves, and what does not
+
+`72:01` across its reset at frame 1776, and the same picture at two other events:
+
+| field | before | after | |
+|---|---|---|---|
+| tag 7, all of it | `00 00 6f 00 1f ff ff 00 00` | identical | radio capability, static |
+| tag 12 `extended_flags` | `0x117d` | `0x117d` | unchanged |
+| tag 12 `master_counter` | 2274 | 2279 | **continues** |
+| tag 12 `clock_ms` | 32817 | **164** | **RESET** |
+| tag 12 `aw_counter` | 1992 | **0** | **RESET** |
+| tag 12 4th `u32` | 8011 | 8025 | **continues** |
+| tag 24 `self_metric` | 516 | **65** | the event itself |
+| tag 24 `self_counter` | 3592 | 3593 | **continues** |
+
+Three for three across both handsets:
+
+```
+72:01  frame 1308   clock_ms 25490 -> 190    aw_counter 1736 -> 4
+e6:a6  frame 1746   clock_ms 31086 -> 356    aw_counter 2176 -> 12
+72:01  frame 1776   clock_ms 32817 -> 164    aw_counter 1992 -> 0
+```
+
+The two fields that reset are the two that measure the **current availability-window
+session** — and they agree with each other, 1992 AWs x 16.384 ms = 32.6 s against a
+`clock_ms` of 32817. The two that survive, `master_counter` and the 4th `u32`, measure
+something longer-lived than one session.
+
+**So the metric floor is not about joining, and not about identity. The device has restarted
+its AW timing state while keeping its election state.**
+
+### The metric is a step, not a ramp
+
+Sampling `72:01` after the reset:
+
+```
+frame 1776   metric 65
+frame 1809   metric 65
+frame 1842   metric 533   <- and flat from here
+```
+
+It sits at the floor while the clock is young, then switches to its computed value in one
+move. Finding 76 called this "climbing", which was an artifact of sampling across the step.
+
+### What this buys
+
+**A meaning for the metric, for the first time.** It is gated on the age of the current AW
+session: a node whose timing has just restarted advertises 65 — it is not yet a credible
+timing anchor — and advertises its real value once established. That is exactly what a
+master-election metric in a synchronisation protocol *should* encode, and nothing in any
+capture could have shown it, because it only appears at the moment of a restart.
+
+**New information about tag 12's 4th `u32`** — the one finding 69 proved the receiver
+ignores. It survives an AW-clock restart and keeps incrementing, so it belongs with
+`master_counter` rather than with the session clock beside it. Ignored by the receiver, still
+clearly meaningful to the sender.
+
+**A sharper version of the asymmetry in finding 76.** We advertise a constant metric forever,
+from our first frame, with a clock that never restarts. No Apple device behaves like that.
+Whether a peer judges us on it is untested — but "imitate the floor-then-step behaviour" is
+now a concrete, cheap change with a mechanism behind it rather than a guess.
+
+### Method note
+
+`awdl tlv` grew a `--frames A-B` window for this, and its frame counter was wrong: it counted
+every packet in the file while `read` counts AWDL frames only, so a window copied from one
+tool selected the wrong part of the capture in the other. Both now count AWDL frames.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

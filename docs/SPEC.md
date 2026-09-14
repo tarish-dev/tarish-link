@@ -283,16 +283,23 @@ five, one tie going to whoever was on the air first, and in one round a device t
 *after* the incumbent displaced it on entry by carrying a higher value. Power-on order does
 not decide it.
 
-**The metric periodically drops to 65 and re-climbs** — ten times across fifteen minutes for
-two devices. This is NOT a join ramp: `self_counter` never resets at any of those events
-(`72:01` ran 3571→3593, `e6:a6` 2234→2278, both monotonic), so the node's AWDL state
-continues uninterrupted while only the metric falls to its floor. Toggling AirDrop off and on
-does not reset the counter either.
+**The metric drops to a floor of 65 whenever the device restarts its availability-window
+clock**, then steps to its computed value once established. Not a join ramp and not gradual:
+at every such event tag 12's `clock_ms` and `aw_counter` reset to zero while `master_counter`,
+tag 12's 4th `u32` and tag 24's `self_counter` all keep incrementing — so the node restarts
+its *timing* state and keeps its *election* state. Measured three times across two handsets:
 
-The value it climbs back to differs each time for the same handset (517, 536, 510, 518, 529),
-so it is recomputed from something that varies. 65 is the floor, and it sits close to the 60
-OWL hardcodes. A transmitter that announces one constant metric forever is doing something no
-Apple device does. Finding 76.
+```
+72:01  clock_ms 25490 -> 190    aw_counter 1736 -> 4     metric 510 -> 65
+e6:a6  clock_ms 31086 -> 356    aw_counter 2176 -> 12    metric 518 -> 65
+72:01  clock_ms 32817 -> 164    aw_counter 1992 -> 0     metric 516 -> 65
+```
+
+So the metric encodes **how established this node's timing is** — a node whose clock just
+restarted is not yet a credible anchor and says so. The value it steps to differs each time
+for the same handset (517, 536, 510, 518, 529). Toggling AirDrop off and on does not reset
+any of it. A transmitter that announces one constant metric forever, with a clock that never
+restarts, is doing something no Apple device does. Findings 76, 77.
 
 ### Tag 7 — HT Capabilities (7–20 bytes)
 
