@@ -90,6 +90,19 @@ document with a real control". It had a converse. That is not a control.
    adoptions where its capture held 2,123 from three peers. A passive `tcpdump` has no such
    conflict of interest and was right every time. Finding 70.
 
+13. **Check the AirDrop mode, not just that the phone is awake — iOS reverts to Contacts.**
+   An iPhone left alone returns to *Contacts Only* on its own, and in that state an idle
+   handset advertises no AWDL at all: a 20-second capture of a room containing two unlocked
+   phones came back with **zero** AWDL frames. That is indistinguishable from the phones
+   being switched off, and it is the commonest reason a window opens onto silence.
+
+   It does **not** invalidate an election result measured under it. AirDrop mode is an
+   application-layer policy about who may send you a file; election is AWDL link-layer, and
+   every outcome here is counted in frames where a peer named a master in its own tag 24. A
+   phone transmitting AWDL in Contacts mode is making the same election decision. The
+   preconditions that matter are the ones already enforced — peers transmitting, and a peer
+   entering — and both are read off the air rather than off a screen.
+
 ## The harness
 
 `scratchpad/trial.sh` — `LABEL=X FLAGS="..." ./trial.sh`. Four failure modes are designed
