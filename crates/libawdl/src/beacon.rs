@@ -124,13 +124,39 @@ pub struct Garbage {
     pub t16: bool,
     /// Tag 24: the eight-byte `unknown_28` block. The largest single group, 302,632 opaque
     /// bytes, and the cleanest — eight contiguous bytes, zero in every frame measured.
+    ///
+    /// **Apple reads these** — finding 63. Kept as a control rather than as a candidate.
     pub t24: bool,
+    /// Disturb a single byte of tag 24's block instead of all eight. Overrides `t24`.
+    pub t24_probe: Option<T24Probe>,
 }
 
-/// The fill value. Recognisable on purpose: a capture has to confirm our own frames really
-/// carried it, because an encoder that quietly drops the change would make the experiment
-/// look like a success.
+/// The default fill value. Recognisable on purpose: a capture has to confirm our own frames
+/// really carried it, because an encoder that quietly drops the change would make the
+/// experiment look like a success.
 pub const GARBAGE_BYTE: u8 = 0xa5;
+
+/// Which bytes of tag 24's eight-byte block to disturb, and with what.
+///
+/// **Why this granularity exists.** Finding 63 established that filling all eight bytes with
+/// `0xa5` makes an Apple peer refuse to adopt us — 0 against controls of 146 and 241. One
+/// value at one width cannot distinguish two very different explanations:
+///
+/// - a **strict zero check**: any non-zero byte anywhere in 28..36 invalidates the frame
+/// - a **field we have mislabelled**: `0xa5a5…` happens to mean something, and other values
+///   would pass
+///
+/// The first says "send zeros and move on". The second says there is a real field there
+/// worth identifying. Setting **one byte** to **0x01** separates them: if a single bit still
+/// kills adoption it is a strict check, and if adoption survives then `0xa5` was hitting
+/// something specific and the block can be bisected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct T24Probe {
+    /// Offset within `unknown_28`, 0..8.
+    pub offset: usize,
+    /// The value to write there. Everything else in the block stays zero.
+    pub value: u8,
+}
 
 impl Garbage {
     /// `"t24"`, `"t4,t24"`, `"all"`. Returns `None` for an unrecognised group rather than
@@ -138,8 +164,12 @@ impl Garbage {
     pub fn parse(spec: &str) -> Option<Garbage> {
         let mut g = Garbage::default();
         for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            if let Some(p) = Garbage::parse_probe(part) {
+                g.t24_probe = p.t24_probe;
+                continue;
+            }
             match part {
-                "all" => g = Garbage { t4: true, t5: true, t16: true, t24: true },
+                "all" => g = Garbage { t4: true, t5: true, t16: true, t24: true, t24_probe: None },
                 "t4" => g.t4 = true,
                 "t5" => g.t5 = true,
                 "t16" => g.t16 = true,
@@ -151,7 +181,19 @@ impl Garbage {
     }
 
     pub fn any(&self) -> bool {
-        self.t4 || self.t5 || self.t16 || self.t24
+        self.t4 || self.t5 || self.t16 || self.t24 || self.t24_probe.is_some()
+    }
+
+    /// `"t24@3=01"` — one byte of tag 24's block, at that offset, set to that value.
+    pub fn parse_probe(spec: &str) -> Option<Garbage> {
+        let rest = spec.strip_prefix("t24@")?;
+        let (off, val) = rest.split_once('=')?;
+        let offset: usize = off.parse().ok()?;
+        if offset >= 8 {
+            return None;
+        }
+        let value = u8::from_str_radix(val.trim_start_matches("0x"), 16).ok()?;
+        Some(Garbage { t24_probe: Some(T24Probe { offset, value }), ..Garbage::default() })
     }
 
     /// Which groups, and how many bytes per frame each one perturbs.
@@ -165,6 +207,9 @@ impl Garbage {
         }
         if self.t16 {
             v.push("t16 flags byte (1B)");
+        }
+        if let Some(p) = self.t24_probe {
+            return format!("t24 unknown_28[{}] = 0x{:02x} (1 byte, rest zero)", p.offset, p.value);
         }
         if self.t24 {
             v.push("t24 unknown_28 (8B)");
@@ -377,7 +422,11 @@ impl Beacon {
             },
             ap_beacon_alignment_delta: 0,
             channel_sequence: Some(self.schedule()),
-            trailing: [0, 0],
+            // Finding 20: these two are a FIELD, not padding, and OWL is the only
+            // implementation that zeroes them. Of every group --garbage can perturb this
+            // is the one most likely to be read, which is exactly why it must actually be
+            // perturbed -- it was not, for a whole hardware trial.
+            trailing: if self.garbage.t4 { [GARBAGE_BYTE; 2] } else { [0, 0] },
         }
     }
 
@@ -408,7 +457,13 @@ impl Beacon {
         }
         tlvs.push((24, {
             let mut e = ElectionParamsV2::claiming(self.addr, self.metric, self.tenure(now_us));
-            if self.garbage.t24 {
+            // A single-byte probe takes precedence: it is the finer instrument and running
+            // both at once would measure neither.
+            if let Some(p) = self.garbage.t24_probe {
+                if p.offset < 8 {
+                    e.unknown_28[p.offset] = p.value;
+                }
+            } else if self.garbage.t24 {
                 e.unknown_28 = [GARBAGE_BYTE; 8];
             }
             e.encode()

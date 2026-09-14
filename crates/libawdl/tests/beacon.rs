@@ -426,6 +426,12 @@ fn garbage_reaches_the_encoded_tlvs() {
     assert_eq!(c4.len(), d4.len(), "the TLV must not change length");
     assert_eq!(c4[..28], d4[..28]);
     assert_eq!(c4[29..33], d4[29..33], "aw_counter and ap_beacon_delta intact");
+    // THE TRAILING PAIR. Asserting only on byte 28 let a half-working --garbage t4 ship:
+    // describe() promised "reserved_28 + trailing pair (3B)" and only one byte was ever
+    // perturbed, which a whole hardware trial then failed to test. A test that checks the
+    // fields it happens to remember is a test that certifies whatever was implemented.
+    assert_eq!(&c4[c4.len() - 2..], &[0, 0], "the control really ends in zeros");
+    assert_eq!(&d4[d4.len() - 2..], &[GARBAGE_BYTE; 2], "and the treatment really does not");
 
     // And selecting one group must not perturb the others.
     let mut only24 = Beacon::new(addr, 149, "QA");
@@ -443,8 +449,59 @@ fn an_unknown_garbage_group_is_refused() {
     use libawdl::beacon::Garbage;
     assert!(Garbage::parse("t24").is_some());
     assert!(Garbage::parse("t4,t24").is_some());
-    assert_eq!(Garbage::parse("all"), Some(Garbage { t4: true, t5: true, t16: true, t24: true }));
+    assert_eq!(
+        Garbage::parse("all"),
+        Some(Garbage { t4: true, t5: true, t16: true, t24: true, t24_probe: None })
+    );
     assert!(Garbage::parse("t99").is_none(), "a typo must not run a weaker experiment");
     assert!(Garbage::parse("t24,nonsense").is_none());
     assert!(!Garbage::parse("").unwrap().any());
+}
+
+/// The single-byte probe: one byte of tag 24's block, everything else left zero.
+///
+/// Finding 63 showed all eight bytes as 0xa5 kills adoption. This exists to tell a strict
+/// zero check from a field we have mislabelled, and it is only meaningful if exactly one
+/// byte moves — so that is what is asserted, byte by byte, on the encoded TLV.
+#[test]
+fn the_t24_probe_disturbs_exactly_one_byte() {
+    use libawdl::beacon::Garbage;
+
+    let addr = [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c];
+    let find = |tlvs: &[(u8, Vec<u8>)], tag: u8| -> Vec<u8> {
+        tlvs.iter().find(|(t, _)| *t == tag).expect("tag present").1.clone()
+    };
+
+    let mut clean = Beacon::new(addr, 149, "QA");
+    clean.metric = 600;
+    let c = find(&clean.mif_tlvs(0), 24);
+    assert_eq!(&c[28..36], &[0u8; 8]);
+
+    for off in 0..8usize {
+        let mut b = Beacon::new(addr, 149, "QA");
+        b.metric = 600;
+        b.garbage = Garbage::parse(&format!("t24@{off}=01")).expect("probe parses");
+        let d = find(&b.mif_tlvs(0), 24);
+
+        assert_eq!(d.len(), c.len(), "length must not change");
+        assert_eq!(c[..28], d[..28], "nothing before the block moved");
+        assert_eq!(c[36..], d[36..], "self_counter intact");
+        for i in 0..8 {
+            let want = if i == off { 0x01 } else { 0x00 };
+            assert_eq!(d[28 + i], want, "block byte {i} with probe at {off}");
+        }
+    }
+}
+
+#[test]
+fn a_malformed_probe_is_refused() {
+    use libawdl::beacon::Garbage;
+    assert!(Garbage::parse("t24@0=01").is_some());
+    assert!(Garbage::parse("t24@7=ff").is_some());
+    assert!(Garbage::parse("t24@8=01").is_none(), "offset past the eight-byte block");
+    assert!(Garbage::parse("t24@x=01").is_none());
+    assert!(Garbage::parse("t24@0").is_none());
+    // The probe must win over the whole-block flag, or a run would measure neither.
+    let g = Garbage::parse("t24,t24@2=01").expect("parses");
+    assert!(g.t24_probe.is_some());
 }

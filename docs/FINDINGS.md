@@ -3726,6 +3726,69 @@ as a rival, a stale competitor, our own transmitter starved by `SO_RCVTIMEO(0)`,
 adoption counter gated behind `--follow`. The four that counted are the ones where every
 precondition was checked **before** the outcome was read.
 
+## 64. ★★ Bisecting tag 24's block by asking the peer — there is a FIELD at offset 28
+
+Finding 63 established that filling tag 24's eight-byte `unknown_28` with `0xa5` makes an
+Apple peer refuse to adopt us. That was true and its interpretation — "Apple validates a
+reserved block" — was wrong. Setting **one byte at a time** takes the answer apart.
+
+### The method
+
+Every other result in this file was obtained by reading bytes off the air. This one is
+different: it **asks the peer a question and reads its answer in behaviour.** Set one byte,
+leave the other seven as Apple sends them, and see whether the device still elects us. Each
+run is a single bit of information about a field nobody documents.
+
+The outcome measure is unchanged and pre-registered: ≥20 frames from a non-us sender naming
+our address as master, against controls of 146 and 241.
+
+### Results, one byte at a time, all `0x01`
+
+```
+offset within unknown_28:   0    1    2    3    4    5    6    7
+                          REJ  REJ    ?    ?    ?    ?    ?  ACC
+```
+
+| probe | adoption | note |
+|---|---|---|
+| whole block = `a5` | **0**, **0** | finding 63 |
+| byte 0 = `01` | **0** | short exposure, 2 buckets |
+| byte 1 = `01` | **0** | 18 buckets, 1707 master frames, `following 0` — strong |
+| byte 7 = `01` | **172** | adoption, squarely in the control range |
+
+**So it is not a reserved block.** There is a field of at least two bytes beginning at
+offset 28, and byte 35 lies outside it.
+
+### Two wrong conclusions, in sequence
+
+**"Apple validates the reserved bytes"** — finding 63's framing. True that they are read;
+wrong that the block is the unit.
+
+**"Only byte 0 matters"** — written after byte 7 was accepted, and contradicted by the very
+next probe when byte 1 was also rejected. One accepted offset does not establish a boundary,
+and generalising from it was the same mistake finding 63 made one level down.
+
+The honest statement each time was narrower than the one reached for, which is worth
+recording because the pull is always toward the tidier claim.
+
+### What it probably is
+
+Every other field in tag 24 is a **u32** — `master_counter`, `distance`, `master_metric`,
+`self_metric`, `self_counter`. A u32 at offset 28 would occupy block bytes 0-3 and leave 4-7
+as padding, which fits every observation so far. Testing byte 4 decides it: accepted means
+the field is at most four bytes and the u32 reading holds; rejected means it runs further and
+the idea is dead.
+
+### Why this matters beyond coverage
+
+A byte proven ignorable is a byte a transmitter may choose. A byte proven **read** is
+something else entirely: it is a field, and a field has a meaning we do not know. Calling all
+eight `unknown_28` hid that behind a name which says there is nothing to see.
+
+It also revises what `--garbage` is for. It was built to convert opaque bytes into free
+coverage; it turns out to be a **probe for finding fields**, which is the more valuable
+instrument.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
