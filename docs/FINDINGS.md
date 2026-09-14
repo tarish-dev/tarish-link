@@ -4471,22 +4471,46 @@ embarrassing reason for a four-month-old negative result. **Refuted** — M600's
 happened within ten seconds of the beacon starting, which every historical run would have
 caught.
 
-### What actually predicts it, on the evidence so far
+### What predicts it: nothing we have been able to find
 
-Not the metric, and not the clock. The pattern across the three valid settled runs tracks
-**which handset is incumbent**:
+Five explanations were proposed and every one of them is dead. They are listed because the
+order they died in is the useful part -- each was the obvious reading at the time.
 
-| run | incumbent | outcome |
-|---|---|---|
-| Z0ctl | `72:01` | refused, 0 |
-| M541 | `e6:a6` | conceded |
-| M600 | `e6:a6` | conceded |
+| hypothesis | killed by |
+|---|---|
+| metric outside Apple's 510-541 band is discarded | M600 at 600 took the cluster *faster* than M541 at 541 |
+| previous runs were too short | M600's peers had switched before the capture opened, ~10 s in |
+| our clock is better aimed now | M541 won with 151 ms of spread and `adopted=false` |
+| announcing v10.0 | both takeovers announced v3.4, same as the failures |
+| one handset yields and the other does not | `e6:a6` yielded twice paired and **refused when alone** |
 
-Z0ctl is the strongest comparison available: same night, same metric 600, incumbent claiming
-539 against M600's 541 — and the opposite result. Three runs is not enough to call it a
-device property, and the two handsets differ in ways nobody has enumerated (model, iOS
-version, battery state, whether they are on charge). **This is the open question, and it is
-the interesting one.**
+The device theory was mine, and it survived exactly one run. It looked strong -- three
+refusals from `72:01` against two concessions from `e6:a6` -- until `e6:a6` was isolated as
+the sole incumbent and refused like everything else.
+
+### The honest summary: two successes in six attempts
+
+| run | incumbent | paired | incumbent metric | ours | outcome |
+|---|---|---|---|---|---|
+| M541 | `e6:a6` | yes | 540 | 541 | **yielded** at ~215 s |
+| M600 | `e6:a6` | yes | 541 | 600 | **yielded** in <10 s |
+| Z0ctl | `72:01` | yes | 539 | 600 | refused |
+| ordA | `72:01` | yes | 531 | 600 | refused |
+| soloB600 | `72:01` | alone | 539 | 600 | refused |
+| soloA600 | `e6:a6` | alone | 520 | 600 | refused |
+
+Every run had a verified-settled pre-state and zero entry events. The two successes share
+one property nothing else explains -- both phones present *and* `e6:a6` holding mastership --
+and with n=2 that is as likely to be coincidence as mechanism.
+
+**So treat a settled-cluster takeover as possible but not reproducible on demand, at roughly
+one attempt in three.** That is a weaker claim than this finding originally made, and it is
+what the evidence supports.
+
+**What has not been tested and should be**: whether the phone was sitting on the AirDrop
+share sheet rather than merely having AirDrop enabled. The operator's handling differed
+between the early runs and the ordering experiments, it is not visible in any capture, and it
+is the kind of thing that changes how aggressively iOS runs AWDL.
 
 ### Why the old negative is still worth reading
 
@@ -4505,9 +4529,10 @@ data never showed, and that sentence then sat in the spec being true for four mo
 - **Election experiments no longer require an entry event.** Finding 72's rule stands as a
   validity check — a settled room refusing everything is still a void — but a settled room is
   now a legitimate and much cheaper experimental condition, needing no operator toggling.
-- The `--windows` breadth hypothesis from Trial E is no longer needed to explain how a
-  settled cluster is taken, though it may still explain why some incumbents yield and others
-  do not.
+- The `--windows` breadth hypothesis from Trial E is back on the table as the remaining
+  untested candidate, and it is now the most interesting one: we advertise 3 slots of 16
+  where Apple advertises 4 and widens to 6 and 8, and Trial E's single success was made
+  while accidentally occupying six.
 
 ---
 

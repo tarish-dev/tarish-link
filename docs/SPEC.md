@@ -473,10 +473,15 @@ scored zero. Two runs on 2026-09-14 took mastership from a verified-settled two-
 cluster with no entry event: one at metric 541 conceding after ~215 s, one at metric 600
 conceding in under ten seconds, 852 and 3,242 frames naming us master. Finding 75.
 
-What predicts success is **not** the metric and **not** the run length — both were tested
-directly and both were refuted. The only pattern in the evidence is which handset held
-mastership: one iPhone yielded twice, the other refused under otherwise identical conditions.
-Three runs, so treat it as an open question rather than a device property.
+**Nothing we have tested predicts it.** Six settled-cluster runs in one evening produced two
+takeovers, and five candidate explanations were eliminated: metric range (600 beat 541),
+duration (one takeover landed in under ten seconds), clock quality (one succeeded with 151 ms
+of spread), announced version (both takeovers were v3.4), and handset identity (the phone
+that yielded twice refused when isolated). Roughly one attempt in three, mechanism unknown.
+
+The remaining untested candidate is **availability breadth**: we advertise 3 slots of 16
+where Apple advertises 4 and widens to 6 and 8, and the one historical success occupied six
+by accident. See `--windows`.
 
 Entry is still the *reliable* path, and it is the one to design for: a device entering a room
 adopts whoever is already claiming master, every time. Be transmitting before the peer
