@@ -32,16 +32,24 @@ set -u
 cd ~/tarish-libawdl
 sudo killall awdl tcpdump 2>/dev/null; sleep 1
 
+# DELETE LAST RUN'S ARTIFACTS FIRST. $R is derived from $LABEL, so a re-run with the same
+# label lands on the same paths -- and every read below (`stats $R.pcap`, the tag dump, the
+# "room before") happily reads a file that this run never wrote. A Z1 re-run reported the
+# previous Z1's capture verbatim, down to "seen 9x, first at frame 100", while its own
+# tcpdump had not started at all. It voided for other reasons and the staleness was caught
+# by the byte-identical dump; it could just as easily have reported a stale ADOPT.
+rm -f $R.pcap $R.before.pcap $R.log $R.before.txt $R.timeline.txt $R.tcpdump.err
+
 # BEFORE: is the room a settled cluster at all? A trial against an empty or churning room
 # measures nothing, and both look like a clean refusal afterwards.
-sudo timeout 12 tcpdump -i $MON -w $R.before.pcap -s0 2>/dev/null
+sudo timeout 12 tcpdump -i $MON -w $R.before.pcap -s0 2>>$R.tcpdump.err
 ./target/release/awdl stats $R.before.pcap 2>&1 | grep -A8 'who names whom' > $R.before.txt
 ./target/release/awdl timeline $R.before.pcap 2>&1 | sed -n '3,12p' > $R.timeline.txt
 
 (sudo ./target/release/awdl beacon $MANAGED $MON $CHAN $SECS 2 --follow --metric $METRIC --tenure 99999 ${GARBAGE:+--garbage $GARBAGE} > $R.log 2>&1 &)
 for i in \$(seq 1 15); do ip link show $MON >/dev/null 2>&1 && break; sleep 1; done
 sleep 4
-sudo timeout $CAPS tcpdump -i $MON -w $R.pcap -s0 2>/dev/null
+sudo timeout $CAPS tcpdump -i $MON -w $R.pcap -s0 2>>$R.tcpdump.err
 sleep 12
 "
 
@@ -65,6 +73,13 @@ CHANGES=$(echo "$LOG" | grep -oE '[0-9]+ master change' | grep -oE '[0-9]+')
 echo
 echo "=================== VALIDITY ==================="
 VOID=""
+# A. did this run produce a capture of its own? With $R.pcap deleted up front, its absence
+#    means tcpdump never ran or died -- which is a void, not an empty room, and the two
+#    were indistinguishable in the output until a stale file gave it away.
+CAPOK=$(ssh -o ConnectTimeout=10 "$PI" "[ -s $R.pcap ] && echo yes || echo no")
+[ "$CAPOK" = "yes" ] || VOID="$VOID
+  no capture from this run at $R.pcap. tcpdump did not run or died; see $R.tcpdump.err
+  on the Pi. Nothing below was measured."
 # B. did we actually transmit? A starved run cannot be adopted and is not evidence.
 # RATE, not a flat count. 40 frames passed this check for a 420-second run that was
 # out-transmitted 2884 to 151 and voided; the healthy rate is one frame per advertised
@@ -106,6 +121,26 @@ if [ -n "$GARBAGE" ]; then
   echo "  --garbage $GARBAGE, as sent:"
   ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl tlv $R.pcap 24 $OURMAC 2>&1 | sed -n '3,8p'"
 fi
+
+
+# G. DID A PEER ENTER DURING THE CAPTURE? This is the one that matters for election, and
+#    it was missed by eye three runs in a row. A settled cluster does not re-elect whatever
+#    you advertise -- so a REFUSE from a room that was already settled is the known null
+#    result, not evidence about anything you changed. Measured directly: run Z1b (byte 28
+#    perturbed) and Z0ctl (nothing perturbed) both scored 0 in the same settled room,
+#    minutes apart. The control is what stopped that becoming a finding.
+#
+#    An entry event looks like dots then letters in the timeline: the peer was off the air,
+#    then arrived. `awdl timeline` prints one line per sender.
+#    NOT "the line starts with dots" -- the first version tested that and scored the good
+#    control as 0. A peer that was master, went away and came back reads `MMM...fff`, which
+#    is the commonest entry shape of all. The test is a dot with presence somewhere AFTER it.
+ENTRY=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl timeline $R.pcap 2>&1 | grep -E '^[0-9a-f]{2}:' | grep -v '$OURMAC' | awk '{print \$2}' | grep -cE '[.][.]*[A-Za-z*]'")
+[ "${ENTRY:-0}" -ge 1 ] || VOID="$VOID
+  no peer ENTERED during the capture -- every peer was either present throughout or absent
+  throughout. A settled cluster refuses correct frames as readily as garbage, so this is a
+  void, not a REFUSE. Have the operator toggle AirDrop off and back on INSIDE the window."
+echo "  peers that entered during the run: ${ENTRY:-0}   (>= 1 for an election test)"
 
 echo
 echo "=================== OUTCOME ==================="

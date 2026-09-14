@@ -4225,6 +4225,70 @@ apart.
 
 ---
 
+## 72. The settled-cluster confound, caught by a control rather than by reasoning
+
+**Status: the Z-series is INCOMPLETE.** One cell of four is unmeasured and the finding it
+would produce is not claimed here. What *is* established is the trap, and it is worth more
+than the cell was.
+
+### The question
+
+Tag 24's `unknown_28` is the only field a receiver was ever caught reading (finding 65).
+Two points on its curve are known: zero is accepted, `0xa5a5a5a5` is refused. Nothing in
+between. `--garbage t24@0=01` sets it to **1** — the smallest possible non-zero. If 1 is
+refused the field is validated as zero; if accepted, the refusals were about magnitude and
+it bisects into a counter or a version.
+
+### What happened
+
+The first treatment run came back a clean REFUSE. Every validity check passed: 419 frames
+sent, synchronised at 15,966 us spread, two peers present, the perturbation confirmed on
+air. It would have been entirely reasonable to write it up.
+
+The timeline said `72:01 MMM` / `e6:a6 fff` — **the peers were already a settled cluster
+before the run started.** So a control was run into the same settled room, minutes later,
+changing nothing at all:
+
+| run | room | byte 28 | frames naming us master |
+|---|---|---|---|
+| Z1b | settled, no entry | `1` | 0 |
+| Z0ctl | settled, no entry | **`0` — correct** | **0** |
+| Z0d | **peer entered** | `0` — correct | **1,265** |
+| Z1d/e/f | no entry, then empty | `1` | *void* |
+
+**The control refused just as completely as the treatment.** A settled cluster does not
+re-elect whatever you advertise — it is in this repository's own spec, it cost eight runs to
+establish the first time, and it was still nearly enough to manufacture a finding from a
+room that would have refused anything.
+
+Z0d is the same room with the operator toggling AirDrop off and back on inside the capture:
+1,265 frames from both peers. The procedure works, the transmitter is fine, and the only
+difference is whether a peer had an occasion to elect anyone.
+
+### The check that was missing, and the check that was wrong
+
+Rule 10 already said to establish the condition during the capture. Nothing enforced it, so
+three consecutive treatment runs voided on it while being read by eye.
+
+`compete-trial.sh` now counts entry events and VOIDs at zero. The first implementation
+tested whether a peer's timeline *starts* with dots — and scored the good control as 0,
+because the commonest entry shape is `MMM...fff`: present, gone, returned. The test is a
+dot with presence somewhere after it, anywhere in the line. Validated against the runs
+above: Z0d scores 2, the three voids score 0.
+
+### Why this is the more useful half
+
+A REFUSE is only evidence if a peer in the same room would have said yes to a correct
+frame. Every `--garbage` result in findings 63-71 rests on that, and most of them were run
+when peers were arriving anyway — which is luck, not design. The E-series controls were run
+because the *manipulation* needed a control, not because the room did.
+
+**Pair every election probe with a same-room control, and require an entry event in both.**
+Not "check the room looks busy": two peers transmitting steadily is exactly what a settled
+cluster looks like, and it refuses everything.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
