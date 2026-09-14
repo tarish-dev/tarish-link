@@ -245,9 +245,16 @@ or 31 and an iPhone refuses to elect you, put it at byte 32 or 35 and it elects 
 The adjacent reject/accept pair at 31/32 fixes the boundary, which is the `u32` shape every
 other field in this tag has. Byte 30 was never probed and is assumed to belong to the field.
 
+**The check is "must be exactly zero", not a range.** Setting the `u32` to **1** — the
+smallest possible non-zero value — is refused as completely as `0xa5a5a5a5`. Measured as a
+counterbalanced 2x2 against two iPhones entering the room: two controls adopted at 1,265 and
+688 frames, two treatments at 0 and 0 (finding 73). In both treatment runs the peers arrived,
+saw us advertising metric 600 against their own 510–541, and elected *each other* instead.
+
 So: **send zero, and do not treat the surrounding zeros as licence to invent.** What the
-field means is unknown, and one accepted value is not a rule — this is the weakest entry in
-this document and the only one where being wrong costs you the election. Findings 65, 67.
+field means is still unknown — we know one accepted value out of 2^32 and not the rule
+behind it. This is the weakest entry in this document and the only one where being wrong
+costs you the election. Findings 65, 67, 73.
 
 **Tag 24 is mandatory.** A malformed one is treated exactly as an absent one: emitting no
 tag 24 at all produces the same zero adoptions as emitting a corrupt one, which also makes

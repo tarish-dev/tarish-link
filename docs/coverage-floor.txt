@@ -12,7 +12,7 @@
 2     24/24         100.0   Service Response
 4     71/73          97.3   Synchronization Parameters
 5     21/21         100.0   Election Parameters
-6     2/17           15.9   Service Parameters
+6     2/17           15.8   Service Parameters
 7     6/8            80.9   HT Capabilities
 12    43/47          92.8   Data Path State
 16    40/40         100.0   Arpa
@@ -21,5 +21,5 @@
 21    2/2           100.0   Version
 24    36/40          90.0   Election Parameters v2
 32    2/13           15.4   unrecognised
-33    2/14           21.4   unrecognised
+33    2/14           20.6   unrecognised
 35    0/2             0.0   unrecognised

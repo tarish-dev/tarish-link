@@ -4289,6 +4289,90 @@ cluster looks like, and it refuses everything.
 
 ---
 
+## 73. ★★★ Tag 24's read `u32` is validated as EXACTLY zero — one is refused as hard as garbage
+
+Finding 65 found the one field in this protocol that a receiver checks: the `u32` at tag 24
+offset 28. It established that zero is accepted and `0xa5a5a5a5` is refused, which leaves
+the obvious question — is the check *"must be zero"*, or is it a range, a version, a counter
+whose plausible values happen to start at zero?
+
+**It is "must be zero".** The smallest possible non-zero value, `1`, is refused exactly as
+completely as garbage.
+
+### The design
+
+`--garbage t24@0=01` sets byte 28 to `0x01`, making the `u32` equal to 1 and leaving every
+other byte of the frame untouched. Paired against a control identical in all respects, run
+into the same room, with the same two iPhones, minutes apart.
+
+**Every run required a peer to ENTER during the capture** — see finding 72, which is the
+reason this took nine runs to get four usable cells. A settled cluster refuses correct
+frames as readily as garbage, and three treatment runs voided on it before the harness was
+taught to check.
+
+| run | order | byte 28 | peers entered | frames naming us master |
+|---|---|---|---|---|
+| Z0d | control first | `0` | 2 | **1,265** |
+| Z1g | treatment second | `1` | 2 | **0** |
+| Z1h | **treatment first** | `1` | 2 | **0** |
+| Z0k | **control second** | `0` | 2 | **688** |
+
+A complete 2x2: both arms replicated, and the order counterbalanced across the two pairs
+(rule 4), which matters because the room changes over an evening. Every cell had two peers
+enter during its own capture, and every cell had its byte 28 read back off the air.
+
+Two controls adopt, at 1,265 and 688 frames. Two treatments refuse, at 0 and 0. There is no
+overlap and nothing marginal about it.
+
+### What the peers did instead
+
+This is the part that makes it a decision rather than a failure to hear us. In both
+treatment runs the two iPhones arrived, saw us advertising metric **600** — far above the
+510–541 Apple devices advertise — and **elected each other**: `72:01` followed `e6:a6` for
+2,458 frames in one run and 2,319 in the other. They were awake, they were listening, they
+had a candidate claiming the highest metric on the air, and they picked the weaker peer.
+
+In the control, the same two devices entering the same room followed *us*, 1,265 frames.
+
+### What is NOT established
+
+- **One device pair.** Rule 6 asks for a different device set and this has not had one. The
+  two iPhones here are the same pair that produced findings 63 through 71, so a systematic
+  quirk of these two handsets would not have shown up in any of it.
+- **Nine runs produced four cells.** Five voided — three because no peer entered the
+  capture, two because the phones never came back on the air. The voids are recorded in
+  finding 72 and none of them was scored.
+- **Only two non-zero values have ever been tried** — `1` and `0xa5`-filled. They span three
+  orders of magnitude and both fail, but 2 of 2^32 is not a proof that the accepted set is
+  exactly {0}.
+
+### Why this stays OPAQUE in the coverage metric
+
+It is tempting to call the field named: we know what to send, we measured it, and we can
+fill it by construction without copying anything. That is the same standard that promoted
+tag 12's `extended_flags` (finding 71).
+
+**The asymmetry is real and worth keeping.** An *ignored* field cannot hurt us in any
+context, so choosing zero is safe forever. This field is *read*, and we know exactly one
+accepted value out of four billion, with no idea of the rule that makes it acceptable. If
+some state we have not entered requires a different value, an ignored field would shrug and
+this one would cost us the election silently. Counting it as understood would assert the
+thing we just failed to learn.
+
+So the number stays honest: tag 24 remains 36/40, and this is the single largest opaque
+region in the control plane that a transmitter can reach — 313,660 bytes.
+
+### The shape of the whole result
+
+Of every reserved or unnamed field a transmitter can reach and perturb, exactly one is read,
+and that one demands a specific value. Everything else — tag 4's `reserved_28` and trailing
+pair, tag 5 entirely, tag 16's flags byte, tag 12's extended block, tag 24's own bytes
+32..36 — is decoration. All of them are zero in every Apple frame ever captured. **Nothing
+distinguishes the strict one from the ignored ones by listening.** That is the argument for
+having built a transmitter, stated as compactly as it can be.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
