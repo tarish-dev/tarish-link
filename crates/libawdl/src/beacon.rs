@@ -97,6 +97,86 @@ pub const METRIC_DECLINE: u32 = 65;
 /// [`Beacon::metric`] for what happened the first time this was the default.
 pub const METRIC_COMPETE: u32 = 530;
 
+/// Which measured-constant byte groups to fill with non-zero values.
+///
+/// **The experiment this exists for.** Around 450,000 bytes of the control plane are
+/// classified opaque for one reason only: they have been zero in all 37,829 frames measured
+/// and no specification names them. Finding 47 is blunt that constant is *not* the same as
+/// understood — a byte could be zero across this corpus because it is reserved, or because
+/// every device in it happens to share a value.
+///
+/// No amount of reading settles that. Transmitting does: put something else in those bytes
+/// and see whether real Apple peers still synchronise to us and still adopt us. If they do,
+/// the bytes are **proven ignored**, and choosing zero for them becomes knowledge rather
+/// than imitation.
+///
+/// The measurement needs a condition where the unperturbed case reliably succeeds, or a
+/// refusal means nothing. Finding 59 is that control: two iPhones adopting us in 1,223
+/// frames, on demand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Garbage {
+    /// Tag 4: `reserved_28` and the two trailing bytes. Note the trailing pair is **not**
+    /// padding — finding 20 — so this group is the least likely of the four to be ignored.
+    pub t4: bool,
+    /// Tag 5: `reserved_4` and the two-byte tail. Zero in all 37,829 frames.
+    pub t5: bool,
+    /// Tag 16: the Arpa flags byte, `0x03` in all 13,447 frames.
+    pub t16: bool,
+    /// Tag 24: the eight-byte `unknown_28` block. The largest single group, 302,632 opaque
+    /// bytes, and the cleanest — eight contiguous bytes, zero in every frame measured.
+    pub t24: bool,
+}
+
+/// The fill value. Recognisable on purpose: a capture has to confirm our own frames really
+/// carried it, because an encoder that quietly drops the change would make the experiment
+/// look like a success.
+pub const GARBAGE_BYTE: u8 = 0xa5;
+
+impl Garbage {
+    /// `"t24"`, `"t4,t24"`, `"all"`. Returns `None` for an unrecognised group rather than
+    /// silently running a weaker experiment than the one asked for.
+    pub fn parse(spec: &str) -> Option<Garbage> {
+        let mut g = Garbage::default();
+        for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            match part {
+                "all" => g = Garbage { t4: true, t5: true, t16: true, t24: true },
+                "t4" => g.t4 = true,
+                "t5" => g.t5 = true,
+                "t16" => g.t16 = true,
+                "t24" => g.t24 = true,
+                _ => return None,
+            }
+        }
+        Some(g)
+    }
+
+    pub fn any(&self) -> bool {
+        self.t4 || self.t5 || self.t16 || self.t24
+    }
+
+    /// Which groups, and how many bytes per frame each one perturbs.
+    pub fn describe(&self) -> String {
+        let mut v: Vec<&str> = Vec::new();
+        if self.t4 {
+            v.push("t4 reserved_28 + trailing pair (3B)");
+        }
+        if self.t5 {
+            v.push("t5 reserved_4 + tail (3B)");
+        }
+        if self.t16 {
+            v.push("t16 flags byte (1B)");
+        }
+        if self.t24 {
+            v.push("t24 unknown_28 (8B)");
+        }
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.join(", ")
+        }
+    }
+}
+
 /// Everything needed to emit a frame, and the counters that move between frames.
 #[derive(Debug, Clone)]
 pub struct Beacon {
@@ -139,6 +219,8 @@ pub struct Beacon {
     /// the radio is the only correct source. The default mirrors a captured Apple value —
     /// LDPC, 40 MHz, short GI at both widths, two spatial streams.
     pub ht: HtCapabilities,
+    /// Fill measured-constant bytes with [`GARBAGE_BYTE`] instead of zero. See [`Garbage`].
+    pub garbage: Garbage,
     /// Occupy this many windows of sixteen instead of Apple's four.
     ///
     /// **An experimental control for finding 38.** Trial E took mastership from a settled
@@ -170,6 +252,7 @@ impl Beacon {
     /// A beacon for a node that is master of a cluster of one.
     pub fn new(addr: [u8; 6], social_channel: u8, country: &str) -> Beacon {
         Beacon {
+            garbage: Garbage::default(),
             addr,
             host: "tarish".to_string(),
             social_channel,
@@ -281,7 +364,7 @@ impl Beacon {
             ext_max_af: 3,
             master: self.addr,
             presence_mode: 4,
-            reserved_28: 0,
+            reserved_28: if self.garbage.t4 { GARBAGE_BYTE } else { 0 },
             // Derived from the clock rather than from the frame count. Those only agree
             // if every frame goes out exactly one window apart, which no scheduler
             // guarantees -- and a counter that drifts from its own clock is a counter a
@@ -312,11 +395,24 @@ impl Beacon {
         if let Some(v) = self.sync(now_us).encode() {
             tlvs.push((4, v));
         }
-        tlvs.push((5, ElectionParams::claiming(self.addr, self.metric).encode()));
+        tlvs.push((5, {
+            let mut e = ElectionParams::claiming(self.addr, self.metric);
+            if self.garbage.t5 {
+                e.reserved_4 = GARBAGE_BYTE;
+                e.tail = vec![GARBAGE_BYTE; 2];
+            }
+            e.encode()
+        }));
         if let Some(v) = seq.encode_tag18() {
             tlvs.push((18, v));
         }
-        tlvs.push((24, ElectionParamsV2::claiming(self.addr, self.metric, self.tenure(now_us)).encode()));
+        tlvs.push((24, {
+            let mut e = ElectionParamsV2::claiming(self.addr, self.metric, self.tenure(now_us));
+            if self.garbage.t24 {
+                e.unknown_28 = [GARBAGE_BYTE; 8];
+            }
+            e.encode()
+        }));
         tlvs.push((
             12,
             DataPathState::describing(
@@ -354,7 +450,14 @@ impl Beacon {
     /// A Master Indication Frame: the state set, plus who we are and what we offer.
     pub fn mif_tlvs(&self, now_us: u64) -> Vec<(u8, Vec<u8>)> {
         let mut tlvs = self.state_tlvs(now_us);
-        tlvs.push((16, Arpa { flags: 3, name: format!("{}.local", self.host) }.encode()));
+        tlvs.push((
+            16,
+            Arpa {
+                flags: if self.garbage.t16 { GARBAGE_BYTE } else { 3 },
+                name: format!("{}.local", self.host),
+            }
+            .encode(),
+        ));
         tlvs.push((
             2,
             service::encode_records(&[Record::Ptr {

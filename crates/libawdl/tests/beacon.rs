@@ -374,3 +374,77 @@ fn a_probe_can_make_counter_and_metric_disagree() {
     assert!(c_b > 68_364, "probe B must out-count the highest Apple value observed");
     assert_eq!(METRIC_COMPETE, 530);
 }
+
+/// The garbage really reaches the wire — finding 60's precondition.
+///
+/// An encoder that quietly dropped the change would make the experiment look like a
+/// success: the peers would adopt us because we sent them exactly what we always send.
+/// So this asserts on the ENCODED TLV bytes, at the offsets the perturbed fields occupy,
+/// not on the struct fields that were set.
+#[test]
+fn garbage_reaches_the_encoded_tlvs() {
+    use libawdl::beacon::{Garbage, GARBAGE_BYTE};
+
+    let addr = [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c];
+    let find = |tlvs: &[(u8, Vec<u8>)], tag: u8| -> Vec<u8> {
+        tlvs.iter().find(|(t, _)| *t == tag).expect("tag present").1.clone()
+    };
+
+    let mut clean = Beacon::new(addr, 149, "QA");
+    clean.metric = 600;
+    let c = clean.mif_tlvs(0);
+
+    let mut dirty = Beacon::new(addr, 149, "QA");
+    dirty.metric = 600;
+    dirty.garbage = Garbage::parse("all").expect("all parses");
+    let d = dirty.mif_tlvs(0);
+
+    // Tag 24: unknown_28 occupies bytes 28..36, and self_counter 36..40 must be untouched.
+    let (c24, d24) = (find(&c, 24), find(&d, 24));
+    assert_eq!(&c24[28..36], &[0u8; 8], "the control really is zeros there");
+    assert_eq!(&d24[28..36], &[GARBAGE_BYTE; 8], "and the treatment really is not");
+    assert_eq!(c24[..28], d24[..28], "nothing before it moved");
+    assert_eq!(c24[36..], d24[36..], "and self_counter is intact");
+
+    // Tag 5: reserved_4 is byte 4, the tail is 19..21.
+    let (c5, d5) = (find(&c, 5), find(&d, 5));
+    assert_eq!(c5[4], 0);
+    assert_eq!(d5[4], GARBAGE_BYTE);
+    assert_eq!(&d5[19..21], &[GARBAGE_BYTE; 2]);
+    assert_eq!(c5[5..19], d5[5..19], "master, metrics untouched");
+
+    // Tag 16: the flags byte, and the host name must survive it.
+    let (c16, d16) = (find(&c, 16), find(&d, 16));
+    assert_eq!(c16[0], 3);
+    assert_eq!(d16[0], GARBAGE_BYTE);
+    assert_eq!(c16[1..], d16[1..], "the DNS-encoded name is unchanged");
+
+    // Tag 4: reserved_28 is byte 28. The named fields around it must not shift.
+    let (c4, d4) = (find(&c, 4), find(&d, 4));
+    assert_eq!(c4[28], 0);
+    assert_eq!(d4[28], GARBAGE_BYTE);
+    assert_eq!(c4.len(), d4.len(), "the TLV must not change length");
+    assert_eq!(c4[..28], d4[..28]);
+    assert_eq!(c4[29..33], d4[29..33], "aw_counter and ap_beacon_delta intact");
+
+    // And selecting one group must not perturb the others.
+    let mut only24 = Beacon::new(addr, 149, "QA");
+    only24.metric = 600;
+    only24.garbage = Garbage::parse("t24").unwrap();
+    let o = only24.mif_tlvs(0);
+    assert_eq!(&find(&o, 24)[28..36], &[GARBAGE_BYTE; 8]);
+    assert_eq!(find(&o, 5), find(&c, 5), "tag 5 untouched by --garbage t24");
+    assert_eq!(find(&o, 16), find(&c, 16), "tag 16 untouched");
+    assert_eq!(find(&o, 4), find(&c, 4), "tag 4 untouched");
+}
+
+#[test]
+fn an_unknown_garbage_group_is_refused() {
+    use libawdl::beacon::Garbage;
+    assert!(Garbage::parse("t24").is_some());
+    assert!(Garbage::parse("t4,t24").is_some());
+    assert_eq!(Garbage::parse("all"), Some(Garbage { t4: true, t5: true, t16: true, t24: true }));
+    assert!(Garbage::parse("t99").is_none(), "a typo must not run a weaker experiment");
+    assert!(Garbage::parse("t24,nonsense").is_none());
+    assert!(!Garbage::parse("").unwrap().any());
+}

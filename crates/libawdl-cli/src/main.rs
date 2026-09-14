@@ -562,7 +562,7 @@ fn usage() -> ! {
     eprintln!("                                         RUN THE PIPE: tun <-> radio. root, Linux");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME] [--garbage t4,t5,t16,t24|all]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -625,6 +625,9 @@ fn main() {
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse().ok()),
                 args.iter().position(|a| a == "--datapath")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str()),
+                args.iter().position(|a| a == "--garbage")
                     .and_then(|i| args.get(i + 1))
                     .map(|s| s.as_str()),
             );
@@ -1190,7 +1193,7 @@ fn check_baseline(path: &str, floors: &std::collections::BTreeMap<u8, Floor>) ->
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
 #[allow(clippy::too_many_arguments)]
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1299,6 +1302,24 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     if let Some(w) = windows {
         // An experimental control. See Beacon::windows.
         b.windows = Some(w);
+    }
+    if let Some(spec) = garbage {
+        match libawdl::beacon::Garbage::parse(spec) {
+            Some(g) if g.any() => {
+                b.garbage = g;
+                eprintln!("  --garbage {spec}: {}", g.describe());
+                eprintln!(
+                    "    filling measured-constant bytes with 0x{:02x} instead of zero.",
+                    libawdl::beacon::GARBAGE_BYTE
+                );
+                eprintln!("    CONFIRM IN THE CAPTURE that our frames carry it: an encoder that");
+                eprintln!("    dropped the change would make this look like a success.");
+            }
+            _ => {
+                eprintln!("--garbage: unknown group in {spec:?}. Use t4, t5, t16, t24, all.");
+                std::process::exit(2);
+            }
+        }
     }
     if legacy {
         // An experimental control. See Beacon::legacy_timing.
