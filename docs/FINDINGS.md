@@ -4373,6 +4373,65 @@ having built a transmitter, stated as compactly as it can be.
 
 ---
 
+## 74. ★★ Tag 24's zero requirement is NOT version-gated — and v10.0 does not break election
+
+The operator asked whether a version number could be why we are not selected. It is the best
+hypothesis anyone had for finding 73, and it is wrong — which is worth more than another
+confirmation would have been, because it was the explanation that made the most sense.
+
+### Why it was a good question
+
+We announce **v3.4** in tag 21. Every Apple device announces **v10.0**:
+
+```
+us            34 02     AWDL 3.4, device class 2
+both iPhones  a0 02     AWDL 10.0, device class 2
+```
+
+Six major versions, inherited from `libmosey` and OWL, which both send the same number.
+**Every probe in findings 63 through 73 was run by a node claiming v3.4**, so every
+"the peer ignores this field" could have meant "the peer ignores this field *from an ancient
+node*". And it fit finding 73 exactly: a field that is required-zero from an old peer and
+carries meaning from a current one is an ordinary way for a protocol to grow, and it would
+explain why that one field out of every reserved region we probed is the only one read.
+
+### The 2x2
+
+Same room, same two iPhones, every cell with a verified entry event and both treatments read
+back off the air:
+
+| | byte 28 = `0` | byte 28 = `1` |
+|---|---|---|
+| **v3.4** | ADOPT — 1,265 and 688 | REFUSE — 0 and 0 |
+| **v10.0** | **ADOPT — 1,317** | **REFUSE — 0** |
+
+**The requirement is version-independent.** Announcing v10.0 does not unlock the field; the
+same single byte refuses us just as completely.
+
+### Two things this buys beyond the negative
+
+**Announcing v10.0 does not break election.** 1,317 adoptions, the best figure of the
+session, against 1,265 and 688 for v3.4. GAPS section 1 has warned since it was written that
+raising the version is a capability claim rather than a cosmetic change — that warning stands
+for everything above the link layer, but for *election specifically* it now has a measurement:
+nothing got worse. `--version 10.0` exists and the beacon prints what it announces.
+
+**The garbage series is not confounded by version.** That mattered for far more than this
+finding. Findings 63, 69 and 71 all concluded "the peer ignores this" from a v3.4 node, and
+if strictness were version-conditional, every one of them would have needed re-running under
+v10.0 before it could be trusted. One cell of this 2x2 — v10.0 adopting normally with clean
+fields — is the evidence that the peer's treatment of us does not change with the number we
+announce.
+
+### What is still unexplained
+
+Why that `u32` is checked at all. It is zero in every Apple frame ever captured, it is
+adjacent to four bytes that are provably ignored, and no value we have tried except zero is
+accepted. It is not a version gate, not a range, and not padding. The honest state is that we
+know exactly what to send and have no idea why.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

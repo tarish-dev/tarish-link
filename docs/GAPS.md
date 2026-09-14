@@ -179,6 +179,18 @@ the list". **That was wrong.** A version number is a capability claim: announce 
 Apple may expect behaviour we do not implement, trading a known limitation for an unknown
 failure. It is one field to change and a large surface to be judged against.
 
+> **Measured for election, 2026-09-14 — announcing v10.0 changes nothing there.** `--version
+> 10.0` now exists, and a run announcing it was adopted by both iPhones in **1,317 frames**,
+> the best figure of that session, against 1,265 and 688 under v3.4. So the warning above
+> stands for everything at the AirDrop layer and above, and for *election* it is now known
+> to be safe.
+>
+> That run also cleared a confound hanging over findings 63-71, which all concluded "the
+> peer ignores this field" from a node announcing v3.4. If Apple's strictness were
+> version-conditional, every one of them would have needed re-running. A v10.0 node with
+> clean fields is adopted normally, so the peer's treatment of us does not vary with the
+> number we announce. FINDINGS 74.
+
 > **An open question this raises.** Recent iOS shows a matching code before an AirDrop to a
 > non-contact, once per device pair, and only ever between two Apple devices — never for
 > Tarish and never for stock Quick Share. The operator notes it did not exist years ago, and
