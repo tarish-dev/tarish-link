@@ -3512,6 +3512,82 @@ Receiving and transmitting compete for one loop and one radio, and **every chang
 silently cost the other.** The lesson is not "be careful": it is that the two numbers have to
 be read together, every time, which is why the trial harness now refuses a run on either.
 
+## 61. ★ How an iPhone's AWDL actually wakes — and why it blocked the garbage A/B
+
+The experiment of finding 60's tooling — does an Apple peer still adopt us when tag 24's
+eight measured-constant bytes carry garbage — **did not complete.** One clean control, no
+clean treatment, across roughly a dozen runs. The reason is worth more than the result would
+have been, because it is a property of the peers rather than of our code.
+
+### The control, which is solid
+
+`captures/c1-control-adopt.pcap`. Room verified silent, us sole master at metric 600, full
+frame rate:
+
+| peer | metric | frames naming **us** master |
+|---|---|---|
+| `72:01:e2:fd:9d:57` | 521 | 379 |
+| `ae:a8:5e:5b:44:15` | 510 | 53 |
+| `3e:c9:51:72:8f:1a` | 510 | 35 |
+| | | **467, three peers** |
+
+All three arrived and went to `f` — follower. The live counter agreed with the capture.
+
+### The taxonomy of wakes — measured, not assumed
+
+**An idle iPhone does not advertise AWDL at all.** Wi-Fi on, AirDrop set to Everyone, phone
+sitting on a desk: **zero** frames. Five separate checks across two runs. AWDL is brought up
+on demand and torn down again, so "AirDrop is on" is not a state visible on the air.
+
+**What actually wakes it, and what state it wakes into:**
+
+| trigger | wakes AWDL? | arrives as |
+|---|---|---|
+| cold boot, or Wi-Fi on from fully off | **yes** | **follower** — adopts a better metric |
+| Photos → Share → AirDrop sheet | **yes**, strongly | **master** — claims, and holds it |
+| AirDrop set to Everyone, phone idle | **no** | — |
+| Wi-Fi off→on while already warm | **no** | — |
+| Continuity with a nearby Mac | **yes** | follower |
+
+The third row is the one that cost the most time. AirDrop *receiving* is bootstrapped by
+**BLE**: a receiver waits for a sender's Bluetooth advertisement and only then raises AWDL.
+We transmit AWDL and never BLE, so we cannot wake a receiver at all — it has to be woken by
+something else before it can hear us.
+
+**And the trap: the only reliable on-demand wake creates a rival.** Opening the share sheet
+makes that phone a *sender*, which claims master and keeps claiming — and the second phone
+then follows *it* rather than us. Runs B2, A3, T2 and T4 all died this way, with a peer at
+metric 522-532 out-transmitting us and capturing the other phone.
+
+Two devices that will not wake independently, where waking one turns it into the competitor,
+cannot produce a controlled forming cell on demand.
+
+### Continuity, not AirDrop, is what usually holds AWDL up
+
+The services those phones advertise are `_applicationservicepairing` and `_appsvcprepair` —
+Handoff and Universal Clipboard, **not** `_airdrop`. So a phone near a signed-in Mac keeps
+AWDL alive for Continuity regardless of the AirDrop setting, and switching AirDrop off does
+nothing. **Airplane mode is the only switch that reliably stops it**, and that is now the
+reset step.
+
+### What would make this work next time
+
+**A third device as the waker**, so the woken rival is not one of the two peers being
+measured. Or **much longer windows**: in the control the peers settled into following us
+after ~30 s, so the question may be whether a rival eventually defers to metric 600 given
+minutes rather than seconds — T4 only gave it 100 s and the rival was still claiming.
+
+Or, best: **send BLE**. The app half of Tarish already does BLE advertising for Quick Share.
+A sender-shaped BLE advertisement would wake a receiver into follower state on demand, which
+is exactly the wake we cannot currently produce — and it is the same mechanism real AirDrop
+uses.
+
+### What is banked regardless
+
+The `--garbage` tooling, its tests against the encoded bytes, the harness preconditions, and
+this taxonomy. The question itself is **open, not answered negatively** — no treatment run
+ever ran under conditions where a refusal would have meant anything.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

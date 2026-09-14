@@ -60,7 +60,16 @@ document with a real control". It had a converse. That is not a control.
    than an outcome. A harness that can only produce a result is a harness that will produce
    a wrong one.
 
-9. **Establish the condition DURING the capture, never before it.** Two iPhones re-form a
+9. **Know how the peer wakes, and what it wakes as.** An idle iPhone advertises **no AWDL at
+   all** — AirDrop set to Everyone on a phone sitting on a desk is zero frames on the air.
+   A cold boot or Wi-Fi from fully-off wakes it as a **follower**; the Photos share sheet
+   wakes it as a **master** that will capture the other peers. Waking a device is therefore
+   part of the experimental condition, not a preparation step. Finding 61.
+
+   Reset with **airplane mode**: the phones hold AWDL up for Continuity
+   (`_applicationservicepairing`), not AirDrop, so switching AirDrop off does nothing.
+
+10. **Establish the condition DURING the capture, never before it.** Two iPhones re-form a
    cluster in **under ten seconds**, and the harness needs about that long between starting
    the beacon and attaching `tcpdump`. So any toggle performed before the run has already
    expired when the first frame lands. Open the capture first, then have the operator act
