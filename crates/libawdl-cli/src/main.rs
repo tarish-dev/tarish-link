@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use libawdl::{
     action::ActionFrame,
-    data::{is_ipv6_multicast, DataHeader},
+    data::is_ipv6_multicast,
     dot11::{Dot11, FrameControl},
     radiotap::Radiotap,
     election::{ElectionParams, ElectionParamsV2},
@@ -44,23 +44,27 @@ fn classify(pkt: &[u8]) -> Seen<'_> {
     let Some(body80211) = rt.payload(pkt) else { return Seen::NotTrusted };
     let Some(fc) = FrameControl::parse(body80211) else { return Seen::NotTrusted };
     if fc.frame_type == libawdl::dot11::TYPE_DATA {
-        // QoS Data carries a 26-byte header (24 + 2 for the QoS control field), then
-        // LLC/SNAP (8), then the AWDL data header. Getting the QoS field wrong shifts
-        // everything by two bytes and the ethertype lands on garbage.
-        let qos = if fc.subtype & 0x08 != 0 { 2 } else { 0 };
-        let dst: [u8; 6] = match body80211.get(4..10).and_then(|b| b.try_into().ok()) {
-            Some(d) => d,
-            None => return Seen::OtherWifi(fc),
+        // THE SNAP IS CHECKED, NOT SKIPPED. This used to step over eight bytes assuming
+        // LLC/SNAP and parse whatever followed -- and DataHeader::parse is permissive
+        // enough that ANY QoS Data frame long enough came back as AWDL. A 30-second
+        // capture on channel 6 with no Apple device present reported "120 AWDL data
+        // frames, 67381 payload bytes, highest seq 64820" from an access point and two
+        // unrelated clients, which nearly became a finding about peers on the wrong
+        // channel.
+        //
+        // The giveaway was the sequence number: real AWDL sequences in these captures are
+        // in the hundreds. The fix is to use `decapsulate`, whose whole point is that most
+        // QoS Data belongs to somebody else -- its own doc comment says so, and this code
+        // predates it.
+        let Some(d) = libawdl::data::decapsulate(body80211) else {
+            return Seen::OtherWifi(fc);
         };
-        if let Some(h) = body80211.get(24 + qos + 8..).and_then(DataHeader::parse) {
-            return Seen::AwdlData {
-                seq: h.sequence,
-                ethertype: h.ethertype_name(),
-                multicast: is_ipv6_multicast(dst),
-                bytes: pkt_len_of(body80211, &h),
-            };
-        }
-        return Seen::OtherWifi(fc);
+        return Seen::AwdlData {
+            seq: d.header.sequence,
+            ethertype: d.header.ethertype_name(),
+            multicast: is_ipv6_multicast(d.dst),
+            bytes: d.payload.len(),
+        };
     }
     if !fc.is_action() {
         return Seen::OtherWifi(fc);
@@ -74,10 +78,6 @@ fn classify(pkt: &[u8]) -> Seen<'_> {
     }
 }
 
-/// Size of the encapsulated packet, for reporting only.
-fn pkt_len_of(body: &[u8], h: &DataHeader) -> usize {
-    body.len().saturating_sub(h.payload_offset)
-}
 
 fn print_frame(n: u64, rt: &Radiotap, d: &Dot11, af: &ActionFrame) {
     let freq = rt.freq.map(|f| format!("{f} MHz")).unwrap_or_else(|| "?".into());
@@ -2161,6 +2161,7 @@ fn tun(_args: &[String]) {
     std::process::exit(1);
 }
 
+#[cfg(target_os = "linux")]
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
@@ -2173,6 +2174,7 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
     Some(m)
 }
 
+#[cfg(target_os = "linux")]
 fn fmt_mac(m: [u8; 6]) -> String {
     m.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }

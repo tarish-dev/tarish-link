@@ -3313,6 +3313,63 @@ transmitting before the peer arrives.** A settled cluster does not re-elect for 
 metric — not at 600, not when it can hear us clearly, not when our frames land in its own
 windows.
 
+## 58. `awdl stats` has been counting other people's Wi-Fi as AWDL data frames
+
+Hunting for two iPhones that were not on the air, a 30-second capture on channel 6 reported:
+
+```
+--- 2597 frames: 0 AWDL action, 120 AWDL data, 2477 other 802.11
+AWDL data plane: 120 frames (2 multicast), 67381 payload bytes, highest seq 64820
+```
+
+Data frames with **no** action frames beside them, which does not happen — a device carrying
+AWDL data is a device in a cluster, and a cluster advertises itself constantly. The
+convenient reading was there and had a story ready: the peers are on channel 6, we have been
+transmitting into an empty channel, and that explains two void trials.
+
+**It was false.** The senders were `dc:4f:22:aa:af:7e`, `dc:4f:22:aa:b5:09`, and four
+addresses sharing the tail `05:d6:b4:1e:d6` — an access point and two unrelated clients.
+The AWDL BSSID `00:25:00:ff:94:73` appeared **zero** times.
+
+### The bug
+
+`classify` did this:
+
+```rust
+body80211.get(24 + qos + 8..).and_then(DataHeader::parse)
+```
+
+It stepped over eight bytes **assuming** LLC/SNAP and parsed whatever followed. `DataHeader`
+is deliberately permissive — two bytes, a sequence, a form marker, an ethertype — so **any**
+QoS Data frame long enough came back as AWDL.
+
+`decapsulate`, written in finding 51, checks the SNAP precisely because most QoS Data belongs
+to somebody else. Its own doc comment says so. `classify` predates it and was never updated,
+so the new careful path and the old careless one coexisted, and `awdl stats` used the
+careless one.
+
+With the SNAP checked: **0 AWDL data frames on channel 6, 0 on channel 149.** The room was
+genuinely empty, which is the boring and correct explanation for two void trials.
+
+### What gave it away
+
+The sequence number. Real AWDL sequences in these captures are in the hundreds — the
+data-plane fixture in `tests/datapath.rs` carries 483. **64820** is not a sequence, it is
+whatever two bytes happened to sit at that offset in somebody's TCP stream.
+
+A count can be wrong quietly. A count with an absurd number attached to it announces itself,
+which is an argument for reporting more than the count.
+
+### Where this leaves earlier numbers
+
+The data-plane constants in finding 51 are unaffected: that work used a throwaway analysis
+that checked the SNAP for exactly this reason, and it found 428 frames where the broken
+classifier would have claimed far more. Re-reading `6ghz-A-ch53.pcap` with the fix gives 24
+data frames, highest sequence 892 — which matches what that analysis found.
+
+What *is* suspect is every `AWDL data` count `awdl stats` has printed, across every capture,
+for as long as the command has existed.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
