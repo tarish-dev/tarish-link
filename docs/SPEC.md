@@ -105,26 +105,28 @@ does this in `rx.c`; it is not novel here.
 
 ## 3. The tags
 
-Coverage as measured over 40 captures, 37,829 action frames, 14,375,146 TLV bytes.
-**84.9% of control-plane bytes named** (excluding tag 2, which is DNS and was specified
-elsewhere).
+Coverage as measured over 57 captures, 79,614 action frames, 29,615,190 TLV bytes.
+**92.1% of control-plane bytes named** (excluding tag 2, which is DNS and was specified
+elsewhere). Over the 19 captures containing no transmissions of our own — the honest
+measure of how much of *Apple's* protocol is understood — it is **90.3%**; see
+`docs/GAPS.md` for why the two differ and why the floors do not.
 
 | tag | name | named | floor | opaque bytes |
 |---|---|---|---|---|
 | 0 | SSTH Request | — | — | 0 (zero-length) |
 | 2 | Service Response | 100% | 24/24 | 0 |
-| 4 | Synchronization Parameters | 93.2% | 68/73 | 189,145 |
-| 5 | Election Parameters | 85.7% | 18/21 | 113,487 |
-| 6 | Service Parameters | **0%** | 0/9 | 348,377 |
-| 7 | HT Capabilities | 82.0% | 6/8 | 74,478 |
-| 12 | Data Path State | 77.1% | 35/47 | 309,702 |
-| 16 | Arpa | 96.9% | 9/10 | 13,447 |
+| 4 | Synchronization Parameters | 97.3% | 71/73 | 159,228 |
+| 5 | Election Parameters | **100%** | 21/21 | 0 |
+| 6 | Service Parameters | 15.9% | 2/17 | 595,555 |
+| 7 | HT Capabilities | 80.9% | 6/8 | 158,048 |
+| 12 | Data Path State | 92.9% | 43/47 | 204,820 |
+| 16 | Arpa | **100%** | 40/40 | 0 |
 | 17 | IEEE 802.11 Container | 100% | 14/14 | 0 |
 | 18 | Channel Sequence | 100% | 41/41 | 0 |
 | 21 | Version | 100% | 2/2 | 0 |
-| 24 | Election Parameters v2 | 80.0% | 32/40 | 302,632 |
-| 32 | 6 GHz Info | 15.4% | 2/13 | 60,060 |
-| 33 | 6 GHz Channels | 24.7% | 2/14 | 90,906 |
+| 24 | Election Parameters v2 | 90.0% | 36/40 | 313,660 |
+| 32 | 6 GHz Info | 15.4% | 2/13 | 60,742 |
+| 33 | 6 GHz Channels | 21.9% | 2/14 | 131,712 |
 | 35 | *unrecognised* | **0%** | 0/2 | 132 |
 
 A **floor** is the worst-classified single TLV of that tag. It is the number to watch, not
@@ -151,11 +153,11 @@ floor of 5/20, and chasing the floor is what found the truncated MCS set.
   20      ext_max_af                   u8     named
   21..27  master                       6      named
   27      presence_mode                u8     named
-  28      reserved_28                  u8     CARRIED, measured-constant 0x00
+  28      reserved_28                  u8     IGNORED by the receiver, free to choose
   29..31  aw_counter                   u16    named
   31..33  ap_beacon_alignment_delta    u16    named
   33..    channel sequence             see below
-  tail    two bytes                    CARRIED -- a field, NOT padding, finding 20
+  tail    two bytes                    IGNORED by the receiver — a field, not padding (f20)
 ```
 
 **`flags` takes exactly two values in the whole corpus: `0x1000` and `0x1800`.** Bit 12 is
@@ -209,12 +211,18 @@ padding **because measured**, not because assumed.
   0       flags             u8     named
   1..3    id                u16    named
   3       distance          u8     named
-  4       reserved_4        u8     CARRIED, measured-constant 0x00
+  4       reserved_4        u8     IGNORED by the receiver, free to choose
   5..11   master            6      named
   11..15  master_metric     u32    named
   15..19  self_metric       u32    named
-  19..21  tail              2      CARRIED, measured-constant 0x00 0x00
+  19..21  tail              2      IGNORED by the receiver, free to choose
 ```
+
+**This whole tag is vestigial for election purposes.** Peers still send it and still fill it
+consistently, but a receiver's decision comes from tag 24: emit no tag 24 and you are not
+elected, however correct your tag 5 is (finding 67). `reserved_4` and the trailing pair were
+both sent as garbage with peers adopting anyway (finding 63), which is why this tag reads
+100% — every byte in it is either named or proven not to matter.
 
 ### Tag 24 — Election Parameters v2 (40 bytes)
 
@@ -225,9 +233,25 @@ padding **because measured**, not because assumed.
   16..20  distance          u32    named
   20..24  master_metric     u32    named
   24..28  self_metric       u32    named
-  28..36  unknown_28        8      CARRIED, measured-constant zero in 37,829 frames
-  36..40  self_counter      u32    named -- own tenure, in units of 192 AWs
+  28..32  unknown_28        u32    THE PEER READS THIS. Send zero — see below
+  32..36  ignored           4      IGNORED by the receiver, free to choose
+  36..40  self_counter      u32    named — own tenure, in units of 192 AWs
 ```
+
+**Byte 28 is the one field in this protocol that a receiver was caught checking.** Every
+Apple frame in the corpus carries zero across 28..36, so reading alone cannot tell the two
+halves apart — they are identical on the air. A transmitter can: put `0xa5` at byte 28, 29
+or 31 and an iPhone refuses to elect you, put it at byte 32 or 35 and it elects you anyway.
+The adjacent reject/accept pair at 31/32 fixes the boundary, which is the `u32` shape every
+other field in this tag has. Byte 30 was never probed and is assumed to belong to the field.
+
+So: **send zero, and do not treat the surrounding zeros as licence to invent.** What the
+field means is unknown, and one accepted value is not a rule — this is the weakest entry in
+this document and the only one where being wrong costs you the election. Findings 65, 67.
+
+**Tag 24 is mandatory.** A malformed one is treated exactly as an absent one: emitting no
+tag 24 at all produces the same zero adoptions as emitting a corrupt one, which also makes
+tag 5 vestigial for election purposes. Finding 67.
 
 `other` is the parent pointer, proven 634/634. `master_counter` is somebody else's number:
 a follower reproduces its master's values exactly, one frame behind each change, for as
@@ -309,7 +333,7 @@ association is visible.
 ### Tag 16 — Arpa (10–40 bytes)
 
 ```
-  0       flags       u8     CARRIED, measured-constant 0x03
+  0       flags       u8     IGNORED by the receiver, free to choose (Apple sends 0x03)
   1..     DNS-encoded host name
 ```
 
@@ -390,22 +414,36 @@ Two bytes, no parser, seen 66 times. Byte 0 is `0x01`. Not in any published tag 
 
 | | bytes | route |
 |---|---|---|
-| tag 6's hash | 348,377 | **none.** Finding 25 settled it |
-| constant-zero bytes no spec names | ~450,000 | the transmitter |
-| low-cardinality device-stable bitmaps | ~250,000 | the transmitter |
+| tag 6's hash | 595,555 | **none.** Finding 25 settled it, and it does not matter |
+| tag 24's `unknown_28` | 313,660 | the transmitter — **it is READ**, and that is all we know |
+| tags 32/33, the 6 GHz pair | 192,454 | the transmitter, once it can advertise 6 GHz honestly |
+| tag 7's two leading bytes | 158,048 | the transmitter — one inconclusive pair so far |
+| tag 4's flags word | 159,228 | the transmitter |
 
 `awdl correlate` matches every undecoded byte window against every field already understood,
-within the same frame. Across all 40 captures **every match above 50% is a known field at
+within the same frame. Across the whole corpus **every match above 50% is a known field at
 its own offset** — it re-finds `master_counter`, `self_counter`, `distance` and `aw_counter`
 where they live, and nothing else. Corpus-internal analysis is exhausted; finding 50 has
 the detail.
 
-**The transmitter is the only remaining instrument.** For the constant-zero bytes the
-experiment is direct: send frames with them set to garbage and see whether Apple peers still
-sync and adopt. If behaviour does not change they are proven ignored, and choosing zero
-becomes knowledge rather than imitation.
+**The transmitter is the only remaining instrument, and it has now been used.** The
+experiment is direct: send frames with a field set to garbage and see whether Apple peers
+still sync and adopt. If behaviour does not change the field is proven ignored, and choosing
+zero becomes knowledge rather than imitation.
 
-The ceiling that leaves is about **96.5%** — everything except tag 6.
+That pass is done for every constant-zero region a transmitter can reach — tag 4's
+`reserved_28` and trailing pair, tag 5 entirely, tag 16's flags byte, tag 12's extended
+block, tag 24's bytes 32..36. **Exactly one of them turned out to be read**: the `u32` at
+tag 24 offset 28. Findings 63 through 71.
+
+The outcome is worth stating plainly because it is not what a careful reader would predict.
+These fields are indistinguishable in every capture ever taken — all zero, all constant,
+all the same shape. A reasonable person would guess they are all padding, or that a strict
+implementation checks all of them. Neither is true, and no amount of listening separates
+them.
+
+The ceiling this leaves is about **96.5%** — everything except tag 6, whose contents are a
+hash and stay unreachable by any method.
 
 ---
 
