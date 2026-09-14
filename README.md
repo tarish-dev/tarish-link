@@ -40,6 +40,7 @@ mac80211, which is why OWL runs on a Raspberry Pi with no Google code at all.
 | [docs/FINDINGS.md](docs/FINDINGS.md) | the lab notebook, in discovery order, including the wrong turns. Read this to know *why* |
 | [docs/GAPS.md](docs/GAPS.md) | Apple vs `libmosey` vs OWL, side by side, plus what fraction of the bytes we can actually name |
 | [docs/HAL.md](docs/HAL.md) | what a radio has to do before any of this is possible |
+| [docs/PHONE-PORT.md](docs/PHONE-PORT.md) | **on hold** — running this on a Pixel beside libmosey, and the one measurement that decides how hard it is |
 
 ## What has been established so far
 
