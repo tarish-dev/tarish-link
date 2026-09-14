@@ -133,7 +133,18 @@ pub struct Garbage {
     /// [`DataPathState::with_extended`].
     pub ext12: bool,
     /// Fill the extended block's last, unidentified `u32` with garbage. Implies `ext12`.
+    ///
+    /// Proven ignored — finding 69. Kept as a control rather than as a question.
     pub ext12_garbage: bool,
+    /// Perturb `extended_flags` and the two zero bytes beside it. Implies `ext12`.
+    ///
+    /// These were the block's remaining opaque fields. `extended_flags` is device-stable and
+    /// looks like a capability word — Apple sends `0x117d | (k << 10)`, OWL and `libmosey`
+    /// send `0x0000` — so it was the more likely of the two to be read.
+    ///
+    /// **Proven ignored — finding 71.** Three peers adopted us in 2,123 frames with both
+    /// fields set to `0xa5`, against 912 in the correct-value control. Kept as a control.
+    pub ext12_head: bool,
     /// Send no tag 24 at all, rather than a perturbed one.
     ///
     /// **The question this answers.** Finding 65 showed a peer refuses us when tag 24's
@@ -201,7 +212,8 @@ impl Garbage {
                 "all" => {
                     g = Garbage {
                         t4: true, t5: true, t16: true, t24: true, t7: true,
-                        no_t24: false, ext12: false, ext12_garbage: false, t24_probe: None,
+                        no_t24: false, ext12: false, ext12_garbage: false,
+                        ext12_head: false, t24_probe: None,
                     }
                 }
                 "t4" => g.t4 = true,
@@ -212,6 +224,7 @@ impl Garbage {
                 "no-t24" => g.no_t24 = true,
                 "ext12" => g.ext12 = true,
                 "ext12-bad" => { g.ext12 = true; g.ext12_garbage = true }
+                "ext12-head" => { g.ext12 = true; g.ext12_head = true }
                 _ => return None,
             }
         }
@@ -220,7 +233,7 @@ impl Garbage {
 
     pub fn any(&self) -> bool {
         self.t4 || self.t5 || self.t16 || self.t24 || self.t7 || self.no_t24
-            || self.ext12 || self.ext12_garbage || self.t24_probe.is_some()
+            || self.ext12 || self.ext12_garbage || self.ext12_head || self.t24_probe.is_some()
     }
 
     /// `"t24@3=01"` — one byte of tag 24's block, at that offset, set to that value.
@@ -253,7 +266,9 @@ impl Garbage {
         if self.no_t24 {
             v.push("NO tag 24 emitted at all");
         }
-        if self.ext12_garbage {
+        if self.ext12_head {
+            v.push("tag 12 extended_flags + zero pair GARBAGE");
+        } else if self.ext12_garbage {
             v.push("tag 12 extended block, last u32 GARBAGE");
         } else if self.ext12 {
             v.push("tag 12 extended block, correctly filled");
@@ -546,8 +561,12 @@ impl Beacon {
                     // Our own state, not Apple's copied: we are master, so the relayed
                     // master counter is our own tenure, and the two clocks are ours.
                     let aws = Self::aws_at(now_us);
-                    d.with_extended(
-                        0x0000,
+                    let d = d.with_extended(
+                        if self.garbage.ext12_head {
+                            u16::from_le_bytes([GARBAGE_BYTE; 2])
+                        } else {
+                            0x0000
+                        },
                         self.tenure(now_us),
                         (now_us / 1000) as u32,
                         (aws & 0xffff) as u32,
@@ -556,8 +575,16 @@ impl Beacon {
                         } else {
                             0
                         },
-                    )
-                    .encode()
+                    );
+                    // The two bytes at the head of the tail, which with_extended writes as
+                    // zero. Perturbed here rather than in the constructor so that method
+                    // keeps one obvious shape.
+                    let mut d = d;
+                    if self.garbage.ext12_head {
+                        d.extended_tail[0] = GARBAGE_BYTE;
+                        d.extended_tail[1] = GARBAGE_BYTE;
+                    }
+                    d.encode()
                 } else {
                     d.encode()
                 }

@@ -150,13 +150,21 @@ fn print_frame(n: u64, rt: &Radiotap, d: &Dot11, af: &ActionFrame) {
             }
             24 => {
                 if let Some(e) = ElectionParamsV2::parse(t.value) {
+                    // The master ADDRESS is what election actually resolves to, and it
+                    // was missing here for the life of the tool: the line showed the
+                    // metric and counter only, so a peer that named us in tag 5 and
+                    // someone else in tag 24 looked identical to one that named us in
+                    // both. That divergence is real -- it is how the live adoption
+                    // counter (which reads tag 24) and a tag 5 tally of the same capture
+                    // came to disagree by two orders of magnitude.
                     println!(
-                        "           v2 distance {}  self {}#{}  master {}#{}",
+                        "           v2 distance {}  self {}#{}  master {}#{}  master_addr {}",
                         e.distance,
                         e.self_metric,
                         e.self_counter,
                         e.master_metric,
                         e.master_counter,
+                        libawdl::dot11::Mac(e.master),
                     );
                 }
             }
@@ -1423,9 +1431,22 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                     _ => b.us_until_next_advertised_window(now_us),
                 }
             };
-            // Under 4 ms to a window: go and transmit, hear nothing this pass.
+            // Under 4 ms to a window: go and transmit -- but still take whatever is
+            // already queued, because a non-blocking read of a waiting frame costs
+            // microseconds and reading nothing costs the experiment its result.
+            //
+            // `max_drain = 0` here meant we did not even ATTEMPT a read. That is not a
+            // small bias, and it is worst precisely when the room is interesting: once a
+            // competing cluster exists we adopt its clock, `slack_us` then measures the
+            // time to THAT master's window, and a master with frequent slots keeps it
+            // under 4 ms nearly always. Run E3b counted 14 adoptions where the capture of
+            // the same run held 2,123 from three peers -- two orders of magnitude, and in
+            // the direction that reads as "the peers ignored us". Runs E1 and E2 agreed
+            // with their captures to within one frame only because every peer named US,
+            // so `observe` returned early, no master was ever set, and this branch was
+            // never taken. Finding 70.
             let budget_ms = if slack_us < 4_000 { 0 } else { 2 };
-            let max_drain = if slack_us < 4_000 { 0 } else { 32 };
+            let max_drain = if slack_us < 4_000 { 4 } else { 32 };
 
             let mut drained = 0;
             while drained < max_drain {

@@ -460,7 +460,8 @@ fn an_unknown_garbage_group_is_refused() {
         Garbage::parse("all"),
         Some(Garbage {
             t4: true, t5: true, t16: true, t24: true, t7: true,
-            no_t24: false, ext12: false, ext12_garbage: false, t24_probe: None
+            no_t24: false, ext12: false, ext12_garbage: false, ext12_head: false,
+            t24_probe: None
         })
     );
     assert!(Garbage::parse("t99").is_none(), "a typo must not run a weaker experiment");
@@ -598,4 +599,37 @@ fn ext12_emits_the_block_finding_49_describes() {
     assert_eq!(bd.ext_master_counter(), ed.ext_master_counter(), "counter untouched");
     assert_eq!(bd.extended_flags, ed.extended_flags, "flags untouched");
     assert_eq!(bd.extended_tail.len(), 18, "length unchanged");
+}
+
+
+/// ext12-head perturbs the block's head and nothing else.
+#[test]
+fn ext12_head_touches_only_the_flags_and_the_pad() {
+    use libawdl::beacon::{Garbage, GARBAGE_BYTE};
+    use libawdl::state::DataPathState;
+
+    let addr = [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c];
+    let t12 = |g: &str| -> DataPathState {
+        let mut b = Beacon::new(addr, 149, "QA");
+        b.garbage = Garbage::parse(g).expect("parses");
+        let v = b.mif_tlvs(0).into_iter().find(|(t, _)| *t == 12).unwrap().1;
+        DataPathState::parse(&v).expect("parses")
+    };
+
+    let clean = t12("ext12");
+    let head = t12("ext12-head");
+
+    assert_eq!(clean.extended_flags, Some(0x0000));
+    assert_eq!(head.extended_flags, Some(u16::from_le_bytes([GARBAGE_BYTE; 2])));
+    assert_eq!(&clean.extended_tail[..2], &[0, 0]);
+    assert_eq!(&head.extended_tail[..2], &[GARBAGE_BYTE; 2]);
+
+    // The three identified counters and the u32 proven ignored must all be untouched --
+    // otherwise a refusal could not be attributed to the head.
+    assert_eq!(clean.ext_master_counter(), head.ext_master_counter());
+    assert_eq!(clean.ext_clock_ms(), head.ext_clock_ms());
+    assert_eq!(clean.ext_aw_counter(), head.ext_aw_counter());
+    assert_eq!(clean.ext_unknown_14(), head.ext_unknown_14());
+    assert_eq!(clean.extended_tail.len(), head.extended_tail.len());
+    assert_eq!(clean.awdl_address, head.awdl_address);
 }

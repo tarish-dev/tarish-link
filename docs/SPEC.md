@@ -284,17 +284,23 @@ offset.
 The extended block:
 
 ```
-  +0..2   extended_flags    u16    CARRIED. 0x117d | (k << 10), k in 0..3
-  +2..4   zero              2      CARRIED, measured-constant
-  +4..8   master_counter    u32    named -- EQUAL to tag 24's in 100% of 24,915 frames
-  +8..12  clock_ms          u32    named -- 3145.766 ms per tick measured vs 3145.728
-  +12..16 aw_counter        u32    named -- exactly 192 per tick; NOT tag 4's aw_counter
-  +16..20 unidentified      u32    CARRIED -- advances 1.0 to 3.2 per tick, by session
+  +0..2   extended_flags    u16    IGNORED by the receiver. Apple: 0x117d | (k << 10)
+  +2..4   zero              2      IGNORED by the receiver, measured-constant
+  +4..8   master_counter    u32    named — EQUAL to tag 24's in 100% of 24,915 frames
+  +8..12  clock_ms          u32    named — 3145.766 ms per tick measured vs 3145.728
+  +12..16 aw_counter        u32    named — exactly 192 per tick; NOT tag 4's aw_counter
+  +16..20 unidentified      u32    IGNORED by the receiver — advances 1.0 to 3.2 per tick
 ```
+
+**Everything in this block except the three counters is ignored by the receiver**, measured
+by transmitting garbage in it and still being elected master: findings 69 (the trailing u32)
+and 71 (`extended_flags` and the zero pair). *Ignored* is a stronger statement than *carried*
+— it means we may choose the value rather than copy one.
 
 **`extended_flags` is `0x0000` from every non-Apple sender** — OWL and `libmosey` both — and
 one of the `0x_7d` family from Apple. The two-bit `k` is stable per device and never
-correlates with association, so it looks like a device class rather than state.
+correlates with association, so it looks like a device class rather than state. We send zero,
+which is now a measured choice and not merely the polite one.
 
 On a **6 GHz** association, `infra_channel` is reported as **0** — verified on a MacBook
 that was associated and still published zero. Tags 32/33 are the only place a 6 GHz

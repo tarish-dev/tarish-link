@@ -188,17 +188,21 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
                 c.opaque += s.umi_options.as_ref().map_or(0, |o| o.len());
             }
             if s.flags & flag::EXTENDED != 0 {
-                // The extended flags word takes four values across the corpus and is
-                // stable per device, so it is a flags word whose bits we cannot name --
-                // and per finding 47 a value we would have to copy is not a named one.
-                c.opaque += 2;
+                // THE WHOLE EXTENDED BLOCK IS NOW OURS TO CHOOSE, by probe rather than by
+                // inference. The flags word takes four values across the corpus and is
+                // stable per device, so its bits are still not NAMED in the sense of
+                // finding 47 -- we could not say what bit 3 means. But finding 71 sent it,
+                // and the two always-zero bytes beside it, as 0xa5 and three Apple peers
+                // adopted us in 2,123 frames against a control of 912. A field a receiver
+                // demonstrably does not read is one we can fill correctly by construction,
+                // which is the definition this corpus counts.
+                //
+                // Same for the last of the four 32-bit fields (finding 69, 574 frames with
+                // it garbage). Three of the four are identified outright (finding 49).
+                // What is left opaque here is only the UMI options above.
+                c.named += 2;
                 let tail = s.extended_tail.len();
-                // Two always-zero bytes, then three identified 32-bit fields (finding 49),
-                // then one that is not identified -- and that last u32 is now PROVEN
-                // IGNORED: finding 69 emitted the block with it set to 0xa5a5a5a5 and two
-                // peers adopted us anyway, 574 frames against a control of 918. Unnamed and
-                // free to choose are different things, and this is the second.
-                c.opaque += tail.min(2);
+                c.named += tail.min(2);
                 if tail > 2 {
                     c.named += (tail - 2).min(16);
                 }

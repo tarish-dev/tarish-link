@@ -4099,6 +4099,132 @@ and disqualifies you if wrong; the other is ignored entirely. **Nothing in any c
 distinguishes them** — they look identical on the air. Only a transmitter can tell them
 apart, and that is the whole argument for having built one.
 
+## 70. ★★ The adoption counter starves exactly when the room gets interesting
+
+This is an instrument defect, and it is recorded first because every finding in the E-series
+is read off that instrument.
+
+Run E3b's beacon reported **`adopted by 1 peer(s), 14 frame(s)`**. The packet capture of the
+same run, same seconds, held **2,123 frames from three peers** naming us master. Two orders
+of magnitude, and in the direction that reads as *the peers ignored us* — which would have
+inverted the finding it was measuring.
+
+### Why the earlier runs looked trustworthy
+
+E1 and E2 agreed with their own captures to within one frame (918 vs 918, 574 vs 574). That
+agreement was luck, not correctness:
+
+In E1 and E2 **every peer named us master.** `Cluster::observe` counts such a frame and
+returns early, deliberately, so `self.master` is never set, the cluster clock never becomes
+usable, and `adopted` stays false. The listener's drain budget is computed as:
+
+```rust
+let slack_us = match cluster.us_until_master_window(now_us) {
+    Some(w) if adopted => w,
+    _                  => b.us_until_next_advertised_window(now_us),
+};
+let max_drain = if slack_us < 4_000 { 0 } else { 32 };   // the bug
+```
+
+With `adopted == false` the slack is measured against **our own** advertised windows, which
+are sparse (slots 2, 8, 10 of 16), so the branch was almost never taken and the drain was
+generous.
+
+E3b had a **competing cluster** — `e6:a6` at metric 538, followed by `72:01` for 1,892
+frames. We adopted its clock, `slack_us` began measuring time to *that* master's window, and
+a master with frequent slots holds it under 4 ms nearly always. `max_drain` went to zero and
+stayed there. Zero does not mean "read one frame and move on"; it means **do not attempt a
+read at all**.
+
+So the counter is reliable when we are unopposed and blind when we are not — the precise
+inverse of when the measurement matters.
+
+### The fix
+
+`max_drain` is 4 rather than 0 when a window is imminent, with `budget_ms` still 0. `rx(0)`
+is `MSG_DONTWAIT` (finding 60), so a queued frame costs microseconds and an empty queue
+returns immediately and breaks. Transmission timing is unaffected.
+
+### The rule this leaves behind
+
+**The capture is the measurement; the beacon's own counter is a convenience.** A passive
+`tcpdump` on a second interface has no transmit duty to trade against, and it was right in
+all three runs. Where the two disagree, the capture wins — and a disagreement is itself a
+signal worth chasing, because it took a real defect to produce one.
+
+---
+
+## 71. ★★ Tag 12's extended flags word is ignored too — the block is now fully ours
+
+Finding 69 proved the last of tag 12's four 32-bit values is not read. The two fields left
+opaque were the `extended_flags` word and the two always-zero bytes beside it — four bytes at
+the head of the extended block.
+
+**Neither is read.**
+
+### The probe
+
+`--garbage ext12-head` fills offsets 13–16 of the tag 12 value with `0xa5`, leaving the three
+identified counters intact. Read back off the air from our own frames, so the encoder is
+confirmed rather than assumed:
+
+```
+04 83 51 41 00 95 00 00 c0 ca b0 60 4c a5 a5 a5 a5 00 87 01 00 14 ae 04 00 20 49 00 00 ...
+                                        ^^^^^^^^^^^ extended_flags + the zero pair
+                                                    ^^^^^^^^^^^ master_counter, intact
+```
+
+### The series
+
+Same metric, same room, tag 24 master address tallied from the capture in every row:
+
+| run | tag 12 bytes 13–16 | frames naming us master | peers |
+|---|---|---|---|
+| E1 control | correct (`0x0000` + zeros) | 918 | 2 |
+| E2 | last u32 garbage | 574 | 2 |
+| **E3b** | **`extended_flags` + pad garbage** | **2,123** | **3** |
+
+E3b is the highest adoption of the whole series, with a third peer joining. The claim stays
+binary — magnitude across runs reflects exposure and who was awake, not field quality — but
+the decision rule established by the tag 24 bisection is unambiguous: a field that is *read*
+produces an exact **zero** (finding 65's rejects, finding 67's absent tag 24), never
+thousands.
+
+### A voided run, recorded because voiding it was the right call
+
+E3 ran first and produced only our own 1,199 frames — no peer arrived at all. The garbage was
+confirmed on air, so it was tempting to read the zero as a rejection. It is not a rejection;
+it is an empty room, and it is indistinguishable from one only if you do not check who else
+transmitted. E3b reopened the question into a room verified to contain peers.
+
+### What it buys
+
+**206,806 opaque bytes.** Tag 12 goes from 84.8% to **92.8%**, floor 39/47 to **43/47**, and
+the control plane from 90.9% to **92.1%**.
+
+`extended_flags` is still not *understood* — we could not say what bit 3 means, and Apple's
+`0x117d | (k << 10)` is device-stable in a way that looks like a capability word. But finding
+47's standard is whether we can choose a correct value without copying one, and a field the
+receiver demonstrably does not read can be filled by construction. OWL and `libmosey` both
+send `0x0000`, which was already the honest default; now it is a measured one.
+
+**Tag 12's extended block is fully accounted for.** What remains opaque in tag 12 is only the
+UMI options blob.
+
+### The score after a day of asking
+
+Of every reserved or unnamed field we could reach and perturb — tag 4's `reserved_28` and its
+trailing pair, tag 5 in its entirety, tag 16, tag 24's bytes 32–35, tag 12's trailing u32,
+and now tag 12's `extended_flags` and pad — **exactly one is actually read**: the u32 at tag
+24 offset 28 (finding 65). Everything else is decoration that a receiver never consults.
+
+That specificity is what makes it a finding rather than a guess about how strict Apple is.
+The interesting part is that nothing in any capture distinguishes the one from the others:
+all of them are zero in every Apple frame ever recorded. Only a transmitter can tell them
+apart.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

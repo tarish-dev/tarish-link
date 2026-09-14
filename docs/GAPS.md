@@ -45,13 +45,26 @@ command's output, so adding captures improves it rather than dating it.
 
 ## How much of this do we actually understand?
 
-**89.4% of the control-plane bytes, and the other 10.6% we copy.** Measured over the whole
-corpus — 40 AWDL captures, 37,829 action frames, 14,375,146 TLV bytes — not estimated. It
-was 63% before the decoding pass in findings 21-25.
+**90.3% of Apple's control-plane bytes, and the other 9.7% we copy.** Not estimated: 19
+pure-observation captures, 16,954 action frames, 4,681,319 control-plane TLV bytes. It was
+63% before the decoding pass in findings 21-25, and 89.4% before the transmitter began
+asking Apple devices directly which fields they actually read (findings 63-71).
+
+**Which captures the number is computed over is not a detail.** 38 of the 57 captures in
+`captures/` were recorded while our own transmitter was running, and 55,635 of the corpus's
+79,614 action frames are OURS. Our frames are trivially well-classified — we composed them,
+and we do not emit the tags we understand least (32, 33, and the larger tag 6 forms) — so
+including them flatters the figure to **92.1%**. That is the number the tool prints by
+default, because the corpus is also the regression corpus and every capture belongs in it.
+It is not the number to quote for "how much of Apple's protocol do we understand."
+
+The gap is only 1.8 points, and the per-tag **floors are identical either way** — which is
+the reassuring part, and the reason the floor rather than the headline is what the ratchet
+guards.
 
 ```bash
-scripts/coverage-check.sh                                  # the ratchet: 0 held, 3 fell
-awdl coverage captures/*.pcap                              # the full table
+scripts/coverage-check.sh                                  # the ratchet, over everything
+awdl coverage captures/*.pcap                              # the full table, 92.1%
 awdl coverage captures/*.pcap --update-baseline docs/coverage-floor.txt
 ```
 
@@ -75,21 +88,21 @@ is cargo-culting with no signal when it is wrong.
 | 18 | Channel Sequence | 100% | 41/41 | 0 | |
 | 21 | Version | 100% | 2/2 | 0 | |
 | 16 | Arpa | **100%** | 40/40 | 0 | UUID v4 host name (f47); flags byte **proven ignored** (f63) |
-| 4 | Synchronization Parameters | 97.3% | 71/73 | 129,488 | only the flags word left; byte 28 and the trailing pair **proven ignored** (f63) |
 | 5 | Election Parameters | **100%** | 21/21 | 0 | `reserved_4` and the tail **proven ignored** (f63) |
-| 24 | Election Parameters v2 | 90.0% | 36/40 | — | 32..36 proven ignored; **28..32 is a u32 the peer READS** — finding 65 |
-| 12 | Data Path State | 77.1% | 35/47 | 309,702 | extended flags, UMI options and one unidentified u32 — finding 49 |
-| 7 | HT Capabilities | 82.0% | 6/8 | 74,478 | only the two leading bytes — the "tail" was a truncated MCS set, finding 48 |
-| 33 | 6 GHz channels | 24.7% | 2/14 | 90,906 | |
-| 32 | 6 GHz info | 15.4% | 2/13 | 60,060 | |
-| 6 | Service Parameters | **0%** | 0/9 | 348,377 | shape known, contents are a hash — and **it does not matter**, finding 25 |
+| 4 | Synchronization Parameters | 97.3% | 71/73 | 159,228 | only the flags word left; byte 28 and the trailing pair **proven ignored** (f63) |
+| 12 | Data Path State | **92.9%** | 43/47 | 204,820 | extended block now fully ours — f69, f71. Only UMI options remain |
+| 24 | Election Parameters v2 | 90.0% | 36/40 | 313,660 | 32..36 proven ignored; **28..32 is a u32 the peer READS** — finding 65 |
+| 7 | HT Capabilities | 80.9% | 6/8 | 158,048 | only the two leading bytes — the "tail" was a truncated MCS set, finding 48 |
+| 33 | 6 GHz channels | 21.9% | 2/14 | 131,712 | |
+| 6 | Service Parameters | 15.9% | 2/17 | 595,555 | the `sui` is named; the rest is a hash — and **it does not matter**, finding 25 |
+| 32 | 6 GHz info | 15.4% | 2/13 | 60,742 | |
 | 35 | *unrecognised* | **0%** | 0/2 | 132 | no parser. Not in any published table, 2 bytes, `01 01` |
 | 0 | SSTH Request | n/a | — | 0 | zero-length: a presence flag, nothing to understand |
 
-Counting Service Response flatters the figure to 86.1%: it is 31% of all bytes on the air
+Counting Service Response flatters the figure to 94.5%: it is 30% of all bytes on the air
 and it is the one thing that was already specified elsewhere. The number that matters for
-building a transmitter is the **84.9%**, and the work queue is the opaque-bytes column,
-largest first.
+building a transmitter is the **92.1%**, and the work queue is the opaque-bytes column,
+largest first — which now means tag 6's hash, tag 24's read u32, and the 6 GHz pair.
 
 ### What is left is not decodable from the corpus — finding 50
 
