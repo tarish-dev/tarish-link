@@ -3656,6 +3656,76 @@ with nothing on our side having changed.
 `_airdrop` appearing in a device's advertised service list tracks that setting, so the
 peer's AirDrop state is **visible from the air** — no need to ask anyone to check a phone.
 
+## 63. ★★ APPLE VALIDATES TAG 24'S "RESERVED" BYTES — the first field we know they check
+
+Tag 24's `unknown_28` is eight bytes that have been `00` in all 37,829 frames measured, named
+by no specification. Finding 47 set the rule that constant is not the same as understood, and
+finding 60 built `--garbage` to settle it the only way it can be settled: send something else
+and see whether Apple peers still behave.
+
+**They do not.** Those bytes are read.
+
+### The crossover
+
+One iPhone, `72:01:e2:fd:9d:57`. Room verified silent before each run, us sole master at
+metric 600, peer woken into our room by setting AirDrop to Everyone, garbage confirmed on the
+air by reading our own frames back out of each capture.
+
+| run | flag | window | peer metric | **frames naming us master** |
+|---|---|---|---|---|
+| K1 | control | 4 min | 532 | **146** |
+| K5 | `--garbage t24` | 4 min | 537 | **0** |
+| K6 | control | 4 min | 528 | **241** |
+| K4 | `--garbage t24` | 16 min | 536 | **0** |
+
+Controls 146 and 241. Treatments 0 and 0. Alternating order, so drift cannot masquerade as
+the effect. Captures: `captures/garbage-K{1,4,5,6}.pcap`.
+
+In both treatments the peer showed `following 0` for the entire run — it never deferred to
+anything, not merely not to us.
+
+### The duration confound, and why it is dead
+
+K4 ran 16 minutes against K1's 4, so "a peer left unchallenged for longer simply entrenches"
+was a live alternative — its 5546 master claims against K1's 465 fit that story. K5 was run at
+**K1's exact four-minute window** and still gave zero, with the peer present for 17 of 24
+buckets. The duration explanation is gone; K6 then replicated the control at the same window.
+
+### What it means, stated carefully
+
+**Those eight bytes are not ignorable.** Two readings, which this experiment cannot separate:
+
+- Apple **validates** them as reserved, and a non-zero value makes the frame or the tag
+  invalid
+- our **layout is wrong**, and bytes 28..36 carry a field Apple reads that we have mislabelled
+  as unknown
+
+Either way the operational conclusion is identical: a transmitter must send zeros there, and
+`unknown_28` is now a field we know matters rather than one we carry for round-tripping.
+
+**The named fields around it were untouched** — `self_metric` at 24..28 and `self_counter` at
+36..40 were verified intact in every treatment capture, and the TLV length never changed. So
+this is not a parse shift.
+
+### The assumption it inverts
+
+The whole experiment was designed on the premise that measured-constant bytes are *probably*
+reserved and safe to fill. The result says the opposite: **they are constant because they are
+required.** That reframes the remaining ~450,000 opaque bytes — tag 5's three, tag 16's flags
+byte, tag 4's byte 28 and trailing pair — from "candidates for free coverage" to "suspects,
+each of which must be tested the same way".
+
+It also means the honest coverage ceiling is lower than finding 50 estimated, and for a better
+reason: some of those bytes are not ours to choose at all.
+
+### Method note
+
+This took about twelve hours across two sessions, and roughly fifteen runs voided before four
+counted. Every void had a named cause — cue latency, peers that would not wake, a peer woken
+as a rival, a stale competitor, our own transmitter starved by `SO_RCVTIMEO(0)`, and an
+adoption counter gated behind `--follow`. The four that counted are the ones where every
+precondition was checked **before** the outcome was read.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
