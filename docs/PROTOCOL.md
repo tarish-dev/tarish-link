@@ -76,6 +76,11 @@ document with a real control". It had a converse. That is not a control.
    into it.
 
 11. **An empty room refuses everything. Count the peers before reading the outcome.**
+   *(Amended by finding 75: a SETTLED room is no longer a void for election work — a settled
+   two-iPhone cluster was taken twice on 2026-09-14 with no entry event. The entry-event
+   check below remains the right gate for experiments that DEPEND on entry, but a settled
+   room is now a legitimate and cheaper condition in its own right. An EMPTY room is still a
+   void, and that half is unchanged.)*
    A run with no peer transmitting produces zero frames naming us master, which is
    byte-for-byte the same observation as a peer that considered us and said no. Run E3
    spent eight minutes measuring an empty room and the garbage was confirmed on air, which

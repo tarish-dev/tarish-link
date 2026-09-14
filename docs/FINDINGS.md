@@ -4432,6 +4432,85 @@ know exactly what to send and have no idea why.
 
 ---
 
+## 75. ★★★ A settled cluster DOES re-elect — finding 57 and the spec were wrong
+
+**We took mastership from a settled Apple cluster. Twice, on the same evening, with no entry
+event in either run.** Finding 57 and SPEC both said this does not happen — *"a settled
+cluster does not re-elect for a better metric — not at 600, not when it can hear us clearly,
+not when our frames land in its own windows"* — and that claim is now refuted by measurement.
+
+I repeated it to the operator earlier the same evening as settled fact: *"we can be elected,
+we cannot displace an incumbent."* That was wrong.
+
+### What happened
+
+The room was verified settled before each run: two iPhones, one claiming master, the other
+following, both present continuously. **Zero entry events in both runs** — neither phone ever
+left the air, so neither had the "arriving device adopts the incumbent" shortcut available.
+
+| run | incumbent | its metric | ours | outcome |
+|---|---|---|---|---|
+| M541 | `e6:a6` | 540 | **541** | conceded at ~215 s — 852 frames naming us |
+| M600 | `e6:a6` | 541 | **600** | conceded in **under 10 s** — 3,242 frames naming us |
+
+In M541 the incumbent held `self=540` from counter 1797 to 1880 and then named us master
+without ever raising its own metric. In M600 both peers had already switched before the
+capture opened — first named us at frames 1 and 2.
+
+### Two hypotheses died on the way
+
+**"600 is outside Apple's plausible range and is discarded."** The operator's, and a good
+one: every Apple value ever captured sits in 510-541, so 600 is a value no real device would
+produce, and an implementation that sanity-checks it would explain both the settled-cluster
+failures and the entry successes at once. **Refuted** — M600 took the cluster harder and
+faster than M541 did.
+
+**"Every previous settled test ended too early."** M541's takeover at ~215 s against a
+harness default of 60 s capture made this look almost certain, and it would have been an
+embarrassing reason for a four-month-old negative result. **Refuted** — M600's takeover
+happened within ten seconds of the beacon starting, which every historical run would have
+caught.
+
+### What actually predicts it, on the evidence so far
+
+Not the metric, and not the clock. The pattern across the three valid settled runs tracks
+**which handset is incumbent**:
+
+| run | incumbent | outcome |
+|---|---|---|
+| Z0ctl | `72:01` | refused, 0 |
+| M541 | `e6:a6` | conceded |
+| M600 | `e6:a6` | conceded |
+
+Z0ctl is the strongest comparison available: same night, same metric 600, incumbent claiming
+539 against M600's 541 — and the opposite result. Three runs is not enough to call it a
+device property, and the two handsets differ in ways nobody has enumerated (model, iOS
+version, battery state, whether they are on charge). **This is the open question, and it is
+the interesting one.**
+
+### Why the old negative is still worth reading
+
+Finding 57 was not sloppy. It had controls, it killed a tempting 14-frame partial result that
+did not replicate, and it correctly refused to move a threshold to fit. What it lacked was a
+settled-cluster run against **this** device as incumbent — and the conclusion was written as a
+property of AWDL when the evidence only supported a property of the runs that had been done.
+
+The lesson is narrow and worth keeping: *"eight runs, zero adoptions"* is a statement about
+eight runs. Generalising it to "a settled cluster does not re-elect" imported a mechanism the
+data never showed, and that sentence then sat in the spec being true for four months.
+
+### What changes
+
+- SPEC's claim is corrected rather than deleted; the shape of the negative was real.
+- **Election experiments no longer require an entry event.** Finding 72's rule stands as a
+  validity check — a settled room refusing everything is still a void — but a settled room is
+  now a legitimate and much cheaper experimental condition, needing no operator toggling.
+- The `--windows` breadth hypothesis from Trial E is no longer needed to explain how a
+  settled cluster is taken, though it may still explain why some incumbents yield and others
+  do not.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

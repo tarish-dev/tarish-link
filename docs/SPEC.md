@@ -467,11 +467,20 @@ Three things that are not in any byte layout and each cost real time:
 raises no error anywhere: the inner `version = 1` lands on `event_type` and the frame
 silently becomes something else, which the peer then ignores.
 
-**A settled cluster does not re-elect, whatever you advertise.** Eight runs, metrics from 50
-to 600 against settled Apple peers, zero adoptions. Every adoption on record has the same
-shape: a device *entering* a room adopts whoever is already claiming master. So to be
-adopted, be transmitting before the peer arrives — losing an election you never get to
-contest is not a defect in `beats()`.
+**A settled cluster CAN be taken — but not reliably, and nobody knows what decides it.**
+This paragraph used to say the opposite, on eight runs at metrics from 50 to 600 that all
+scored zero. Two runs on 2026-09-14 took mastership from a verified-settled two-iPhone
+cluster with no entry event: one at metric 541 conceding after ~215 s, one at metric 600
+conceding in under ten seconds, 852 and 3,242 frames naming us master. Finding 75.
+
+What predicts success is **not** the metric and **not** the run length — both were tested
+directly and both were refuted. The only pattern in the evidence is which handset held
+mastership: one iPhone yielded twice, the other refused under otherwise identical conditions.
+Three runs, so treat it as an open question rather than a device property.
+
+Entry is still the *reliable* path, and it is the one to design for: a device entering a room
+adopts whoever is already claiming master, every time. Be transmitting before the peer
+arrives.
 
 **Two iPhones re-form a cluster in under ten seconds.** Any experiment that establishes a
 condition *before* opening the capture has already missed it.
