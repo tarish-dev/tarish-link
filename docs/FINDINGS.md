@@ -3855,12 +3855,25 @@ Tag 24: **80.0% to 90.0%**, floor 32/40 to 36/40.
 The four bytes at 28..32 stay opaque, and they are now the most interesting four bytes in the
 tag: read by Apple, sized, located, unnamed.
 
-### What to ask next
+### What values it accepts — two tried, both refused
 
-**What values does it accept?** Only `0x01` has been tried. If `0x02` and `0x80` are also
-refused it is "must be zero". If some pass, it is an enum or a bitfield and the accepted set
-is its meaning — which would be the first time this project has read a field's semantics out
-of a peer rather than out of a capture.
+`0x80` at byte 28 was refused as well, with the strongest exposure of any probe: the peer sat
+for 18 buckets, claimed master 3217 times, and showed `following 0`.
+
+```
+byte 28 = 0x01   REJECTED
+byte 28 = 0x80   REJECTED     bit 0 and bit 7, as different as two bytes get
+```
+
+**That is support for "must be zero", not proof of it.** Two values out of 256, and the
+informative outcome would be a value that *passes* — which there is no way to guess at. The
+honest statement is: every value tried is refused, and a transmitter must send zero.
+
+Testing more values has poor returns. **The method is better spent elsewhere**: it found a
+field in tag 24, and the same probe works on any byte we can choose. Tag 12's unidentified
+`u32` at the end of its extended block, tag 7's two leading bytes, and tags 32/33's
+low-cardinality unknowns are all candidates, and each one that turns out to be *read* is
+another field located.
 
 ## Open, not yet investigated
 
