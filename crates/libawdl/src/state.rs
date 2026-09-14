@@ -292,6 +292,48 @@ impl DataPathState {
         out
     }
 
+    /// Attach the extended block, filled with our own state — finding 49's layout.
+    ///
+    /// **Why this is opt-in.** libawdl has been elected master repeatedly while sending a
+    /// 13-byte tag 12 with no extended block at all, so this is not needed to work. It
+    /// exists so the last `u32` of the block can be probed: that value is the only one of
+    /// the four finding 49 could not identify, it advances between 1.0 and 3.2 per
+    /// `master_counter` tick, and it is neither a clock nor a tick counter.
+    ///
+    /// `extended_flags` is the one value here we cannot derive. Apple sends
+    /// `0x117d | (k << 10)` and it is device-stable, so it looks like a capability word;
+    /// non-Apple senders — OWL and `libmosey` — send `0x0000`. **Zero is therefore a value
+    /// a real implementation uses**, which makes it the honest default rather than copying
+    /// Apple's bits and hoping.
+    ///
+    /// ```text
+    ///   +0..2   extended_flags
+    ///   +2..4   zero
+    ///   +4..8   master_counter, relayed
+    ///   +8..12  a millisecond clock
+    ///   +12..16 an Availability Window counter
+    ///   +16..20 unidentified
+    /// ```
+    pub fn with_extended(
+        mut self,
+        extended_flags: u16,
+        master_counter: u32,
+        clock_ms: u32,
+        aw_counter: u32,
+        unidentified: u32,
+    ) -> DataPathState {
+        self.flags |= flag::EXTENDED;
+        self.extended_flags = Some(extended_flags);
+        let mut t = Vec::with_capacity(18);
+        t.extend_from_slice(&[0, 0]);
+        t.extend_from_slice(&master_counter.to_le_bytes());
+        t.extend_from_slice(&clock_ms.to_le_bytes());
+        t.extend_from_slice(&aw_counter.to_le_bytes());
+        t.extend_from_slice(&unidentified.to_le_bytes());
+        self.extended_tail = t;
+        self
+    }
+
     /// What this device is: its AWDL address, its region, its social channel, and the
     /// access point it is associated to if there is one.
     ///

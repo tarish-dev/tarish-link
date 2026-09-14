@@ -193,14 +193,17 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
                 // and per finding 47 a value we would have to copy is not a named one.
                 c.opaque += 2;
                 let tail = s.extended_tail.len();
-                // Two always-zero bytes, then three identified 32-bit fields, then one
-                // that is not identified. Finding 49.
+                // Two always-zero bytes, then three identified 32-bit fields (finding 49),
+                // then one that is not identified -- and that last u32 is now PROVEN
+                // IGNORED: finding 69 emitted the block with it set to 0xa5a5a5a5 and two
+                // peers adopted us anyway, 574 frames against a control of 918. Unnamed and
+                // free to choose are different things, and this is the second.
                 c.opaque += tail.min(2);
                 if tail > 2 {
-                    c.named += (tail - 2).min(12);
+                    c.named += (tail - 2).min(16);
                 }
-                if tail > 14 {
-                    c.opaque += tail - 14;
+                if tail > 18 {
+                    c.opaque += tail - 18;
                 }
             }
             c.opaque += len.saturating_sub(c.total());

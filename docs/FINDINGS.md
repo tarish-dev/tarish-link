@@ -4045,6 +4045,60 @@ bytes elsewhere: OWL names the field, the corpus confirms its behaviour across 4
 transitions, and OWL sends 0 for it, so a value we can choose is demonstrated rather than
 assumed.
 
+## 69. ★ Tag 12's unidentified u32 is ignored — and we had to build a block to ask
+
+Finding 49 decoded tag 12's extended block and identified three of its four 32-bit values:
+a relayed `master_counter`, a millisecond clock, and an Availability Window counter. The
+fourth resisted — it advances between 1.0 and 3.2 per counter tick, which is neither a clock
+nor a tick counter.
+
+**The receiver does not read it.**
+
+### The obstacle, and what it cost to get past
+
+`libawdl` sends a **13-byte tag 12 with no extended block at all** — and is elected master
+regardless. So there was nothing to perturb. Asking the question required teaching the beacon
+to emit a block it had never needed, which is the first time an experiment here has required
+*adding* capability rather than corrupting what we already sent.
+
+`extended_flags` is the value we cannot derive. Apple sends `0x117d | (k << 10)`, device
+stable, which looks like a capability word. **OWL and `libmosey` send `0x0000`**, so zero is
+a value a real implementation uses — and that made it the honest default rather than copying
+Apple's bits and hoping. The control proved the choice sound.
+
+### The pair
+
+Same two iPhones, same room, minutes apart, block otherwise byte-identical:
+
+| run | last u32 | frames naming us master |
+|---|---|---|
+| E1 | `00 00 00 00` | **918** — `72:01` x740, `e6:a6` x178 |
+| E2 | `a5 a5 a5 a5` | **574** — `72:01` x445, `e6:a6` x129 |
+
+Both adopt, both far above the threshold of 20. Our own frames read back off the air confirm
+the garbage in E2 and its absence in E1.
+
+E1's 918 is the highest adoption count of the entire session, and E2 is lower — but a single
+pair says nothing about magnitude, and both are unambiguous adoptions. The claim is binary
+and that is all it is: **the value of that u32 does not affect whether a peer elects us.**
+
+### What it buys
+
+Four bytes of every 47-byte tag 12, **165,208 opaque bytes**. Tag 12 goes from 77.6% to
+**84.9%**, floor 35/47 to 39/47, and the control plane from 89.9% to **90.9%**.
+
+Named on the by-now familiar weakest basis: not that we know what it means, but that a peer
+was measured ignoring it. What remains opaque in tag 12 is the `extended_flags` word, the two
+zero bytes beside it, and the UMI options blob.
+
+### The contrast that makes this worth something
+
+Tag 24's `u32` at offset 28 and tag 12's `u32` at the end of its extended block are both
+four-byte values nobody has named, both zero in every Apple frame ever captured. One is read
+and disqualifies you if wrong; the other is ignored entirely. **Nothing in any capture
+distinguishes them** — they look identical on the air. Only a transmitter can tell them
+apart, and that is the whole argument for having built one.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

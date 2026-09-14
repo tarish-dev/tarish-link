@@ -460,7 +460,7 @@ fn an_unknown_garbage_group_is_refused() {
         Garbage::parse("all"),
         Some(Garbage {
             t4: true, t5: true, t16: true, t24: true, t7: true,
-            no_t24: false, t24_probe: None
+            no_t24: false, ext12: false, ext12_garbage: false, t24_probe: None
         })
     );
     assert!(Garbage::parse("t99").is_none(), "a typo must not run a weaker experiment");
@@ -549,4 +549,53 @@ fn no_t24_omits_exactly_that_tag() {
         let b = w.iter().find(|(t, _)| *t == tag).map(|(_, v)| v.clone());
         assert_eq!(a, b, "tag {tag} must be byte-identical");
     }
+}
+
+
+/// Tag 12's extended block: emitted only on request, and shaped as finding 49 measured it.
+#[test]
+fn ext12_emits_the_block_finding_49_describes() {
+    use libawdl::beacon::{Garbage, GARBAGE_BYTE};
+    use libawdl::state::{flag, DataPathState};
+
+    let addr = [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c];
+    let t12 = |b: &Beacon| -> Vec<u8> {
+        b.mif_tlvs(0).into_iter().find(|(t, _)| *t == 12).expect("tag 12").1
+    };
+
+    // By default there is no extended block at all -- and we are still elected, which is
+    // the whole reason this is opt-in.
+    let plain = Beacon::new(addr, 149, "QA");
+    let p = t12(&plain);
+    let pd = DataPathState::parse(&p).expect("parses");
+    assert_eq!(pd.flags & flag::EXTENDED, 0, "no extended block by default");
+    assert_eq!(pd.extended_flags, None);
+
+    let mut ext = Beacon::new(addr, 149, "QA");
+    ext.garbage = Garbage::parse("ext12").expect("parses");
+    let e = t12(&ext);
+    let ed = DataPathState::parse(&e).expect("parses");
+    assert_ne!(ed.flags & flag::EXTENDED, 0, "the EXTENDED bit is set");
+    assert_eq!(ed.extended_flags, Some(0x0000), "what OWL and libmosey send");
+    assert_eq!(ed.extended_tail.len(), 18, "two zero bytes plus four u32s");
+    assert_eq!(&ed.extended_tail[..2], &[0, 0]);
+    assert_eq!(ed.ext_unknown_14(), Some(0), "the unidentified u32 starts clean");
+
+    // Everything the flags already selected must be unchanged -- the block is appended,
+    // not woven in.
+    // The block is appended, not woven in: 2 bytes of extended_flags plus an 18-byte tail.
+    assert_eq!(e.len(), p.len() + 20, "13-byte tag 12 becomes 33");
+    assert_eq!(&e[2..p.len()], &p[2..], "every earlier field is byte-identical");
+    assert_eq!(pd.country, ed.country);
+    assert_eq!(pd.awdl_address, ed.awdl_address);
+    assert_eq!(pd.social_channel_raw, ed.social_channel_raw);
+
+    // And the garbage variant perturbs exactly the last u32.
+    let mut bad = Beacon::new(addr, 149, "QA");
+    bad.garbage = Garbage::parse("ext12-bad").expect("parses");
+    let bd = DataPathState::parse(&t12(&bad)).expect("parses");
+    assert_eq!(bd.ext_unknown_14(), Some(u32::from_le_bytes([GARBAGE_BYTE; 4])));
+    assert_eq!(bd.ext_master_counter(), ed.ext_master_counter(), "counter untouched");
+    assert_eq!(bd.extended_flags, ed.extended_flags, "flags untouched");
+    assert_eq!(bd.extended_tail.len(), 18, "length unchanged");
 }
