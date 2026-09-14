@@ -4015,7 +4015,12 @@ len 13:  00 00 00 | ab 00 | 20 00 | 18 80 20 40 02 10
 len 15:  00 00 00 | ae 00 | 30 00 | 18 88 01 20 40 02 02 10
 ```
 
-**The u16 at offset 3 is non-decreasing in 100% of 46,491 transitions**, and constant within
+**The u16 at offset 3 is the `sui` — Service Update Indicator.** OWL names it in
+`awdl_service_params_tlv` and this repository's own `state.rs` already recorded that split;
+the analysis below arrived at the same field from behaviour alone, which is corroboration
+rather than discovery. It should have been read before it was rediscovered.
+
+It is **non-decreasing in 100% of 46,491 transitions**, and constant within
 a capture for nearly every sender — `02:3b:e8` holds 11801 across 267 frames, `22:dd:ca`
 holds 1180 across 985, OWL sends 0. It moves rarely (11845 to 11849 in one capture). That is
 the profile of a **generation counter for the advertised service set**: it changes when the
@@ -4031,10 +4036,14 @@ values-minus-popcount difference spread across -9 to +3. It is not that shape.
 
 ### Where that leaves it
 
-Finding 25's assessment stands: the field boundaries are partly visible, the contents are
-not, and it does not matter for anything we currently do. The generation counter is the one
-piece with a plausible name, and naming it in `coverage` would need a discovery experiment to
-show a value can be chosen — which does not exist yet.
+Finding 25's assessment mostly stands: the three leading bytes are unnamed, the bitmask after
+the `sui` is a hash we cannot compute, and none of it matters for anything we currently do.
+
+The `sui` is now **named in coverage** — 2 bytes of every tag 6, taking it from **0% to
+16.1%** and the control plane to **89.9%**. That is on firmer ground than the proven-ignored
+bytes elsewhere: OWL names the field, the corpus confirms its behaviour across 46,491
+transitions, and OWL sends 0 for it, so a value we can choose is demonstrated rather than
+assumed.
 
 ## Open, not yet investigated
 

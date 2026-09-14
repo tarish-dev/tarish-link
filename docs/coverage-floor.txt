@@ -12,7 +12,7 @@
 2     24/24         100.0   Service Response
 4     71/73          97.3   Synchronization Parameters
 5     21/21         100.0   Election Parameters
-6     0/9             0.0   Service Parameters
+6     2/17           16.1   Service Parameters
 7     6/8            80.9   HT Capabilities
 12    35/47          77.6   Data Path State
 16    40/40         100.0   Arpa

@@ -267,11 +267,20 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             Coverage { named, opaque: len - named }
         }
 
-        // Service Parameters: the field boundaries are known and the CONTENTS are not.
-        // A bitmask whose hash function we do not have is not a value we can choose, so
-        // this counts as nothing named -- knowing where a field starts is not knowing
-        // what belongs in it.
-        6 => all_opaque,
+        // Service Parameters. The `sui` at 3..5 -- Service Update Indicator, named by OWL
+        // and independently confirmed from behaviour in finding 68: non-decreasing across
+        // 100% of 46,491 transitions, constant within a capture, stepping only when the
+        // service set changes. We can choose it; OWL sends 0.
+        //
+        // Everything else stays opaque. The three leading bytes are unnamed, and the
+        // bitmask after the sui is a hash we cannot compute -- knowing where a field
+        // starts is not knowing what belongs in it.
+        6 => {
+            if len < 5 {
+                return all_opaque;
+            }
+            Coverage { named: 2, opaque: len - 2 }
+        }
 
         // Everything else has no parser at all.
         _ => all_opaque,

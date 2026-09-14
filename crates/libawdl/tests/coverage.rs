@@ -56,8 +56,10 @@ fn the_undecoded_tags_are_the_ones_we_think_they_are() {
     // Knowing where a field starts is not knowing what belongs in it.
     assert!(is_decoded(6), "there is a parser");
     let six = of_tlv(6, &[0u8; 11]);
-    assert_eq!(six.named, 0, "and it names nothing");
-    assert_eq!(six.opaque, 11);
+    // The sui at 3..5 is named -- OWL names it and finding 68 confirmed its behaviour.
+    // The three leading bytes and the bitmask after it are not.
+    assert_eq!(six.named, 2, "the sui, and only the sui");
+    assert_eq!(six.opaque, 9);
 
     for tag in [2u8, 4, 5, 7, 12, 16, 17, 18, 21, 24, 32, 33] {
         assert!(is_decoded(tag), "tag {tag} has a parser");
