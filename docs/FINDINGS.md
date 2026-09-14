@@ -3789,6 +3789,79 @@ It also revises what `--garbage` is for. It was built to convert opaque bytes in
 coverage; it turns out to be a **probe for finding fields**, which is the more valuable
 instrument.
 
+## 65. ★★★ A u32 nobody has named, found by asking an iPhone seven yes/no questions
+
+Tag 24's `unknown_28` was eight bytes that OWL calls reserved, that every capture shows as
+zero, and that finding 63 showed an Apple peer refuses to accept garbage in. Probing it one
+byte at a time located a **four-byte field** inside it.
+
+### The probe results
+
+One byte set to `0x01`, the other seven left as Apple sends them. Outcome measure unchanged:
+frames from a non-us sender naming our address as master, against controls of **146** and
+**241**.
+
+```
+offset in block:   0     1     2     3   |   4     5     6     7
+TLV offset:       28    29    30    31   |  32    33    34    35
+                 REJ   REJ     ?   REJ   | ACC     ?     ?   ACC
+                   0     0     -     0   |  86     -     -   172
+                                    └──── boundary ────┘
+```
+
+**Bytes 31 and 32 are an adjacent reject/accept pair**, which places the boundary exactly
+there. No inference, no curve fitting — two neighbouring bytes with opposite answers.
+
+That gives:
+
+| TLV bytes | what it is |
+|---|---|
+| **28..32** | a **`u32` the peer reads**. Non-zero values are refused |
+| 32..36 | four bytes **proven ignored** |
+
+A `u32` at 28 is the shape every other field in this tag already has — `master_counter`,
+`distance`, `master_metric`, `self_metric`, `self_counter`.
+
+Byte 30 was never probed. It sits between two rejected bytes and is assumed to belong to the
+field, not measured.
+
+### What this is, and what it is not
+
+**It is a field whose existence and size are established and whose meaning is not.** Apple
+sends zero, the corpus is all zero, and every value tried is refused. That is enough to say a
+transmitter must send zero; it is not enough to name it. `unknown_28` keeps its honest name
+rather than becoming `reserved`, which would assert precisely the thing this disproved.
+
+### The method is the result
+
+Every other decode in this file came from reading bytes off the air. This one came from
+**asking a device questions and reading its behaviour**. Seven runs, each worth one bit,
+against a pre-registered measure with a positive control.
+
+`--garbage` was built to convert opaque bytes into free coverage. It turned out to be an
+instrument for **finding fields**, which is worth more — and it works on any byte we can
+choose, in any tag.
+
+### Coverage, and an honest note on how it moved
+
+Bytes 32..36 now count as named, on a basis that appears nowhere else in this project: not
+that we know what they mean, but that a peer was **measured ignoring them**. The module's
+test is whether we could choose a correct value without copying one, and for a proven-ignored
+byte every value is correct. It is the weakest way to satisfy that test and it does satisfy
+it.
+
+Tag 24: **80.0% to 90.0%**, floor 32/40 to 36/40.
+
+The four bytes at 28..32 stay opaque, and they are now the most interesting four bytes in the
+tag: read by Apple, sized, located, unnamed.
+
+### What to ask next
+
+**What values does it accept?** Only `0x01` has been tried. If `0x02` and `0x80` are also
+refused it is "must be zero". If some pass, it is an enum or a bitfield and the accepted set
+is its meaning — which would be the first time this project has read a field's semantics out
+of a peer rather than out of a capture.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

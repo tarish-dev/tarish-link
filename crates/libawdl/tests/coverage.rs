@@ -33,8 +33,11 @@ fn sync_params_have_five_opaque_bytes_left() {
 fn election_v2_has_eight_opaque_bytes_left() {
     let c = of_tlv(24, fixture_election::APPLE_ELECTION_V2);
     assert_eq!(c.total(), 40);
-    assert_eq!(c.named, 32, "master, parent, distance, both metrics, both counters");
-    assert_eq!(c.opaque, 8, "the reserved block at offset 28, and only that");
+    assert_eq!(c.named, 36, "the named fields, plus 32..36 proven ignored by a peer");
+    assert_eq!(
+        c.opaque, 4,
+        "only the u32 at 28..32, which the peer reads and we cannot name -- finding 65"
+    );
 }
 
 /// The tags with no decoder at all. Naming them here means adding one is a visible change.

@@ -157,9 +157,25 @@ pub struct ElectionParamsV2 {
     pub distance: u32,
     pub master_metric: u32,
     pub self_metric: u32,
-    /// Bytes 28..32, unnamed, and 32..36, reserved upstream. Zero in every frame
-    /// measured; carried rather than assumed so a rebuild is exact either way.
-    pub unknown_28: [u8; 8],
+    /// **Bytes 28..32: a `u32` field the peer READS.** Not reserved, and not eight bytes.
+    ///
+    /// Located by probing a real iPhone one byte at a time and watching whether it still
+    /// elected us — finding 65. Setting any of bytes 28, 29 or 31 to `0x01` cost adoption
+    /// outright (0 frames against controls of 146 and 241); setting byte 32 or 35 did not
+    /// (86 and 172). An adjacent reject/accept pair at 31/32 puts the boundary exactly
+    /// there, which is the `u32` shape every other field in this tag has.
+    ///
+    /// **Its meaning is unknown.** Apple sends zero, every capture in the corpus has zero,
+    /// and the values tried so far are refused. That is enough to say a transmitter must
+    /// send zero and not enough to name it — so it keeps an honest name rather than
+    /// `reserved`, which would assert the thing that was just disproved.
+    ///
+    /// Byte 30 was never probed; it sits between two rejected bytes and is assumed to be
+    /// part of the field rather than measured.
+    pub unknown_28: u32,
+    /// Bytes 32..36. **Proven ignored** — a peer adopted us with `0x01` at byte 32 and at
+    /// byte 35. Carried so a rebuild is byte-exact, but free to choose.
+    pub ignored_32: [u8; 4],
     /// **How long this node has been master, in units of 192 Availability Windows.**
     ///
     /// Monotonic, always by exactly one, and it advances *only while the node claims
@@ -196,7 +212,8 @@ impl ElectionParamsV2 {
             distance: le::u32(v, 16)?,
             master_metric: le::u32(v, 20)?,
             self_metric: le::u32(v, 24)?,
-            unknown_28: v.get(28..36)?.try_into().ok()?,
+            unknown_28: le::u32(v, 28)?,
+            ignored_32: v.get(32..36)?.try_into().ok()?,
             self_counter: le::u32(v, 36)?,
         })
     }
@@ -228,7 +245,8 @@ impl ElectionParamsV2 {
         out.extend_from_slice(&self.distance.to_le_bytes());
         out.extend_from_slice(&self.master_metric.to_le_bytes());
         out.extend_from_slice(&self.self_metric.to_le_bytes());
-        out.extend_from_slice(&self.unknown_28);
+        out.extend_from_slice(&self.unknown_28.to_le_bytes());
+        out.extend_from_slice(&self.ignored_32);
         out.extend_from_slice(&self.self_counter.to_le_bytes());
         debug_assert_eq!(out.len(), Self::MIN_LEN);
         out
@@ -253,7 +271,8 @@ impl ElectionParamsV2 {
             distance: 0,
             master_metric: metric,
             self_metric: metric,
-            unknown_28: [0; 8],
+            unknown_28: 0,
+            ignored_32: [0; 4],
             self_counter: counter,
         }
     }

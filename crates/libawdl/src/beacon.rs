@@ -461,10 +461,21 @@ impl Beacon {
             // both at once would measure neither.
             if let Some(p) = self.garbage.t24_probe {
                 if p.offset < 8 {
-                    e.unknown_28[p.offset] = p.value;
+                    // The probe addresses the old eight-byte block by offset, which now
+                    // straddles two fields: 0..4 is the u32 the peer reads, 4..8 the
+                    // padding it ignores. Kept as one address space so the probe results
+                    // in finding 65 stay directly comparable.
+                    if p.offset < 4 {
+                        let mut b = e.unknown_28.to_le_bytes();
+                        b[p.offset] = p.value;
+                        e.unknown_28 = u32::from_le_bytes(b);
+                    } else {
+                        e.ignored_32[p.offset - 4] = p.value;
+                    }
                 }
             } else if self.garbage.t24 {
-                e.unknown_28 = [GARBAGE_BYTE; 8];
+                e.unknown_28 = u32::from_le_bytes([GARBAGE_BYTE; 4]);
+                e.ignored_32 = [GARBAGE_BYTE; 4];
             }
             e.encode()
         }));

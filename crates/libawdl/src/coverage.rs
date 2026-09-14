@@ -131,15 +131,26 @@ pub fn of_tlv(tag: u8, v: &[u8]) -> Coverage {
             Coverage { named: 18, opaque: len - 18 }
         }
 
-        // Election Parameters v2. The counters ARE named now: a tenure in units of 192
-        // AWs, and the master's own relayed. That leaves the second address, whose role is
-        // undocumented, and the eight reserved bytes.
+        // Election Parameters v2.
+        //
+        // Bytes 32..36 count as NAMED on a different basis from everything else here: not
+        // because we know what they mean, but because a real peer was measured ignoring
+        // them. Finding 65 probed each byte of the old eight-byte block against an iPhone
+        // and watched whether it still elected us -- 32 and 35 cost nothing, 28, 29 and 31
+        // cost adoption entirely. This module's test for "named" is whether we could choose
+        // a correct value without copying one, and for a byte proven ignored EVERY value is
+        // correct. That is the weakest possible way to satisfy the criterion and it does
+        // satisfy it.
+        //
+        // Bytes 28..32 stay opaque. They are read, they are a u32, and we cannot name them
+        // -- which makes them the most interesting four bytes in the tag.
         24 => {
             if len < 40 {
                 return all_opaque;
             }
-            // master 6, the parent 6, distance 4, both metrics 8, both counters 8.
-            Coverage { named: 32, opaque: len - 32 }
+            // master 6, parent 6, distance 4, both metrics 8, both counters 8, and the
+            // four bytes at 32 proven ignored.
+            Coverage { named: 36, opaque: len - 36 }
         }
 
         // Data Path State: the bitmap and the fields it selects are named; the extended

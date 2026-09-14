@@ -77,7 +77,7 @@ is cargo-culting with no signal when it is wrong.
 | 16 | Arpa | 96.9% | 9/10 | 13,447 | the flags byte is not named |
 | 4 | Synchronization Parameters | 93.2% | 68/73 | 189,145 | the flags word, byte 28, the trailing pair — finding 21 |
 | 5 | Election Parameters | 85.7% | 18/21 | 113,487 | |
-| 24 | Election Parameters v2 | 80.0% | 32/40 | 302,632 | the 8 bytes at offset 28 — **Apple reads them**, finding 63. Not free coverage |
+| 24 | Election Parameters v2 | 90.0% | 36/40 | — | 32..36 proven ignored; **28..32 is a u32 the peer READS** — finding 65 |
 | 12 | Data Path State | 77.1% | 35/47 | 309,702 | extended flags, UMI options and one unidentified u32 — finding 49 |
 | 7 | HT Capabilities | 82.0% | 6/8 | 74,478 | only the two leading bytes — the "tail" was a truncated MCS set, finding 48 |
 | 33 | 6 GHz channels | 24.7% | 2/14 | 90,906 | |
