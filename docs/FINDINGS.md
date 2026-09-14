@@ -3588,6 +3588,74 @@ The `--garbage` tooling, its tests against the encoded bytes, the harness precon
 this taxonomy. The question itself is **open, not answered negatively** — no treatment run
 ever ran under conditions where a refusal would have meant anything.
 
+## 62. The BLE beacon is correct and does not do what I claimed — twice
+
+An AirDrop BLE beacon was built on the Pi to solve finding 61's blocker: we could not wake a
+peer into follower state on demand. Two opposite claims were made about it within an hour,
+and both were wrong.
+
+### The beacon itself is right
+
+`btmon` decodes what we transmit using BlueZ's own parser:
+
+```
+Flags: 0x1a — LE General Discoverable, Simultaneous LE and BR/EDR
+Company: Apple, Inc. (76)
+  Type: AirDrop (5)
+  Data[18]: 000000000000000001000000000000000000
+```
+
+**BlueZ labels it "Type: AirDrop (5)" independently**, which is a far better check than our
+own reading of our own bytes. The layout from `tarish-app/docs/BLE-DISCOVERY.md` is
+confirmed.
+
+Two defects had to be fixed first, and neither showed up as an error:
+
+- **no AD Flags structure.** The first version sent only the manufacturer AD
+- **`ADV_NONCONN_IND` (0x03)** rather than a connectable `ADV_IND` (0x00)
+
+And one trap that made everything look fine when nothing was happening: with `bluetoothd`
+running and advertising already enabled, **`LE Set Advertising Parameters` and
+`LE Set Advertise Enable` both return `0x0C` Command Disallowed** while
+`LE Set Advertising Data` returns success. Checking only the last one — which is what
+`hcitool` prints most visibly — reports a working beacon that is not transmitting. Disable
+advertising first, then set parameters, then data, then enable, and check **every** status.
+
+### Claim 1, wrong: "the beacon wakes a sleeping device"
+
+Enabling it appeared to bring a Mac's AWDL up, and one off/on cycle supported it. Repeated
+against an interface that was actually **down**, three cycles and twelve samples gave zero in
+every phase. A BLE beacon **cannot** bring up an AWDL interface that is down.
+
+### Claim 2, also wrong: "so BLE does not wake devices"
+
+The operator, who implemented this in GoOpenDrop, said flatly that BLE alone is enough. That
+was the right correction to take seriously, and it is why the AD Flags and `ADV_IND` defects
+were found at all — the prior was that our code was broken, not that Apple was.
+
+### What is actually true, and it is neither
+
+**The devices' AWDL state is governed by their own settings, not by our beacon.** A phone
+with AirDrop set to **Everyone** transmits with the beacon off (147, 123 frames) and with it
+on (120, 124, 154) — no measurable difference. Setting AirDrop to Everyone is what brings it
+up; our beacon changes nothing we can detect.
+
+The likely reason, from our own documentation: **our four identity slots are all zero.** A
+receiver in contacts-only mode is *supposed* to ignore that, and contacts-only is the iOS
+default. An identity-less beacon can only ever reach a device in Everyone mode — which is a
+real constraint on any AirDrop implementation without extracted Apple credentials, and worth
+knowing before building on it.
+
+### ★ "Everyone" expires after ten minutes
+
+iOS reverts AirDrop from Everyone to Contacts Only on a timer. This is the single most
+useful operational fact from the session: it retroactively explains several void runs in
+which peers were present and cooperative early on and then silently stopped appearing,
+with nothing on our side having changed.
+
+`_airdrop` appearing in a device's advertised service list tracks that setting, so the
+peer's AirDrop state is **visible from the air** — no need to ask anyone to check a phone.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
