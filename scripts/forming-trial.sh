@@ -81,15 +81,20 @@ fetch "./target/release/awdl timeline $R.pcap 2>&1 | sed -n '3,14p'"
 echo
 echo "=================== VALIDITY ==================="
 VOID=""
-[ "${SENT:-0}" -ge 40 ] || VOID="$VOID
-  frames sent = ${SENT:-0}, under 40. A starved transmitter cannot be adopted."
+# RATE, not a flat count. 40 frames passed this check for a 420-second run that was
+# out-transmitted 2884 to 151 and voided; the healthy rate is one frame per advertised
+# window, three windows per 1.049 s cycle, so ~2.8/s. Anything under 2/s is starved.
+MINSENT=$(awk -v s="$SECS" 'BEGIN {print int(s * 2)}')
+[ "${SENT:-0}" -ge "$MINSENT" ] || VOID="$VOID
+  frames sent = ${SENT:-0} in ${SECS}s, under ${MINSENT} (2/s). A starved transmitter
+  cannot be adopted, and it will lose to any peer that is transmitting normally."
 OURS=$(fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -c '$OURMAC'")
 [ "${OURS:-0}" -gt 0 ] || VOID="$VOID
   our address is absent from the capture: the frames never reached the air."
 PEERS=$(fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -A8 'senders:' | grep -cE '^  [0-9a-f]{2}:'")
 [ "${PEERS:-0}" -ge 2 ] || VOID="$VOID
   only ${PEERS:-0} sender(s) in the capture: no peer ever showed up to adopt anything."
-echo "  frames sent            ${SENT:-?}   (>= 40)"
+echo "  frames sent            ${SENT:-?}   (>= ${MINSENT:-?}, i.e. 2/s)"
 echo "  our frames on the air  ${OURS:-0} reference(s)"
 echo "  senders present        ${PEERS:-0}   (>= 2, us plus a peer)"
 echo "  live adoption count    ${LIVE:-0} peer(s)   <- from the beacon itself"

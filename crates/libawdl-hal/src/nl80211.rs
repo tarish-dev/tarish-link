@@ -313,9 +313,17 @@ impl crate::Radio for Nl80211 {
                 self.sock = Some(s);
             }
             let sock = self.sock.as_ref().unwrap();
-            sock.set_rx_timeout(timeout_ms)?;
             let mut buf = vec![0u8; 4096];
-            let Some((n, host_us)) = sock.rx_at(&mut buf)? else { return Ok(None) };
+            // timeout_ms == 0 means "do not wait", which SO_RCVTIMEO cannot express: zero
+            // there disables the timeout and blocks forever. MSG_DONTWAIT is the right
+            // mechanism, and conflating the two starved the transmitter twice.
+            let got = if timeout_ms == 0 {
+                sock.rx_now(&mut buf)?
+            } else {
+                sock.set_rx_timeout(timeout_ms)?;
+                sock.rx_at(&mut buf)?
+            };
+            let Some((n, host_us)) = got else { return Ok(None) };
             buf.truncate(n);
             // Radiotap carries the three things that make a frame usable for timing, and
             // TSFT is the one that matters most -- a frame without it can be parsed and

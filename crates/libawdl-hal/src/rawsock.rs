@@ -149,7 +149,30 @@ impl RawSock {
     /// when [`enable_timestamps`](Self::enable_timestamps) was not called, and is reported
     /// rather than silently replaced with "now", because a wrong timestamp is worse than a
     /// missing one.
+    /// As [`rx_at`](Self::rx_at), but returns immediately when nothing is waiting.
+    ///
+    /// **`SO_RCVTIMEO` of zero means NO timeout, not no waiting.** `{tv_sec: 0, tv_usec: 0}`
+    /// disables the timeout entirely and the read blocks until a frame arrives — the exact
+    /// opposite of what "timeout 0" reads like. A drain loop written on that assumption
+    /// blocks until the channel happens to produce a frame, which in a moderately busy room
+    /// is long enough to miss the transmit window: a 60-second run sent 41 frames where it
+    /// should have sent ~170, and a 7-minute trial was out-transmitted 2884 to 151 by a peer
+    /// and voided.
+    ///
+    /// `MSG_DONTWAIT` is what actually means "do not wait".
+    pub fn rx_now(&self, buf: &mut [u8]) -> Result<Option<(usize, Option<u64>)>> {
+        self.recv_into(buf, libc::MSG_DONTWAIT)
+    }
+
     pub fn rx_at(&self, buf: &mut [u8]) -> Result<Option<(usize, Option<u64>)>> {
+        self.recv_into(buf, 0)
+    }
+
+    fn recv_into(
+        &self,
+        buf: &mut [u8],
+        flags: libc::c_int,
+    ) -> Result<Option<(usize, Option<u64>)>> {
         let mut iov = libc::iovec {
             iov_base: buf.as_mut_ptr() as *mut libc::c_void,
             iov_len: buf.len(),
@@ -163,10 +186,12 @@ impl RawSock {
         msg.msg_controllen = control.len() as _;
 
         // SAFETY: msghdr is fully initialised above and the buffers outlive the call.
-        let n = unsafe { libc::recvmsg(self.fd, &mut msg, 0) };
+        let n = unsafe { libc::recvmsg(self.fd, &mut msg, flags) };
         if n < 0 {
             let e = std::io::Error::last_os_error();
             return match e.raw_os_error() {
+                // EAGAIN is both "the timeout expired" and, under MSG_DONTWAIT, "nothing
+                // is waiting". Neither is an error.
                 Some(libc::EAGAIN) => Ok(None),
                 _ => Err(Error::Radio(format!("recvmsg on {}: {e}", self.iface))),
             };

@@ -61,8 +61,13 @@ echo
 echo "=================== VALIDITY ==================="
 VOID=""
 # B. did we actually transmit? A starved run cannot be adopted and is not evidence.
-[ "${SENT:-0}" -ge 40 ] || VOID="$VOID
-  frames sent = ${SENT:-0}, under 40. A starved transmitter cannot be adopted."
+# RATE, not a flat count. 40 frames passed this check for a 420-second run that was
+# out-transmitted 2884 to 151 and voided; the healthy rate is one frame per advertised
+# window, three windows per 1.049 s cycle, so ~2.8/s. Anything under 2/s is starved.
+MINSENT=$(awk -v s="$SECS" 'BEGIN {print int(s * 2)}')
+[ "${SENT:-0}" -ge "$MINSENT" ] || VOID="$VOID
+  frames sent = ${SENT:-0} in ${SECS}s, under ${MINSENT} (2/s). A starved transmitter
+  cannot be adopted, and it will lose to any peer that is transmitting normally."
 # C. were we synchronised? Frames aimed with a bad phase land while the peer is elsewhere,
 #    and "ignored us" is then indistinguishable from "never heard us".
 [ "${ADOPTED:-false}" = "true" ] || VOID="$VOID
@@ -74,7 +79,7 @@ OURS=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/a
 [ "${OURS:-0}" -gt 0 ] || VOID="$VOID
   our address does not appear in the capture: the frames never reached the air."
 
-echo "  frames sent     ${SENT:-?}   (>= 40)"
+echo "  frames sent     ${SENT:-?}   (>= ${MINSENT:-?}, i.e. 2/s)"
 echo "  adopted         ${ADOPTED:-?}   (true)"
 echo "  spread          ${SPREAD:-?} us   (< 32768)"
 echo "  master changes  ${CHANGES:-?}"

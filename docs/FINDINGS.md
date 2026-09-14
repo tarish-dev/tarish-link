@@ -3452,6 +3452,66 @@ than sampling once.
 sessions, while `da:da:16:dd:96:92` has been stable all night and across the earlier 2x2.
 Anything keyed on a peer address must tolerate the first and must not assume the second.
 
+## 60. ★ `SO_RCVTIMEO` of zero means NO timeout, and it starved the transmitter twice
+
+Finding 56 decoupled the cluster clock from transmit load with `SO_TIMESTAMP`. Finding 59's
+counter bug then made listening unconditional. Both were right, and together they produced a
+beacon that sent **41 frames in 60 seconds** where it should send about 170.
+
+### The bug
+
+The drain loop asks for successive reads with no waiting:
+
+```rust
+radio.rx(if drained == 0 { budget_ms } else { 0 })
+```
+
+and `Nl80211::rx` implemented the timeout with `SO_RCVTIMEO`. **A `timeval` of
+`{tv_sec: 0, tv_usec: 0}` disables the timeout entirely** — the read then blocks until a
+frame arrives. "Timeout 0" reads like "return immediately" and means the exact opposite.
+
+In a silent room the first read times out normally and the loop exits, so nothing hangs. In a
+room with a peer sending a few frames a second, every drain pass after the first **blocked
+until that peer's next frame** — long enough to sail past the 65 ms window we were waiting
+for, which then costs a full 1.049 s cycle.
+
+`MSG_DONTWAIT` is what actually means do not wait.
+
+```
+                      frames in 60s      rate
+SO_RCVTIMEO(0)                   41     0.68/s
+MSG_DONTWAIT                    172     2.87/s
+```
+
+2.87/s is exactly the predicted rate: one frame per advertised window, three advertised
+windows per cycle.
+
+### What it cost
+
+A 7-minute control run, which should have reproduced finding 59's adoption, was
+**out-transmitted 2884 frames to 151** by a peer at metric 522 — and got one frame of
+adoption instead of 1,223. It read as "a lower metric beat us", which would have been a
+genuinely interesting and completely false finding about AWDL.
+
+### The harness did not catch it, and now does
+
+`compete-trial.sh` required `frames sent >= 40`. A 420-second run sent 151 and passed. A flat
+count cannot express "starved" — the threshold is now a **rate**, `2/s`, against the run
+length. The healthy figure is 2.87/s and anything under 2 means we will lose to any peer
+transmitting normally, whatever our metric says.
+
+### The pattern, three times now
+
+| | fixed | broke |
+|---|---|---|
+| finding 55 | cluster clock, 285 ms → 1.5 ms | transmit rate, 86 → 7 frames |
+| finding 56 | decoupled them with `SO_TIMESTAMP` | — |
+| finding 59 | the blind adoption counter | transmit rate again, 172 → 41 |
+
+Receiving and transmitting compete for one loop and one radio, and **every change to one has
+silently cost the other.** The lesson is not "be careful": it is that the two numbers have to
+be read together, every time, which is why the trial harness now refuses a run on either.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
