@@ -129,6 +129,12 @@ pub struct Garbage {
     pub t24: bool,
     /// Disturb a single byte of tag 24's block instead of all eight. Overrides `t24`.
     pub t24_probe: Option<T24Probe>,
+    /// Tag 7: the two leading bytes, `00 00` in every frame measured.
+    ///
+    /// The only part of HT Capabilities that IEEE 802.11-2020 does not account for --
+    /// finding 48 decoded everything from byte 2 onward as a truncated Supported MCS Set
+    /// and left these two unexplained. 74,478 opaque bytes.
+    pub t7: bool,
 }
 
 /// The default fill value. Recognisable on purpose: a capture has to confirm our own frames
@@ -169,11 +175,14 @@ impl Garbage {
                 continue;
             }
             match part {
-                "all" => g = Garbage { t4: true, t5: true, t16: true, t24: true, t24_probe: None },
+                "all" => {
+                    g = Garbage { t4: true, t5: true, t16: true, t24: true, t7: true, t24_probe: None }
+                }
                 "t4" => g.t4 = true,
                 "t5" => g.t5 = true,
                 "t16" => g.t16 = true,
                 "t24" => g.t24 = true,
+                "t7" => g.t7 = true,
                 _ => return None,
             }
         }
@@ -181,7 +190,7 @@ impl Garbage {
     }
 
     pub fn any(&self) -> bool {
-        self.t4 || self.t5 || self.t16 || self.t24 || self.t24_probe.is_some()
+        self.t4 || self.t5 || self.t16 || self.t24 || self.t7 || self.t24_probe.is_some()
     }
 
     /// `"t24@3=01"` — one byte of tag 24's block, at that offset, set to that value.
@@ -207,6 +216,9 @@ impl Garbage {
         }
         if self.t16 {
             v.push("t16 flags byte (1B)");
+        }
+        if self.t7 {
+            v.push("t7 leading pair (2B)");
         }
         if let Some(p) = self.t24_probe {
             return format!("t24 unknown_28[{}] = 0x{:02x} (1 byte, rest zero)", p.offset, p.value);
@@ -491,7 +503,13 @@ impl Beacon {
             )
             .encode(),
         ));
-        tlvs.push((7, self.ht.encode()));
+        tlvs.push((7, {
+            let mut h = self.ht.clone();
+            if self.garbage.t7 {
+                h.unknown_0 = [GARBAGE_BYTE; 2];
+            }
+            h.encode()
+        }));
         tlvs.push((
             17,
             Ieee80211Container { elements: vec![(ELEM_VHT_CAPABILITIES, self.vht.to_vec())] }

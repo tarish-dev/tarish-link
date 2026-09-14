@@ -433,6 +433,12 @@ fn garbage_reaches_the_encoded_tlvs() {
     assert_eq!(&c4[c4.len() - 2..], &[0, 0], "the control really ends in zeros");
     assert_eq!(&d4[d4.len() - 2..], &[GARBAGE_BYTE; 2], "and the treatment really does not");
 
+    // Tag 7: the two leading bytes, and the 802.11 fields after them must not move.
+    let (c7, d7) = (find(&c, 7), find(&d, 7));
+    assert_eq!(&c7[..2], &[0, 0], "the control really is 00 00 there");
+    assert_eq!(&d7[..2], &[GARBAGE_BYTE; 2]);
+    assert_eq!(c7[2..], d7[2..], "info, A-MPDU and the MCS set are untouched");
+
     // And selecting one group must not perturb the others.
     let mut only24 = Beacon::new(addr, 149, "QA");
     only24.metric = 600;
@@ -442,6 +448,7 @@ fn garbage_reaches_the_encoded_tlvs() {
     assert_eq!(find(&o, 5), find(&c, 5), "tag 5 untouched by --garbage t24");
     assert_eq!(find(&o, 16), find(&c, 16), "tag 16 untouched");
     assert_eq!(find(&o, 4), find(&c, 4), "tag 4 untouched");
+    assert_eq!(find(&o, 7), find(&c, 7), "tag 7 untouched");
 }
 
 #[test]
@@ -451,7 +458,7 @@ fn an_unknown_garbage_group_is_refused() {
     assert!(Garbage::parse("t4,t24").is_some());
     assert_eq!(
         Garbage::parse("all"),
-        Some(Garbage { t4: true, t5: true, t16: true, t24: true, t24_probe: None })
+        Some(Garbage { t4: true, t5: true, t16: true, t24: true, t7: true, t24_probe: None })
     );
     assert!(Garbage::parse("t99").is_none(), "a typo must not run a weaker experiment");
     assert!(Garbage::parse("t24,nonsense").is_none());

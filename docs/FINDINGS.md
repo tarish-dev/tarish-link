@@ -3875,6 +3875,45 @@ field in tag 24, and the same probe works on any byte we can choose. Tag 12's un
 low-cardinality unknowns are all candidates, and each one that turns out to be *read* is
 another field located.
 
+## 66. Tag 7's leading bytes — INCONCLUSIVE, and recorded as such
+
+`--garbage t7` sets tag 7's two leading bytes, `00 00` in every frame ever captured and the
+only part of HT Capabilities that IEEE 802.11-2020 does not account for (finding 48). Two
+runs:
+
+| run | frames naming us master | peer exposure |
+|---|---|---|
+| W1 | 24 | 2 buckets |
+| W2 | **2** | 4 buckets, intermittent |
+| *controls* | *146, 241* | *good* |
+
+W1 cleared the pre-registered threshold of 20 — just. W2 did not. **The result does not
+replicate and no conclusion is drawn.**
+
+### Why this is not "they are read"
+
+Tag 24's treatments gave **0, 0, 0, 0**, including one run with 18 buckets of exposure and
+3217 peer master-frames. Tag 7's gave 24 and 2. Those are different shapes: a clean zero
+under good exposure, versus two small numbers under poor exposure. Reading the second as a
+refusal would be reading noise.
+
+### Why it is not "they are ignored" either
+
+Both numbers sit far below the controls, and 2 is below threshold. The honest position is
+that **neither run had enough peer exposure to measure anything**, and the obvious next step
+is a run where the peer stays for several minutes.
+
+Worth noting what did not work: the operator disabled screen lock and set AirDrop to Everyone
+expecting ten minutes of presence, and the peer still appeared only in buckets 5-6 and 22-23.
+**Screen-lock state does not keep an iPhone's AWDL on the air** — add that to finding 61's
+taxonomy.
+
+### The discipline
+
+The temptation was to take W1's 24, call tag 7 ignored, and bank another 74,478 bytes. Rule 6
+exists for exactly this, finding 44 died of exactly this, and the 14-frame anomaly in finding
+57 was exactly this. Two runs disagreeing is not a result, whichever one is more convenient.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
