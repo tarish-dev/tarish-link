@@ -3940,6 +3940,55 @@ The temptation was to take W1's 24, call tag 7 ignored, and bank another 74,478 
 exists for exactly this, finding 44 died of exactly this, and the 14-frame anomaly in finding
 57 was exactly this. Two runs disagreeing is not a result, whichever one is more convenient.
 
+## 67. ★★ Tag 24 is MANDATORY — a malformed one is treated exactly as an absent one
+
+Finding 65 left a puzzle the operator put plainly: *why would they choose a worse master than
+us?* In X2 two iPhones advertising metrics **514** and **525** formed a cluster with each
+other rather than take our **600**.
+
+It is strange because every frame we send also carries **tag 5**, Election Parameters v1,
+claiming that same 600. If tag 24 were merely discarded, tag 5 should still have entered us
+into the election.
+
+### The experiment
+
+Send **no tag 24 at all** and claim 600 through tag 5 alone. Everything else byte-identical —
+asserted in the test, not assumed.
+
+```
+valid tag 24       ->  adopted    714 frames (X1, two peers)
+malformed tag 24   ->  refused      0        (X2, K5, K4, and the byte probes)
+NO tag 24          ->  refused      0        (Y1)
+```
+
+Confirmed on the air: 2084 tag-4s in the capture, our 1199 frames and the peers' 885, and tag
+24 appears exactly 885 times — none of them ours.
+
+### What it establishes
+
+**A node without a valid Election Parameters v2 is not a candidate.** Not a weak one — not
+one at all. That is why the peers preferred a materially worse master: from their side there
+was no third option.
+
+**A malformed tag 24 is equivalent to an absent tag 24.** The two treatments are
+indistinguishable in outcome, which collapses the three mechanisms finding 65 left open. It
+does not matter whether the receiver drops the TLV, drops the frame, or misparses a
+discriminator: whatever it does, the result is that we are not counted.
+
+**Tag 5 is vestigial for election purposes.** Apple sends it, `libmosey` sends it, OWL sends
+it, and on an iOS v10.0 device it does not get you elected on its own. Anything implementing
+AWDL must send a well-formed tag 24, and the `u32` at offset 28 must be zero.
+
+### Caveats, stated rather than buried
+
+One run. Peer exposure was 4-5 buckets, shorter than X1's control — though finding 63's K8b
+produced 138 frames of adoption from about two buckets, so short exposure does not by itself
+produce a zero. Worth one replication before it is leaned on hard.
+
+And it is one device family: two iPhones on iOS v10.0. A Mac or an older device may differ,
+and the corpus cannot say because **every device in it sends tag 24** — which is precisely
+why this needed a transmitter to find out.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

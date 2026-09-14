@@ -129,6 +129,24 @@ pub struct Garbage {
     pub t24: bool,
     /// Disturb a single byte of tag 24's block instead of all eight. Overrides `t24`.
     pub t24_probe: Option<T24Probe>,
+    /// Send no tag 24 at all, rather than a perturbed one.
+    ///
+    /// **The question this answers.** Finding 65 showed a peer refuses us when tag 24's
+    /// `u32` at offset 28 is non-zero — and refuses so completely that two devices at
+    /// metrics 514 and 525 formed a cluster with each other rather than take our 600. That
+    /// is odd, because every frame also carries **tag 5**, Election Parameters v1, claiming
+    /// the same 600. If tag 24 were merely discarded, tag 5 should still have put us in the
+    /// election.
+    ///
+    /// Omitting tag 24 separates the explanations:
+    ///
+    /// - **adopted** → tag 24 is optional and a *malformed* one is worse than none, which
+    ///   points at rejection during parse rather than at the election arithmetic
+    /// - **refused** → tag 24 is mandatory, and the failure was never about our bytes
+    ///
+    /// Either way it is a claim about the protocol that no capture can settle, because
+    /// every device in the corpus sends tag 24 and none of them omits it.
+    pub no_t24: bool,
     /// Tag 7: the two leading bytes, `00 00` in every frame measured.
     ///
     /// The only part of HT Capabilities that IEEE 802.11-2020 does not account for --
@@ -176,13 +194,17 @@ impl Garbage {
             }
             match part {
                 "all" => {
-                    g = Garbage { t4: true, t5: true, t16: true, t24: true, t7: true, t24_probe: None }
+                    g = Garbage {
+                        t4: true, t5: true, t16: true, t24: true, t7: true,
+                        no_t24: false, t24_probe: None,
+                    }
                 }
                 "t4" => g.t4 = true,
                 "t5" => g.t5 = true,
                 "t16" => g.t16 = true,
                 "t24" => g.t24 = true,
                 "t7" => g.t7 = true,
+                "no-t24" => g.no_t24 = true,
                 _ => return None,
             }
         }
@@ -190,7 +212,8 @@ impl Garbage {
     }
 
     pub fn any(&self) -> bool {
-        self.t4 || self.t5 || self.t16 || self.t24 || self.t7 || self.t24_probe.is_some()
+        self.t4 || self.t5 || self.t16 || self.t24 || self.t7 || self.no_t24
+            || self.t24_probe.is_some()
     }
 
     /// `"t24@3=01"` — one byte of tag 24's block, at that offset, set to that value.
@@ -219,6 +242,9 @@ impl Garbage {
         }
         if self.t7 {
             v.push("t7 leading pair (2B)");
+        }
+        if self.no_t24 {
+            v.push("NO tag 24 emitted at all");
         }
         if let Some(p) = self.t24_probe {
             return format!("t24 unknown_28[{}] = 0x{:02x} (1 byte, rest zero)", p.offset, p.value);
@@ -467,6 +493,7 @@ impl Beacon {
         if let Some(v) = seq.encode_tag18() {
             tlvs.push((18, v));
         }
+        if !self.garbage.no_t24 {
         tlvs.push((24, {
             let mut e = ElectionParamsV2::claiming(self.addr, self.metric, self.tenure(now_us));
             // A single-byte probe takes precedence: it is the finer instrument and running
@@ -491,6 +518,7 @@ impl Beacon {
             }
             e.encode()
         }));
+        }
         tlvs.push((
             12,
             DataPathState::describing(

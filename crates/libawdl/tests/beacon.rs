@@ -458,7 +458,10 @@ fn an_unknown_garbage_group_is_refused() {
     assert!(Garbage::parse("t4,t24").is_some());
     assert_eq!(
         Garbage::parse("all"),
-        Some(Garbage { t4: true, t5: true, t16: true, t24: true, t7: true, t24_probe: None })
+        Some(Garbage {
+            t4: true, t5: true, t16: true, t24: true, t7: true,
+            no_t24: false, t24_probe: None
+        })
     );
     assert!(Garbage::parse("t99").is_none(), "a typo must not run a weaker experiment");
     assert!(Garbage::parse("t24,nonsense").is_none());
@@ -511,4 +514,39 @@ fn a_malformed_probe_is_refused() {
     // The probe must win over the whole-block flag, or a run would measure neither.
     let g = Garbage::parse("t24,t24@2=01").expect("parses");
     assert!(g.t24_probe.is_some());
+}
+
+
+/// Omitting tag 24 must remove it and change nothing else — finding 67.
+///
+/// The run this supports asks whether a MALFORMED tag 24 is worse than an ABSENT one. That
+/// is only a fair question if absence is all that differs, so the other tags are asserted
+/// byte-identical rather than merely present.
+#[test]
+fn no_t24_omits_exactly_that_tag() {
+    use libawdl::beacon::Garbage;
+
+    let addr = [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c];
+    let mut clean = Beacon::new(addr, 149, "QA");
+    clean.metric = 600;
+    let c = clean.mif_tlvs(0);
+
+    let mut without = Beacon::new(addr, 149, "QA");
+    without.metric = 600;
+    without.garbage = Garbage::parse("no-t24").expect("parses");
+    let w = without.mif_tlvs(0);
+
+    assert!(c.iter().any(|(t, _)| *t == 24), "the control carries tag 24");
+    assert!(!w.iter().any(|(t, _)| *t == 24), "and the treatment does not");
+    assert_eq!(c.len(), w.len() + 1, "exactly one TLV fewer");
+
+    // Tag 5 still claims the same metric -- the whole point is that v1 is still there.
+    let t5 = |v: &[(u8, Vec<u8>)]| v.iter().find(|(t, _)| *t == 5).unwrap().1.clone();
+    assert_eq!(t5(&c), t5(&w), "Election Parameters v1 is untouched");
+
+    for tag in [4u8, 5, 7, 12, 16, 17, 18, 21, 2] {
+        let a = c.iter().find(|(t, _)| *t == tag).map(|(_, v)| v.clone());
+        let b = w.iter().find(|(t, _)| *t == tag).map(|(_, v)| v.clone());
+        assert_eq!(a, b, "tag {tag} must be byte-identical");
+    }
 }
