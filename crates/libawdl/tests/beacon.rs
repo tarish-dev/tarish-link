@@ -633,3 +633,24 @@ fn ext12_head_touches_only_the_flags_and_the_pad() {
     assert_eq!(clean.extended_tail.len(), head.extended_tail.len());
     assert_eq!(clean.awdl_address, head.awdl_address);
 }
+
+/// The Z-series probe: the smallest possible non-zero value in the u32 a peer READS.
+///
+/// Finding 65 established that garbage there is refused and zero is accepted, which is two
+/// points on a curve we have not drawn. `t24@0=01` is the third: if a value of 1 is also
+/// refused, the field is actively validated as zero; if it is accepted, the refusals were
+/// about magnitude and the field is a counter or a version we can bound.
+#[test]
+fn t24_probe_addresses_the_read_u32_at_offset_zero() {
+    let g = libawdl::beacon::Garbage::parse("t24@0=01").expect("spec parses");
+    let p = g.t24_probe.expect("a probe");
+    assert_eq!((p.offset, p.value), (0, 1));
+
+    // And it must land in `unknown_28`, not in the padding beside it.
+    let mut e = libawdl::election::ElectionParamsV2::claiming([2, 0, 0, 0, 0, 1], 600, 7);
+    let mut b = e.unknown_28.to_le_bytes();
+    b[p.offset] = p.value;
+    e.unknown_28 = u32::from_le_bytes(b);
+    assert_eq!(e.unknown_28, 1);
+    assert_eq!(e.ignored_32, [0; 4], "the probe must not disturb the ignored padding");
+}

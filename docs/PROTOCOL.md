@@ -75,6 +75,21 @@ document with a real control". It had a converse. That is not a control.
    expired when the first frame lands. Open the capture first, then have the operator act
    into it.
 
+11. **An empty room refuses everything. Count the peers before reading the outcome.**
+   A run with no peer transmitting produces zero frames naming us master, which is
+   byte-for-byte the same observation as a peer that considered us and said no. Run E3
+   spent eight minutes measuring an empty room and the garbage was confirmed on air, which
+   made the zero look like the cleanest possible rejection. It was not a rejection; it was
+   nobody. `compete-trial.sh` now VOIDs on it.
+
+12. **The transmitter's own adoption counter is not the measurement — the capture is.**
+   The beacon multiplexes receive against transmit on one socket, so its listening is
+   whatever time the transmit schedule leaves over. That budget collapses to nothing in
+   exactly the case worth measuring: once a competing cluster exists, the beacon adopts its
+   clock and starts pacing against *that* master's windows. Run E3b's beacon reported 14
+   adoptions where its capture held 2,123 from three peers. A passive `tcpdump` has no such
+   conflict of interest and was right every time. Finding 70.
+
 ## The harness
 
 `scratchpad/trial.sh` — `LABEL=X FLAGS="..." ./trial.sh`. Four failure modes are designed

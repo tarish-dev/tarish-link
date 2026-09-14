@@ -20,6 +20,11 @@ METRIC=${METRIC:-600}
 SECS=${SECS:-75}
 CAPS=${CAPS:-60}
 LABEL=${LABEL:-compete}
+# A --garbage spec, or empty for a clean control run. Everything the E-series measured was
+# run by hand instead of through here, and it cost a voided run (E3, into an empty room)
+# plus an evening reconciling the beacon's own adoption counter against the capture. The
+# validity gate below catches both of those before a number gets quoted.
+GARBAGE=${GARBAGE:-}
 
 R=/tmp/ct_$LABEL
 ssh -o ConnectTimeout=10 "$PI" "
@@ -33,7 +38,7 @@ sudo timeout 12 tcpdump -i $MON -w $R.before.pcap -s0 2>/dev/null
 ./target/release/awdl stats $R.before.pcap 2>&1 | grep -A8 'who names whom' > $R.before.txt
 ./target/release/awdl timeline $R.before.pcap 2>&1 | sed -n '3,12p' > $R.timeline.txt
 
-(sudo ./target/release/awdl beacon $MANAGED $MON $CHAN $SECS 2 --follow --metric $METRIC --tenure 99999 > $R.log 2>&1 &)
+(sudo ./target/release/awdl beacon $MANAGED $MON $CHAN $SECS 2 --follow --metric $METRIC --tenure 99999 ${GARBAGE:+--garbage $GARBAGE} > $R.log 2>&1 &)
 for i in \$(seq 1 15); do ip link show $MON >/dev/null 2>&1 && break; sleep 1; done
 sleep 4
 sudo timeout $CAPS tcpdump -i $MON -w $R.pcap -s0 2>/dev/null
@@ -84,6 +89,23 @@ echo "  adopted         ${ADOPTED:-?}   (true)"
 echo "  spread          ${SPREAD:-?} us   (< 32768)"
 echo "  master changes  ${CHANGES:-?}"
 echo "  our frames on the air: ${OURS:-0} reference(s)"
+
+
+# E. was a PEER even present? An empty room refuses everything, and run E3 spent eight
+#    minutes proving that a garbage field is refused by nobody at all. This is the check
+#    that was missing, and it is the difference between a result and a void.
+PEERS=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl stats $R.pcap 2>&1 | sed -n '/^senders:/,/^[a-z]/p' | grep -cvE '^senders:|$OURMAC|^[a-z]'")
+[ "${PEERS:-0}" -ge 1 ] || VOID="$VOID
+  no sender other than us appears in the capture. The room was empty, so nothing
+  refused anything -- this is a void, not a REFUSE."
+echo "  peers transmitting: ${PEERS:-0}   (>= 1)"
+
+# F. if we were perturbing a field, did the perturbation actually reach the air? An encoder
+#    that dropped the change makes a garbage run look exactly like a clean one.
+if [ -n "$GARBAGE" ]; then
+  echo "  --garbage $GARBAGE, as sent:"
+  ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl tlv $R.pcap 24 $OURMAC 2>&1 | sed -n '3,8p'"
+fi
 
 echo
 echo "=================== OUTCOME ==================="
