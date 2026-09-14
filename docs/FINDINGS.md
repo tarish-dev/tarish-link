@@ -3855,6 +3855,32 @@ Tag 24: **80.0% to 90.0%**, floor 32/40 to 36/40.
 The four bytes at 28..32 stay opaque, and they are now the most interesting four bytes in the
 tag: read by Apple, sized, located, unnamed.
 
+### ★ Replicated on a second handset, and the peers preferred each other
+
+`PROTOCOL.md` rule 6 asks for a different device set. A second iPhone was brought in,
+`e6:a6:d9:00:90:34`, and both phones run together:
+
+| run | flags | frames naming us master |
+|---|---|---|
+| X1 | control | **714** — `e6:a6` x520, `72:01` x194 |
+| X2 | `--garbage t24` | **0** |
+
+Taken minutes apart with the same two handsets, same room, garbage verified on the air.
+
+The detail worth keeping is what the peers did *instead* in X2:
+
+```
+72:01:e2:fd:9d:57  ->  e6:a6:d9:00:90:34    833     iPhone 1 followed iPhone 2
+e6:a6:d9:00:90:34  ->  (itself)             632     iPhone 2 claimed master
+```
+
+Two devices advertising metrics **514** and **525** formed a cluster with each other rather
+than accept our **600**. They did not merely decline to follow us — they preferred a
+materially worse master. A frame with that `u32` non-zero is not weighed and lost; it is not
+counted at all.
+
+Captures: `captures/t24-X1.pcap`, `captures/t24-X2.pcap`.
+
 ### What values it accepts — two tried, both refused
 
 `0x80` at byte 28 was refused as well, with the strongest exposure of any probe: the peer sat
