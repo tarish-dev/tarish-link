@@ -570,7 +570,7 @@ fn usage() -> ! {
     eprintln!("                                         RUN THE PIPE: tun <-> radio. root, Linux");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME] [--garbage t4,t5,t16,t24|all]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME] [--garbage t4,t5,t16,t24|all] [--version 10.0]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -636,6 +636,9 @@ fn main() {
                     .and_then(|i| args.get(i + 1))
                     .map(|s| s.as_str()),
                 args.iter().position(|a| a == "--garbage")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str()),
+                args.iter().position(|a| a == "--version")
                     .and_then(|i| args.get(i + 1))
                     .map(|s| s.as_str()),
             );
@@ -1201,7 +1204,7 @@ fn check_baseline(path: &str, floors: &std::collections::BTreeMap<u8, Floor>) ->
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
 #[allow(clippy::too_many_arguments)]
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1227,6 +1230,27 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     };
 
     let mut b = Beacon::new(addr, channel, "QA");
+    // `--version 10.0` announces something other than the v3.4 libmosey and OWL both send.
+    // REFUSED RATHER THAN GUESSED on a malformed value: announcing the wrong version is a
+    // capability claim, and silently falling back to the default would make a whole run
+    // measure the control condition while its log said otherwise.
+    if let Some(v) = version {
+        match v.split_once('.').and_then(|(a, b)| Some((a.parse::<u8>().ok()?, b.parse::<u8>().ok()?))) {
+            Some((major, minor)) if major < 16 && minor < 16 => {
+                b.version = libawdl::state::Version { major, minor, device_class: 2 };
+            }
+            _ => {
+                eprintln!("--version wants MAJOR.MINOR with each below 16, e.g. 10.0 — got {v:?}");
+                std::process::exit(2);
+            }
+        }
+    }
+    eprintln!(
+        "  announcing AWDL v{}.{}{}",
+        b.version.major,
+        b.version.minor,
+        if version.is_some() { "  (overridden)" } else { "  — what libmosey and OWL send; Apple sends 10.0" },
+    );
     // Listening as well as transmitting. Everything before this aimed at OUR cycle, whose
     // phase is decided by when the process started; a cluster already on the air has its
     // own, and it tells us what it is in every frame. See libawdl::follow.

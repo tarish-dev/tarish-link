@@ -329,6 +329,20 @@ pub struct Beacon {
     /// the radio is the only correct source. The default mirrors a captured Apple value —
     /// LDPC, 40 MHz, short GI at both widths, two spatial streams.
     pub ht: HtCapabilities,
+    /// The AWDL version we announce in tag 21.
+    ///
+    /// **This is a capability claim, not a cosmetic label**, which is why it is a field
+    /// rather than a constant. The default is v3.4 — what `libmosey` and OWL both announce,
+    /// six major versions behind the v10.0 every Apple device sends.
+    ///
+    /// It matters beyond interoperability: **every `--garbage` result in findings 63-73 was
+    /// measured by a node announcing v3.4.** If Apple's validation is version-conditional,
+    /// "the peer ignores this field" may mean "the peer ignores this field *from an ancient
+    /// node*", and the one field that IS read (tag 24 offset 28, finding 73) would be
+    /// exactly what a version-gated field looks like: meaningless and required-zero for an
+    /// old peer, meaningful for a current one. Untested either way — that is the point of
+    /// making it settable.
+    pub version: Version,
     /// Fill measured-constant bytes with [`GARBAGE_BYTE`] instead of zero. See [`Garbage`].
     pub garbage: Garbage,
     /// Occupy this many windows of sixteen instead of Apple's four.
@@ -363,6 +377,7 @@ impl Beacon {
     pub fn new(addr: [u8; 6], social_channel: u8, country: &str) -> Beacon {
         Beacon {
             garbage: Garbage::default(),
+            version: Version { major: 3, minor: 4, device_class: 2 },
             addr,
             host: "tarish".to_string(),
             social_channel,
@@ -602,10 +617,8 @@ impl Beacon {
             Ieee80211Container { elements: vec![(ELEM_VHT_CAPABILITIES, self.vht.to_vec())] }
                 .encode(),
         ));
-        // v3.4, which is what libmosey and OWL announce. Raising it to Apple's 10.0 is a
-        // capability claim and a separate decision -- see docs/GAPS.md section 1, where it
-        // is also recorded as no longer being the decisive experiment it was thought to be.
-        tlvs.push((21, Version { major: 3, minor: 4, device_class: 2 }.encode().to_vec()));
+        // Defaults to v3.4, which is what libmosey and OWL announce. See `Beacon::version`.
+        tlvs.push((21, self.version.encode().to_vec()));
         tlvs
     }
 
