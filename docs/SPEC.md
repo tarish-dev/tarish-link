@@ -274,8 +274,20 @@ mastership**. An Apple device followed for 28 seconds without it moving, then be
 incrementing the moment it took the job. The period is exact: AW counters read 15434,
 15625, 15817, 16009 at successive increments — 191, 192, 192.
 
-Apple's `self_metric` sits at **510–537**; `libmosey` sends **1**; OWL sends **60** and
+Apple's `self_metric` sits at **510–541**; `libmosey` sends **1**; OWL sends **60** and
 never moves its counter, which is why an OWL node is structurally a permanent follower.
+
+**The metric decides Apple-to-Apple election, and it is not static.** Five power-cycle rounds
+observed with nothing transmitting from us: the higher `self_metric` took mastership in all
+five, one tie going to whoever was on the air first, and in one round a device that joined
+*after* the incumbent displaced it on entry by carrying a higher value. Power-on order does
+not decide it.
+
+**Every join starts at 65 and climbs** to a settled value seconds later — ten joins out of
+ten. The settled value differs between power cycles of the same handset (517, 536, 510, 518,
+529), so it is computed at join time rather than being a device constant, and 65 looks like a
+floor for a node that has not earned anything yet. A transmitter that announces its full
+metric in its first frame is doing something no Apple device does. Finding 76.
 
 ### Tag 7 — HT Capabilities (7–20 bytes)
 

@@ -4536,6 +4536,81 @@ data never showed, and that sentence then sat in the spec being true for four mo
 
 ---
 
+## 76. ★★★ The metric decides every Apple-to-Apple election — and it RAMPS from 65 on join
+
+Five power-cycle rounds, both iPhones, no transmission from us at all: a pure observation of
+Apple electing Apple. The operator alternated the power-on order (A first, then B first, and
+so on) specifically to test whether order decides mastership.
+
+**It does not. The metric does, deterministically.**
+
+| round | order | B `72:01` | A `e6:a6` | master | higher metric? |
+|---|---|---|---|---|---|
+| 1 | A→B | **523** | 517 | **B** | yes |
+| 2 | B→A | 510 | **536** | **A** | yes |
+| 3 | A→B | 510 | 510 | **A** | tie — went to whoever was on air first |
+| 4 | B→A | 516 | **518** | **A** | yes |
+| 5 | A→B | **533** | 529 | **B** | yes |
+
+Five for five, with the one tie broken by incumbency. Round 1 is the interesting cell: A was
+already up and claiming master, B joined afterwards carrying 523 against A's 517, and **took
+mastership on entry**. So Apple devices displace each other routinely and without ceremony.
+
+### The metric is not static — it starts at 65 and climbs
+
+Every join, without exception, ten out of ten:
+
+```
+frame 1     e6:a6   65  ->  frame 18    517
+frame 28    72:01   65  ->  frame 63    523
+frame 482   72:01   65  ->  frame 519   510
+frame 525   e6:a6   65  ->  frame 579   536
+frame 891   e6:a6   65  ->  frame 905   510
+frame 909   72:01   65  ->  frame 965   510
+frame 1308  72:01   65  ->  frame 1349  516
+frame 1378  e6:a6   65  ->  frame 1421  518
+frame 1746  e6:a6   65  ->  frame 1762  529
+frame 1776  72:01   65  ->  frame 1835  533
+```
+
+A device announces **65** for its first few seconds on the air, then settles to a value in the
+familiar 510-541 band. The settled value differs between joins of the *same handset* (`e6:a6`
+was 517, 536, 510, 518, 529 across five power cycles), so it is computed at join time from
+something that varies — not a device constant.
+
+**65 is close to the 60 OWL hardcodes**, which is probably not a coincidence: it looks like a
+floor value for a node with nothing to recommend it yet.
+
+Practical consequence for every earlier finding: **every "incumbent metric" quoted in findings
+75 and earlier was a snapshot of a moving value**, taken whenever that capture happened to
+start.
+
+### The asymmetry, which is now the real question
+
+The metric decided all five rounds between Apple peers, including a takeover on entry. Our
+own metric of 600 — higher than any value an Apple device has ever been seen to advertise —
+failed to displace a settled cluster in four of six attempts (finding 75).
+
+**They honour each other's metrics and mostly ignore ours.** Both statements are measured,
+and together they are much sharper than "a settled cluster sometimes re-elects". Something
+about our frames, or about us, is treated differently from a peer advertising the same claim.
+
+Candidates, none tested:
+
+- **Availability breadth.** We advertise 3 slots of 16; they advertise 4 and widen to 6 and 8.
+  A peer that is absent most of the cycle is a poor timing anchor whatever it claims, and
+  `--windows` exists to test this deliberately.
+- **The ramp itself.** We advertise 600 from our first frame. A real device never does that —
+  it announces 65 and climbs. A node that appears at full strength instantly may be
+  distinguishable from one that earned its metric, and nothing in our transmitter imitates
+  the ramp.
+- Something else in our frames that a genuine peer would carry and we do not.
+
+The second candidate is new, specific, cheap to implement, and follows directly from this
+finding. It is the next thing to try.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
