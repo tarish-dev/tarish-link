@@ -570,7 +570,7 @@ fn usage() -> ! {
     eprintln!("                                         RUN THE PIPE: tun <-> radio. root, Linux");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME] [--garbage t4,t5,t16,t24|all] [--version 10.0]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME] [--garbage t4,t5,t16,t24|all] [--version 10.0] [--metric-floor SECS]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -641,6 +641,9 @@ fn main() {
                 args.iter().position(|a| a == "--version")
                     .and_then(|i| args.get(i + 1))
                     .map(|s| s.as_str()),
+                args.iter().position(|a| a == "--metric-floor")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.parse::<u64>().ok()),
             );
         }
         "follow" => {
@@ -1221,7 +1224,7 @@ fn check_baseline(path: &str, floors: &std::collections::BTreeMap<u8, Floor>) ->
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
 #[allow(clippy::too_many_arguments)]
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>) {
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>, metric_floor: Option<u64>) {
     use libawdl::beacon::Beacon;
     use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
 
@@ -1338,6 +1341,25 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     if let Some(m) = metric {
         b.metric = m;
     }
+    // --metric-floor SECS: announce METRIC_DECLINE (65) for the first SECS, then step to
+    // the real metric. THIS IS WHAT APPLE DOES, and it is not a ramp -- finding 77 caught a
+    // device at 65 for a couple of seconds after restarting its availability-window clock,
+    // then stepping to 533 in one move and holding it. The floor is a claim about being a
+    // credible timing anchor, and a node whose clock just started is not one yet.
+    //
+    // We have always announced one constant metric from our first frame, which no Apple
+    // device ever does. Whether a peer judges us on that is exactly what this flag tests.
+    let target_metric = b.metric;
+    let floor_until = metric_floor.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+    if let Some(secs) = metric_floor {
+        b.metric = libawdl::beacon::METRIC_DECLINE;
+        eprintln!(
+            "  --metric-floor {}s: announcing {} first, then stepping to {}",
+            secs,
+            libawdl::beacon::METRIC_DECLINE,
+            target_metric,
+        );
+    }
     if let Some(t) = tenure {
         // Sets where our election COUNTER starts. It exists to make the counter and the
         // metric disagree on purpose: OWL orders the election counter-first and this crate
@@ -1420,8 +1442,18 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     let mut last_tx_us = 0u64;
     let mut n = 0u32;
     let mut first_error: Option<String> = None;
+    let mut stepped = false;
 
     while std::time::Instant::now() < deadline {
+        // The step, once, at the boundary. Logged so the run says when it happened -- an
+        // outcome that changes at this instant is the whole point of the flag.
+        if let Some(t) = floor_until {
+            if !stepped && std::time::Instant::now() >= t {
+                b.metric = target_metric;
+                stepped = true;
+                eprintln!("  metric floor lifted: now announcing {target_metric}");
+            }
+        }
         // LISTEN FIRST. A frame from the cluster carries aw_counter and aw_remaining, which
         // place a slot boundary on our own clock -- so a short receive before each decision
         // is what turns "our phase" into "theirs". The timeout is deliberately small: this

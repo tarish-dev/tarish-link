@@ -4699,6 +4699,72 @@ tool selected the wrong part of the capture in the other. Both now count AWDL fr
 
 ---
 
+## 78. Imitating the metric floor — one good run, and it needs replication
+
+Finding 77 gave the first mechanism-shaped reason why Apple peers might ignore our election
+claim: we announce one constant metric forever, from our first frame, while every Apple
+device sits at a floor of 65 until its availability-window clock is established and then
+steps to its real value. `--metric-floor SECS` implements that, and this is the first test
+of it.
+
+**It is one run. It is promising and it is not established.**
+
+### The comparison
+
+All four runs are the solo condition — a single iPhone, sole incumbent, nothing else on the
+air — which is where the baseline is cleanest.
+
+| run | our metric | entry events | frames naming us master |
+|---|---|---|---|
+| soloA600 | constant 600 | 0 | **0** |
+| soloB600 | constant 600 | 0 | **0** |
+| **FL** | **65 for 3 s, then 600** | **0** | **653 — ADOPT** |
+| FL2 | 65 for 40 s, then 600 | **2** | *void* |
+
+FL is a valid settled-cluster takeover by every gate this repository applies, and 653 against
+a baseline of zero twice is not marginal. The incumbent named us master repeatedly before
+eventually reclaiming the cluster, so the effect was real and transient.
+
+### Why FL2 does not count, despite being an ADOPT
+
+FL2 was designed to fix a flaw in FL — the floor lasted 3 s and `tcpdump` opened around 10 s
+in, so the treatment was never actually observed on air. FL2 used a 40 s floor and did
+capture it: our metric reads 65 at frame 2 and steps to 600 at frame 466.
+
+Then the peer **rotated its AWDL MAC** mid-run. `72:01` vanished, `d2:8b:ce:98:97:3a`
+appeared, and the entry-event check scored 2. Adoption followed the rotation rather than the
+step — `72:01` named us only between frames 2409 and 2500, some 1,900 frames after the metric
+changed, and the new MAC named us 38 times on arrival, which is ordinary
+arriving-device-adopts-incumbent behaviour.
+
+**So the run that observed the treatment is the run that cannot be scored.** Both things are
+true and neither rescues the other.
+
+### What this does not yet show
+
+The timing in FL2, for what an invalid run is worth, argues *against* the tidy story that a
+metric transition triggers immediate re-evaluation: the step happened at frame 466 and
+nothing followed it for 1,900 frames.
+
+So the mechanism behind FL is unexplained. Candidates:
+
+- the floor-then-step really does make us a credible candidate, and FL is the true effect
+- the transition is irrelevant and FL was one of the ~1-in-3 spontaneous takeovers from
+  finding 75 — two controls is a thin basis for calling 653 exceptional
+- something about a 3 s floor specifically, which FL2's 40 s did not reproduce
+
+### The run to do next
+
+Solo incumbent, zero entry events required, **both arms in the same session**: constant 600,
+then 65-for-3s-then-600, then constant 600 again. Alternating, three or four times. If the
+floor arm adopts and the constant arm does not, across a handful of alternations, that is a
+result. One run is not.
+
+`awdl beacon --metric-floor SECS` is implemented and deployed; the beacon logs the floor and
+the moment it lifts, so the manipulation is checkable in the log and on air.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
