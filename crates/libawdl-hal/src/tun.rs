@@ -173,9 +173,13 @@ impl Tun {
     /// blocking read on either starves the other. A timeout is the smallest thing that
     /// works; `poll` on both descriptors is the right answer when one loop runs both.
     pub fn set_read_timeout(&self, ms: u32) -> Result<()> {
+        // `as`, not `From`: time_t and suseconds_t are i64 on 64-bit and i32 on 32-bit
+        // (armv7, the Pi 400), so `i32::from(u32)` does not compile there. The values are a
+        // second count and a microsecond count derived from a u32 of milliseconds, both far
+        // inside i32 range, so the cast is lossless in practice.
         let tv = libc::timeval {
-            tv_sec: libc::time_t::from(ms / 1000),
-            tv_usec: libc::suseconds_t::from((ms % 1000) * 1000),
+            tv_sec: (ms / 1000) as libc::time_t,
+            tv_usec: ((ms % 1000) * 1000) as libc::suseconds_t,
         };
         // SAFETY: a correctly-sized timeval for SO_RCVTIMEO.
         let rc = unsafe {
