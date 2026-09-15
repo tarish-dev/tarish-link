@@ -4798,6 +4798,49 @@ the moment it lifts, so the manipulation is checkable in the log and on air.
 
 ---
 
+## 79. Pre-flight: all three election arms verified honest, with no Apple device present
+
+An arm that does not do what it claims produces a void run that looks like a result — that is
+precisely how Trial E's lone historical takeover became untrustworthy, by occupying six
+availability windows while advertising fewer. Before spending an attended session on the
+finding 78 replication, each arm was checked against our own radio. **No iPhone is needed for
+this**, which makes it the one part of election work that can be done unattended.
+
+| arm | advertises | transmits in | honest? |
+|---|---|---|---|
+| `control` (default) | 3/16 slots, tags 18 **and** 4 | 3/16 — `[▅.....▅.▅.......]` | yes |
+| `windows` (`--windows 8`) | 8/16 slots, tags 18 **and** 4 | 8/16 — `[▃.▂.▂.▂.▂.▂.▂.▃.]` | yes |
+| `floor` (`--metric-floor 3`) | metric 65 then 600 | step logged, and observed on air in run FL2 | yes |
+
+Both occupancy arms advertise the same figure in tag 18 and tag 4 — worth checking separately,
+because a sequence announced in one and not the other would be a peer-visible inconsistency
+we would never see in our own logs. The `windows` histogram lands in exactly the alternating
+slots the beacon names (0, 2, 4, 6, 8, 10, 12, 14).
+
+So when the replication finally runs, a null result will mean the peers were unmoved rather
+than that our treatment never reached the air.
+
+### The measurement that is still missing, and why
+
+The three-arm harness has produced **no scored trial at all**. Both handsets were left
+switched on overnight and left AWDL within about ten minutes — see PROTOCOL rule 14. The
+harness polls rather than voiding, so it will collect if they return, but they did not.
+
+What exists so far is one scored pair from the buggy first attempt, and it is worth recording
+precisely because it points the unwelcome way:
+
+| arm | frames naming us master |
+|---|---|
+| control | **117 — ADOPT** |
+| floor | 0 |
+
+n=1 per arm, and the control adopting is exactly what finding 75 predicts at a spontaneous
+rate of roughly one attempt in three. **Nothing here supports the metric-floor hypothesis
+yet, and one data point mildly contradicts it.** Finding 78 should be read with that in front
+of it.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
