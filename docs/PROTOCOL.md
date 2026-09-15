@@ -108,6 +108,21 @@ document with a real control". It had a converse. That is not a control.
    preconditions that matter are the ones already enforced — peers transmitting, and a peer
    entering — and both are read off the air rather than off a screen.
 
+14. **Election experiments cannot run unattended. The phones will not stay on AWDL.**
+   Both handsets were deliberately left switched on with AirDrop enabled and the operator
+   went to sleep. They advertised AWDL for about **ten minutes** and then stopped. iOS
+   reverts to Contacts Only by itself, and an idle handset in that state advertises nothing
+   at all (rule 13) — so an overnight harness spends the night polling an empty room.
+
+   Measured twice: the first 66-trial run scored "empty room" from trial 3 onward, and the
+   rewritten one had produced no trial at all after half an hour.
+
+   **What this costs.** Any experiment needing many settled-cluster trials needs a person
+   keeping a handset awake on the AirDrop share sheet, which caps a session at however long
+   someone will sit there. That is the binding constraint on election work, not ideas and not
+   build time. Finding 78's replication is a ~30-minute attended session, and designing it as
+   anything else wastes a night.
+
 ## The harness
 
 `scratchpad/trial.sh` — `LABEL=X FLAGS="..." ./trial.sh`. Four failure modes are designed
