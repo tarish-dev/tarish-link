@@ -4916,6 +4916,82 @@ should track our actual role.
 
 ---
 
+## 81. ★★★ Why we lose the election: our timing claim is unverifiable, not our metric
+
+The operator's argument: a well-designed protocol would not let a node win by *claiming* to be
+best — it would let the peer *verify* the claim. Finding 80 had just shown we are a
+byte-perfect master claim (address, parent, distance 0, relayed counter all correct) with a
+superior metric, and we still lose ~2/3 of settled-cluster attempts. So the deciding factor is
+not in the election fields. It is whether the peer can verify we are a real timing anchor.
+
+**We cannot pass that verification, and the tell is `tx_delay`.**
+
+The AWDL fixed header carries `target_tx_time` (when the frame was scheduled to go) and
+`phy_tx_time` (when the PHY actually sent it); `tx_delay` is their difference. Measured:
+
+| | frames | tx_delay |
+|---|---|---|
+| real devices | 18,493 | min 45, median 100, max 8879 us — **never zero** |
+| us | 396 | **0 in every single frame** |
+
+No real radio reports zero — there is always PHY latency. Ours is zero because
+`Fixed::for_tx` sets `phy_tx_time = target_tx_time`, and `target_tx_time = now_us`, our
+**software** clock (microseconds since the process started), not the radio's TSF.
+
+### Why this loses the election, mechanically
+
+A master's job is to be the cluster's clock. To adopt a new master a peer must synchronise to
+it: read `target_tx_time` plus the tag 4 sync params (`aw_counter`, `aw_remaining`) and predict
+when the node's next availability window opens. That works when the stamped time equals when
+the frame really left the antenna — which a hardware TSF guarantees.
+
+Ours fails twice over:
+
+- `target_tx_time` is on our private software epoch, unrelated to the cluster TSF timeline.
+- Our frames do **not** leave when we stamp them: USB and scheduling latency on the MT7612U
+  add milliseconds of *variable* delay, reported as zero. A peer measuring "you said T, it
+  arrived at T+jitter" sees an unanchored, noisy clock.
+
+So a peer cannot build a stable model of our schedule and will not switch to us as master
+**regardless of how correct the claim or how high the metric.** This is the mechanism behind
+finding 76's asymmetry — Apple peers honour each other's claims because they can lock onto
+each other's TSF-anchored timing, and cannot lock onto ours. It also fits finding 75's ~1-in-3:
+we are adopted occasionally, plausibly when the peer is itself unsettled (entering, or its own
+clock just restarted — finding 77's floor) and its synchronisation bar is momentarily low.
+
+### What this means for the project
+
+Being elected master reliably is **a hardware-tier problem, not a protocol-field problem.** It
+needs frames timestamped at actual PHY transmit time against a cluster-synchronised TSF —
+exactly the capability `libawdl-hal` already grades radios by, and exactly what commodity USB
+injection does not give us. Every remaining election field is already correct; no amount of
+tuning tag 24 changes this.
+
+Two honest caveats:
+
+- **Not yet proven by fixing it.** The mechanism is strongly evidenced (perfect claim +
+  superior metric + the cleanest byte discriminator we have) but the direct test — source
+  `target_tx_time` from a real TSF and show adoption becomes reliable — needs TSF access the
+  MT7612U may not expose to userspace. Until that runs, this is the best-supported explanation,
+  not a closed one.
+- **A cheap partial step exists and is worth trying**: report a plausible non-zero `tx_delay`
+  instead of a literal 0. It does not fix the software-epoch anchor, but a peer that simply
+  range-checks `tx_delay` for "is this real hardware" would stop rejecting us on that alone.
+  Whether Apple range-checks it, or genuinely integrates the timing, is itself a test.
+
+### The reframe this forces on the whole election track
+
+We have been asking "which byte makes a peer elect us." The answer is that no byte does — the
+peer elects a node it can *synchronise to*, and synchronisation is a physical-timing property
+our injection path cannot currently supply. The election-field experiments (findings 65-80)
+were not wasted: they proved the fields are not the obstacle, which is what points the finger
+squarely at timing. But "win the election" and "carry AirDrop/Quick Share traffic" are
+different goals, and only the first needs us to be master. For Tarish's actual purpose we
+generally do **not** need to be master — we need to be a well-behaved follower that a master
+schedules, which this same analysis suggests we already can be.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

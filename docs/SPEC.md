@@ -497,6 +497,12 @@ scored zero. Two runs on 2026-09-14 took mastership from a verified-settled two-
 cluster with no entry event: one at metric 541 conceding after ~215 s, one at metric 600
 conceding in under ten seconds, 852 and 3,242 frames naming us master. Finding 75.
 
+ A later finding does: our
+timing claim is unverifiable. We stamp `target_tx_time` from a software clock and report
+`tx_delay` as a literal 0 (no real radio ever does — 18,493 real frames ran 45-8879us, never
+zero), so a peer cannot lock onto our schedule and will not adopt us however high the metric.
+Being master reliably is a hardware-TSF problem, not a protocol-field one. Finding 81.
+
 **Nothing we have tested predicts it.** Six settled-cluster runs in one evening produced two
 takeovers, and five candidate explanations were eliminated: metric range (600 beat 541),
 duration (one takeover landed in under ten seconds), clock quality (one succeeded with 151 ms
