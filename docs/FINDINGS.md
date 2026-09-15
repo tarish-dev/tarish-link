@@ -5117,6 +5117,51 @@ member first** — sit as a well-behaved follower until the cluster tracks our t
 promising path to mastership than appearing from outside at metric 600, and it is untested.
 It also happens to be the posture Tarish actually needs (a good follower), so it is worth
 trying regardless.
+## 84. Studying Apple network formation — the `topology` tool, and multi-hop is already in our data
+
+The operator's redirection: stop trying to join at metric 600, and instead study — purely
+passively — how Apple devices negotiate and form a cluster, using device distance as a knob.
+The right instrument is a topology reconstruction, and it turns out the data was already here.
+
+**AWDL forms a tree, not a star.** Tag 24 carries three fields that describe it: `master` (the
+root), `other` (this node's parent — the next hop toward the root), and `distance` (hops to
+the root). Distance had been 0 or 1 in everything we looked at, so we pictured a star. But
+across the corpus there are **4,668 distance-2 frames** — nodes two hops from the master,
+reaching it through a relay. We had simply never drawn the tree.
+
+`awdl topology <pcap>` does now: per device it takes the modal (master, parent, distance) and
+mean RSSI, and prints the tree rooted at each distance-0 master, annotated with signal and
+first-seen time. On the six-device capture it recovered a real relay structure — `de:03` as a
+root with `de:6e` and `ea:fa` hanging off it — and RSSI tracked distance-from-sniffer cleanly
+(e6:a6 −56 dBm near, 4a:e2 −85 far).
+
+### What this buys, and its one current limit
+
+RSSI is the signal WE heard, a proxy for a node's distance from the sniffer — which is exactly
+why the operator's plan to place devices at varying distances is a usable experiment: move a
+device far from the master but near another node, and watch whether it adopts at distance 2
+through that relay, and how RSSI predicts who relays for whom.
+
+The limit: the modal-over-whole-capture view conflates time. In a capture where the master
+changes (a succession), a node appears at its most-common role and the tree blurs. For static
+placement — devices set down and left to settle — roles are stable and the tree is clean,
+which is the regime the operator's distance experiments live in. A per-time-window formation
+view (`--bucket`) is the natural next addition when we want to watch a cluster assemble from
+an empty room rather than summarise a settled one.
+
+### The experiments this opens (passive, no injection, no clean-room-for-us problem)
+
+- **Distance -> topology.** Place devices at increasing separation and map the resulting tree.
+  Does a far device relay through a near one (distance 2)? Does the master end up being the
+  most central node, or just the highest metric regardless of position?
+- **Does signal enter election at all?** Finding 76 said metric decides, but metric may itself
+  be computed partly from link quality. Varying distance while watching metric would show
+  whether a device's advertised metric moves with its RF environment.
+- **Formation sequence.** From an empty room, capture the order: who claims master first, how
+  fast followers converge, whether the tree reorganises as better-placed nodes appear.
+
+None of this needs us on the air. It is the AWDL equivalent of reading the protocol by
+watching it run, and it is the cleanest use of a room full of real devices we have.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

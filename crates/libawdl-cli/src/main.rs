@@ -568,6 +568,7 @@ fn usage() -> ! {
     eprintln!("                                         how much of the air do we understand");
     eprintln!("  awdl bytemap <file.pcap>... [tag]      which bytes of a tag ever VARY");
     eprintln!("  awdl master-diff <file.pcap>...        which bytes flip with mastership");
+    eprintln!("  awdl topology <file.pcap>...           reconstruct the master->follower tree");
     eprintln!("  awdl correlate <file.pcap>...          match unknown bytes against KNOWN fields");
     eprintln!("  awdl tun <name> [secs] [mac]           open the awdl0 netdev. needs root, Linux");
     eprintln!("  awdl datapath <mon> <our-mac> [name] [secs] [--verbose]");
@@ -666,6 +667,9 @@ fn main() {
         }
         "master-diff" => {
             master_diff(&args[2..]);
+        }
+        "topology" => {
+            topology(&args[2..]);
         }
         "correlate" => {
             correlate(&args[2..]);
@@ -2264,6 +2268,147 @@ fn master_diff(args: &[String]) {
     println!("flagged across several is a protocol-level mastership field. Cross-check any");
     println!("hit against the known ones before calling it new: tag 5 offset 5..11 and tag 24");
     println!("offset 0..6 are the master ADDRESS, which of course flips.");
+}
+
+/// Reconstruct the cluster's master->follower TREE and how it forms.
+///
+/// This is for studying Apple network formation as a passive observer — no injection. AWDL
+/// builds a tree, not a star: tag 24 carries `master` (the root), `other` (this node's
+/// parent, the next hop toward the root), and `distance` (hops to the root). A device at
+/// distance 2 reaches the master through a distance-1 relay. We had 4,668 distance-2 frames
+/// on record and had never drawn the tree.
+///
+/// Per sender we take the modal (master, parent, distance) and the mean RSSI, then print the
+/// tree rooted at each distance-0 master. RSSI is the signal WE heard from that node — a
+/// proxy for how far it is from the sniffer, which is what makes varying device distance a
+/// usable experimental knob.
+fn topology(args: &[String]) {
+    use std::collections::BTreeMap;
+
+    let files: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    // Per sender, accumulate modal role fields and mean RSSI.
+    struct Acc {
+        master: BTreeMap<[u8; 6], u32>,
+        parent: BTreeMap<[u8; 6], u32>,
+        distance: BTreeMap<u32, u32>,
+        metric: BTreeMap<u32, u32>,
+        rssi_sum: i64,
+        rssi_n: i64,
+        frames: u64,
+        first_s: Option<u64>,
+    }
+    impl Acc {
+        fn new() -> Acc {
+            Acc { master: BTreeMap::new(), parent: BTreeMap::new(), distance: BTreeMap::new(),
+                  metric: BTreeMap::new(), rssi_sum: 0, rssi_n: 0, frames: 0, first_s: None }
+        }
+    }
+    fn top<K: Copy + Ord>(m: &BTreeMap<K, u32>) -> Option<K> {
+        m.iter().max_by_key(|(_, c)| **c).map(|(k, _)| *k)
+    }
+
+    let mut acc: BTreeMap<[u8; 6], Acc> = BTreeMap::new();
+    let mut t0: Option<u64> = None;
+
+    for f in &files {
+        let Ok(mut cap) = pcap::Capture::from_file(f) else {
+            eprintln!("skipping {f}: not a capture");
+            continue;
+        };
+        while let Ok(pkt) = cap.next_packet() {
+            let ts = pkt.header.ts.tv_sec as u64;
+            let base = *t0.get_or_insert(ts);
+            let rel = ts.saturating_sub(base);
+            let Seen::Awdl { dot11, af, rt } = classify(pkt.data) else { continue };
+            let src = dot11.src.0;
+            let Some(t24) = af.tlvs().find(|t| t.tag == 24) else { continue };
+            let Some(e) = ElectionParamsV2::parse(t24.value) else { continue };
+            let a = acc.entry(src).or_insert_with(Acc::new);
+            *a.master.entry(e.master).or_default() += 1;
+            *a.parent.entry(e.other).or_default() += 1;
+            *a.distance.entry(e.distance).or_default() += 1;
+            *a.metric.entry(e.self_metric).or_default() += 1;
+            if let Some(s) = rt.signal_dbm {
+                a.rssi_sum += i64::from(s);
+                a.rssi_n += 1;
+            }
+            a.frames += 1;
+            if a.first_s.is_none() { a.first_s = Some(rel); }
+        }
+    }
+
+    if acc.is_empty() {
+        eprintln!("no AWDL frames with tag 24");
+        return;
+    }
+
+    // Resolve to plain per-node facts.
+    #[derive(Clone)]
+    struct R { parent: [u8; 6], distance: u32, metric: u32, rssi: i64, first_s: u64, frames: u64 }
+    let mut r: BTreeMap<[u8; 6], R> = BTreeMap::new();
+    for (mac, a) in &acc {
+        r.insert(*mac, R {
+            parent: top(&a.parent).unwrap_or([0; 6]),
+            distance: top(&a.distance).unwrap_or(0),
+            metric: top(&a.metric).unwrap_or(0),
+            rssi: if a.rssi_n > 0 { a.rssi_sum / a.rssi_n } else { 0 },
+            first_s: a.first_s.unwrap_or(0),
+            frames: a.frames,
+        });
+    }
+
+    // Walk parent pointers to the nearest distance-0 node; bounded against cycles. Returns
+    // the resolved root, or the node itself if the chain dead-ends off-capture.
+    let root_of = |start: [u8; 6]| -> [u8; 6] {
+        let mut cur = start;
+        for _ in 0..8 {
+            match r.get(&cur) {
+                Some(rr) if rr.distance == 0 => return cur,
+                Some(rr) if rr.parent != [0; 6] && rr.parent != cur && r.contains_key(&rr.parent) => {
+                    cur = rr.parent;
+                }
+                _ => return cur,
+            }
+        }
+        cur
+    };
+
+    println!("Cluster topology — modal role per device over the capture.\n");
+    println!("  distance 0 = master (root); a child's parent is its tag 24 `other` field.");
+    println!("  RSSI is what the SNIFFER heard from that node — nearer the sniffer = stronger.\n");
+
+    let fmt = |mac: [u8; 6]| libawdl::dot11::Mac(mac).to_string();
+    let show = |mac: [u8; 6], rr: &R, depth: usize| {
+        let indent = "    ".repeat(depth);
+        println!("  {indent}{}  d{}  metric {}  RSSI {} dBm  first@{}s  {} frames",
+                 fmt(mac), rr.distance, rr.metric, rr.rssi, rr.first_s, rr.frames);
+    };
+
+    let roots: Vec<[u8; 6]> = r.iter().filter(|(_, rr)| rr.distance == 0).map(|(k, _)| *k).collect();
+    for root in &roots {
+        show(*root, &r[root], 0);
+        let mut kids: Vec<([u8; 6], R)> = r.iter()
+            .filter(|(mac, rr)| rr.distance > 0 && root_of(**mac) == *root)
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        kids.sort_by_key(|(_, rr)| rr.distance);
+        for (mac, rr) in &kids {
+            show(*mac, rr, rr.distance as usize);
+        }
+        println!();
+    }
+
+    let orphans: Vec<[u8; 6]> = r.iter()
+        .filter(|(mac, rr)| rr.distance > 0 && !roots.contains(&root_of(**mac)))
+        .map(|(k, _)| *k).collect();
+    if !orphans.is_empty() {
+        println!("  unrooted (parent not seen as a distance-0 master in this capture — churn,");
+        println!("  or the parent left mid-capture):");
+        for mac in orphans {
+            show(mac, &r[&mac], 1);
+        }
+    }
 }
 
 /// Match every undecoded byte window against every field we already understand, within
