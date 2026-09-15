@@ -4691,6 +4691,39 @@ from our first frame, with a clock that never restarts. No Apple device behaves 
 Whether a peer judges us on it is untested — but "imitate the floor-then-step behaviour" is
 now a concrete, cheap change with a mechanism behind it rather than a guess.
 
+### The clock_ms / aw_counter disagreement, resolved
+
+Finding 77 noted in passing that the two fields disagreed about elapsed time — about 16.4 ms
+per AW measured across a long window, but 2.8 ms per AW in the seconds right after a restart
+— and deferred it. Since both are fields this corpus counts as *named*, a real disagreement
+would mean one of them is misidentified.
+
+**They are both right.** Ratios were the wrong statistic; increments settle it:
+
+| window | dclock_ms | daw_counter | ms per AW |
+|---|---|---|---|
+| 1800 -> 1830 | 1689 | 104 | 16.24 |
+| 1830 -> 1900 | 3488 | 212 | 16.45 |
+| 1900 -> 2000 | 6291 | 384 | 16.38 |
+| 2000 -> 2100 | 12582 | 768 | 16.38 |
+
+Every one lands on **16.384 ms**, which is 16 TU, which is one Availability Window. And
+`clock_ms - 16.384 x aw_counter` is a constant across the whole session: -5109, -5124, -5109,
+-5110, -5111.
+
+A constant offset with an exact rate means the two fields measure the same passage of time
+from **different origins**. What produces the offset is the restart itself: at the first
+sample after one, `clock_ms` reads 164 with `aw_counter` at 0, and by the next sample
+`aw_counter` has advanced 388 while `clock_ms` advanced only 1084 ms — about 66 AWs' worth.
+So `aw_counter` **jumps to align with the cluster's window numbering** while `clock_ms` counts
+up from zero, and the ~5.11 s offset is the residue of that jump, fixed for the life of the
+session.
+
+That is worth having for its own sake: it says `aw_counter` is a *shared* quantity a joining
+node adopts, not a private count of how many windows it has personally seen. A transmitter
+that derives it from its own uptime will be wrong by whatever the cluster's numbering happens
+to be.
+
 ### Method note
 
 `awdl tlv` grew a `--frames A-B` window for this, and its frame counter was wrong: it counted
