@@ -5162,6 +5162,46 @@ an empty room rather than summarise a settled one.
 
 None of this needs us on the air. It is the AWDL equivalent of reading the protocol by
 watching it run, and it is the cleanest use of a room full of real devices we have.
+## 85. Distance shapes the cluster: metric picks the master, and out-of-range partitions rather than relays
+
+First controlled distance experiment, at home, four devices (`topology` tool, passive):
+
+**Flat placement — A, B close to the sniffer, H at ~2 m, M a few metres:** one cluster, every
+node at distance 1, and the master was **H (`aa:a0`, metric 538) — the *furthest, weakest*
+device of the four**, not the most central. RSSI ordered the devices by distance cleanly (A
+-48, B -52, H -63) and had no bearing on who won. This is finding 76 confirmed spatially:
+**election is decided by metric, not by signal strength or position.** The closest device to
+everyone was just a follower.
+
+**Then M moved much further** (RSSI -59 -> -81): M did **not** relay through a nearer node to
+reach the master. It **partitioned** — formed its own cluster of one, naming only itself
+master (611 frames, named by no one), while A and B stayed with H. Two independent AWDL
+clusters then coexisted on channel 149.
+
+### Why a relay did not form, and what would make one
+
+Distance-2 needs a *chain*: master — relay — M, where M can hear the relay but not the master.
+Here the master **was** the mid-distance device (H), and everything else clustered near the
+sniffer — so when M lost the master it also lost every follower (they were all near the
+master), leaving nothing to relay through. Pure distance from the master yields a **partition**,
+not a hop.
+
+To induce the multi-hop tree we already have 4,668 frames of (finding 84), the geometry has to
+be a line: master at one end, a relay device at the *edge* of its range, and M beyond the
+master's range but inside the relay's. Indoors with a wall between master and M, but the relay
+in the doorway, is the shape. A star of near devices plus one far outlier cannot produce it.
+
+### What this pins down
+
+- **Master selection is metric-only, spatially confirmed.** The weakest, furthest device won
+  because it advertised 538. Position, centrality and signal do not enter it.
+- **AWDL degrades by partitioning, not by extending range through relays-of-convenience.** A
+  device out of the master's range starts its own cluster rather than hunting for a path. The
+  relay tree forms only when a node sits in the actual middle of a chain.
+- RSSI at the sniffer is a reliable distance proxy (-48 near to -81 far), so the knob works —
+  the experiment now needs a *linear* arrangement, not just "one device far".
+
+Captures: `topo-4dev-flat-star.pcap`, `topo-partition-M-far.pcap`.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
