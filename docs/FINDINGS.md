@@ -4841,6 +4841,56 @@ of it.
 
 ---
 
+## 80. `master-diff`: what bytes distinguish a master from a follower — and a clean negative on two phones
+
+The operator's design: rather than garbling a byte and gambling on a rare takeover, put several
+devices in a room, let each pass through both master and follower, and **diff a device's own
+frames between the two roles.** A byte that flips with mastership is one no single-master
+capture can isolate, because the contrast needs the same device seen both ways.
+
+`awdl master-diff` implements it. Per sender it splits frames by whether tag 24 names the
+sender as master, and per (tag, offset) keeps the value-set in each role. It flags an offset
+only when both sets are **small (<=4 values) and disjoint** — the cardinality cap is what
+excludes `self_counter` and the clocks, which take a fresh value nearly every frame and would
+otherwise read as "disjoint" for the uninteresting reason. Each hit is auto-labelled with the
+known field at that offset, so a genuinely novel byte prints `<<< NOVEL` and nothing else has
+to be read.
+
+### Validated, then run on the richest two-phone capture we have
+
+The method re-derives every documented mastership field cleanly, which is the proof it works:
+
+| flagged | label | why it flips |
+|---|---|---|
+| tag 24 off 0-5, tag 5 off 5-10 | master address | points to self when master |
+| tag 24 off 6-11 | parent (other) | self when master, the master when following |
+| tag 24 off 16 | distance | **0 as master, 1 as a one-hop follower** |
+| tag 24 off 13, tag 12 off 32 | relayed master_counter | relays own tenure vs the master's (finding 49) |
+
+**And it flags nothing else.** On 1,573 frames from `72:01` and 540 from `e6:a6`, every
+master-correlated byte maps to a field already named. There is no hidden "I am master" flag in
+the two-phone data — the protocol encodes mastership entirely through the master address, the
+parent pointer, `distance`, and the relayed counter.
+
+### What the operator's multi-device run would add
+
+Two phones give two devices' worth of contrast, both the same model family. The negative could
+mean *there is nothing more to find*, or *a byte that only some device classes set is invisible
+until a more diverse room is captured*. Four or five devices cycling through mastership —
+powering off the current master so the next takes over, on cue, into one continuous capture —
+is exactly the diversity that separates those two readings. The instrument is ready; it needs
+only the capture.
+
+### The `distance` observation is worth keeping on its own
+
+`distance` going 0->1 with mastership is obvious in hindsight and we had never stated it: a
+master is the root at distance 0, and everything measured here has been one hop, so followers
+sat at 1. A two-hop follower would advertise 2, and a transmitter that hardcodes 0 while
+following would be claiming to be a root it is not. We currently send a fixed value; that
+should track our actual role.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

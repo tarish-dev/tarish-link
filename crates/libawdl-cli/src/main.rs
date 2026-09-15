@@ -567,6 +567,7 @@ fn usage() -> ! {
     eprintln!("  awdl coverage <file.pcap>... [--baseline F] [--update-baseline F]");
     eprintln!("                                         how much of the air do we understand");
     eprintln!("  awdl bytemap <file.pcap>... [tag]      which bytes of a tag ever VARY");
+    eprintln!("  awdl master-diff <file.pcap>...        which bytes flip with mastership");
     eprintln!("  awdl correlate <file.pcap>...          match unknown bytes against KNOWN fields");
     eprintln!("  awdl tun <name> [secs] [mac]           open the awdl0 netdev. needs root, Linux");
     eprintln!("  awdl datapath <mon> <our-mac> [name] [secs] [--verbose]");
@@ -662,6 +663,9 @@ fn main() {
         }
         "bytemap" => {
             bytemap(&args[2..]);
+        }
+        "master-diff" => {
+            master_diff(&args[2..]);
         }
         "correlate" => {
             correlate(&args[2..]);
@@ -2068,6 +2072,172 @@ fn bytemap(args: &[String]) {
     println!("captures come from a few Apple models, one Pixel and one Pi -- a field every");
     println!("one of them happens to share reads as padding here and is not. Weigh a run of");
     println!("dots by its n: 37,829 samples is evidence, 66 is barely a hint.");
+}
+
+/// Which bytes actually change when a device is MASTER versus when it is a follower.
+///
+/// The operator's design: in a room of several devices that each pass through both roles,
+/// diff a device's own frames between the two states. A byte that flips with mastership is
+/// one no single-master capture could ever isolate, because you need the same device seen
+/// both ways.
+///
+/// Per sender, per (tag, offset), we keep the set of byte values seen while the sender
+/// CLAIMS mastership and the set seen while it FOLLOWS. Three outcomes per offset:
+///
+///   same value both states      -> not a mastership byte (a constant, or the radio)
+///   many values in both states   -> a counter or clock; it moves regardless of role
+///   FEW values, DISJOINT sets    -> flips with mastership. This is the signal.
+///
+/// The cardinality cap is what separates the signal from `self_counter` and the clocks,
+/// which take a different value in nearly every frame and so are "disjoint" only in the
+/// uninteresting sense. A real master flag sits at one value while master and another while
+/// following.
+fn master_diff(args: &[String]) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let files: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    // (src, tag, len, offset) -> (values while master, values while following)
+    type Sets = BTreeMap<(  [u8; 6], u8, usize, usize), (BTreeSet<u8>, BTreeSet<u8>)>;
+    let mut sets: Sets = BTreeMap::new();
+    // (src) -> (frames as master, frames as follower)
+    let mut role_counts: BTreeMap<[u8; 6], (u64, u64)> = BTreeMap::new();
+
+    for f in &files {
+        let Ok(mut cap) = pcap::Capture::from_file(f) else {
+            eprintln!("skipping {f}: not a capture");
+            continue;
+        };
+        while let Ok(pkt) = cap.next_packet() {
+            let Seen::Awdl { dot11, af, .. } = classify(pkt.data) else { continue };
+            let src = dot11.src.0;
+            // The role is decided by tag 24; a frame without it cannot be classified and is
+            // stepped over rather than guessed.
+            let Some(t24) = af.tlvs().find(|t| t.tag == 24) else { continue };
+            let Some(e) = ElectionParamsV2::parse(t24.value) else { continue };
+            let is_master = e.master == src;
+            let rc = role_counts.entry(src).or_default();
+            if is_master { rc.0 += 1 } else { rc.1 += 1 }
+
+            for t in af.tlvs() {
+                if t.tag == 2 {
+                    continue; // DNS, variable by nature
+                }
+                for (i, b) in t.value.iter().enumerate() {
+                    let entry = sets.entry((src, t.tag, t.value.len(), i)).or_default();
+                    if is_master { entry.0.insert(*b); } else { entry.1.insert(*b); }
+                }
+            }
+        }
+    }
+
+    if role_counts.is_empty() {
+        eprintln!("no AWDL frames with tag 24");
+        return;
+    }
+
+    // Only senders seen in BOTH roles can contribute — a device that was only ever master,
+    // or only ever a follower, offers no contrast.
+    let both: BTreeSet<[u8; 6]> = role_counts
+        .iter()
+        .filter(|(_, (m, f))| *m >= 5 && *f >= 5)
+        .map(|(k, _)| *k)
+        .collect();
+
+    println!("Bytes that flip with mastership — per device seen in BOTH roles.\n");
+    println!("senders and their role split (master / follower frames):");
+    for (mac, (m, f)) in &role_counts {
+        let mark = if both.contains(mac) { "  <- usable" } else { "" };
+        println!("  {}  {m} / {f}{mark}", libawdl::dot11::Mac(*mac));
+    }
+    println!();
+
+    if both.is_empty() {
+        println!("No device appears in both roles with enough frames. Turn a master OFF so");
+        println!("the next device takes over while this capture runs — that is the contrast.");
+        return;
+    }
+
+    const CARD_CAP: usize = 4; // above this, treat as a counter/clock, not a flag
+    // (tag, offset, len) -> devices for which it flips, with the value pair
+    let mut hits: BTreeMap<(u8, usize, usize), Vec<(String, String, String)>> = BTreeMap::new();
+
+    for ((src, tag, len, off), (m_vals, f_vals)) in &sets {
+        if !both.contains(src) {
+            continue;
+        }
+        if m_vals.is_empty() || f_vals.is_empty() {
+            continue;
+        }
+        // Disjoint AND small in both states = a flag, not a counter.
+        let disjoint = m_vals.is_disjoint(f_vals);
+        let small = m_vals.len() <= CARD_CAP && f_vals.len() <= CARD_CAP;
+        if disjoint && small {
+            let fmt = |s: &BTreeSet<u8>| s.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(",");
+            hits.entry((*tag, *off, *len)).or_default().push((
+                libawdl::dot11::Mac(*src).to_string(),
+                fmt(m_vals),
+                fmt(f_vals),
+            ));
+        }
+    }
+
+    if hits.is_empty() {
+        println!("Nothing flips cleanly. Every byte that differs between the two roles does");
+        println!("so as a counter (many values, both states) or not at all. The known");
+        println!("master-linked fields — the tag 5/24 master pointer and self_counter — are");
+        println!("counters or the address itself and are filtered out by design.");
+        return;
+    }
+
+    // Label an offset with the known field that lives there, so a NOVEL hit — one that
+    // maps to no known field — is obvious without counting bytes by hand. Every entry here
+    // is a field this repository has already identified; a hit outside them is the prize.
+    let known = |tag: u8, off: usize| -> Option<&'static str> {
+        match tag {
+            5 => match off {
+                0 => Some("flags"), 1..=2 => Some("id"), 3 => Some("distance"),
+                5..=10 => Some("master address"), 11..=14 => Some("master_metric"),
+                15..=18 => Some("self_metric"), _ => None,
+            },
+            24 => match off {
+                0..=5 => Some("master address"), 6..=11 => Some("parent (other)"),
+                12..=15 => Some("master_counter (relayed)"), 16..=19 => Some("distance"),
+                20..=23 => Some("master_metric"), 24..=27 => Some("self_metric"),
+                28..=31 => Some("unknown_28 (READ)"), 32..=35 => Some("ignored pad"),
+                36..=39 => Some("self_counter"), _ => None,
+            },
+            // tag 12's layout is flag-dependent, so offsets shift; the extended-block
+            // counters land in the 20s-40s on a full frame. master_counter is relayed
+            // (finding 49), so a hit there is the same counter as tag 24's.
+            12 => Some("data-path (offset flag-dependent; check vs relayed master_counter)"),
+            _ => None,
+        }
+    };
+
+    println!("FLAGGED — value while master vs while following, ranked by how many devices agree:\n");
+    let mut ranked: Vec<_> = hits.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let mut any_novel = false;
+    for ((tag, off, len), devs) in ranked {
+        let name = libawdl::tlv::tag_name(tag);
+        let label = match known(tag, off) {
+            Some(k) => format!("  [known: {k}]"),
+            None => { any_novel = true; "  <<< NOVEL — maps to no known field".to_string() }
+        };
+        println!("  tag {tag} ({name})  offset {off} of {len}   {} device(s):{label}", devs.len());
+        for (mac, m, f) in devs {
+            println!("      {mac}   master={m}   follower={f}");
+        }
+    }
+    if !any_novel {
+        println!("\nEvery flagged byte maps to a known mastership field. No hidden master flag");
+        println!("in this capture — which is a result, not a dead end.");
+    }
+    println!();
+    println!("A byte flagged for ONE device may be that device's quirk; the same offset");
+    println!("flagged across several is a protocol-level mastership field. Cross-check any");
+    println!("hit against the known ones before calling it new: tag 5 offset 5..11 and tag 24");
+    println!("offset 0..6 are the master ADDRESS, which of course flips.");
 }
 
 /// Match every undecoded byte window against every field we already understand, within
