@@ -5029,13 +5029,33 @@ receiver can still absorb it as a fixed offset; if it is jittery, no single `tx_
 helps. Which of those holds is only knowable by testing adoption with the new timing against a
 real peer — not yet run.
 
-### The honest status
+### The adoption test — run, and it does not move the election
 
-This is a correctness fix to the implementation — we now send a real measured value where we
-sent an impossible one — not a demonstrated improvement to adoption. Whether it moves the
-election outcome is a separate, untested question, and finding 81's conclusion stands until
-that test runs: being a reliable master needs PHY-time timestamping this hardware does not
-provide.
+Tested directly against a settled A+B cluster (A `e6:a6` master at metric 530, B `72:01`
+following), us competing at metric 600 with the new real `tx_delay` on air:
+
+| run | timing | frames naming us master |
+|---|---|---|
+| wc1, t7c | old (tx_delay 0) | 0, 0 |
+| n1, n2, n3 | new (tx_delay ~27 us) | **0, 0, 0** |
+
+Five refusals across both timings. The new `tx_delay` changed nothing about adoption, which is
+exactly finding 81's prediction: a peer is not gating us on whether `tx_delay` is plausible,
+it is gating us on whether it can synchronise to our schedule — and a real-but-tiny 27 us that
+still rides a software clock with unmeasured millisecond USB latency does not make us a
+lockable anchor.
+
+So this is confirmed as a **correctness fix, not an adoption fix.** We now send a real measured
+value where we sent an impossible one; the election outcome is unchanged, and finding 81 stands:
+being a reliable master needs PHY-time timestamping this hardware does not provide. The value
+of the change is that our frames are now honest on the wire — which matters for implementing
+the protocol correctly regardless of whether we ever win an election, and it removes tx_delay
+as a variable in any future election experiment.
+
+Caveat on the sample: each run showed one ambient entry/exit event (an office device flapping),
+so they are soft-voids by the strict gate — but the A+B core cluster held throughout every run
+and the outcome (zero adoptions) is unambiguous. A stricter test would need the empty-room
+control the work site cannot guarantee; the home result already covers the clean case.
 
 ---
 
