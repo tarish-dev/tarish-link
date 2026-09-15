@@ -5059,6 +5059,64 @@ control the work site cannot guarantee; the home result already covers the clean
 
 ---
 
+## 83. ★★ Real devices get rejected too — but the reason differs, which locates the asymmetry
+
+The operator's challenge to finding 81: if we were rejected purely on timing, only *we* would
+claim master unsuccessfully — yet election is competitive and losers get ignored, so real
+iPhones should also appear claiming master and not being followed. If they do, our rejection
+might be ordinary competition, not a timing disqualification.
+
+**They do. Confirmed in the six-device succession capture.**
+
+Self-claims vs times any other device named them as master:
+
+| device | self-claims | adopted by others |
+|---|---|---|
+| `4a:e2` | 639 | **0** |
+| `06:0f` | 24 | 0 |
+| `de:6e` | 11 | 0 |
+| `06:b2` | 3 | 0 |
+| `ea:fa` | 33 | 13 |
+
+So "claim master, get ignored" is normal AWDL — real Apple devices do it constantly. Rejection
+is not unique to us.
+
+### But the *reason* is not the same, and that is the finding
+
+Tracking why each real device was rejected:
+
+- The rejected real claimants were **lower-metric or unstable-joining** nodes. `4a:e2` claimed
+  at 520 against a 527 master — a normal loss. `de:03` claimed itself repeatedly early on while
+  its metric bounced 65<->541<->539 (finding 77's clock restarts): a node still joining, not a
+  stable contestant.
+- A real device with a **stable higher metric, once already a synced cluster member, WON.**
+  `de:03` settled as a follower at 519, later climbed to 539, and *then* took mastership from
+  `72:01` (531). It won by metric — but only after it was already an insider whose timing the
+  cluster tracked.
+
+We are the case that never appears among the real devices: a **stable, high metric (600) that
+keeps losing.** de:03 at 539 beat a 531 incumbent; we at 600 mostly do not beat a 530 one.
+
+### Where this leaves finding 81 — sharper, not overturned
+
+Election is **metric-ordered among peers whose timing the cluster can already verify.** A
+synced member raising its metric wins (de:03). An outsider whose timing cannot be locked onto
+(us — finding 81) is not really in that pool, so its metric does not convert to adoption the
+way an insider's does.
+
+That is why real devices being rejected does **not** explain away our case: they are rejected
+for low metric or transient joining timing — states they climb out of — while we are rejected
+despite a high stable metric, because our timing never becomes verifiable. The operator is
+right that it is not a hard binary (we won ~1/3 at home), so the honest statement is that our
+claim is **weighted lower**, not hard-blocked: an unverifiable timing source competes as if its
+metric counted for less.
+
+The prediction this makes, and the clean future test: if we could become a **credible synced
+member first** — sit as a well-behaved follower until the cluster tracks our timing — and only
+*then* raise our metric, we should win the way de:03 did. That is a different and more
+promising path to mastership than appearing from outside at metric 600, and it is untested.
+It also happens to be the posture Tarish actually needs (a good follower), so it is worth
+trying regardless.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
