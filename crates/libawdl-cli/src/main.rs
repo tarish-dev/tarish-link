@@ -209,7 +209,10 @@ fn timeline<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, bucket_s: i6
     let mut last_bucket = 0i64;
 
     while let Ok(pkt) = cap.next_packet() {
-        let ts = pkt.header.ts.tv_sec;
+        // `as i64`: pcap's tv_sec is time_t, which is i32 on 32-bit targets (armv7, the Pi
+        // 400) and i64 elsewhere. Normalising here keeps every downstream calculation i64
+        // on both widths instead of scattering casts through the arithmetic below.
+        let ts = pkt.header.ts.tv_sec as i64;
         let base = *first_ts.get_or_insert(ts);
         let bucket = (ts - base) / bucket_s;
         last_bucket = last_bucket.max(bucket);
