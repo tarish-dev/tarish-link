@@ -2210,6 +2210,9 @@ fn master_diff(args: &[String]) {
             // counters land in the 20s-40s on a full frame. master_counter is relayed
             // (finding 49), so a hit there is the same counter as tag 24's.
             12 => Some("data-path (offset flag-dependent; check vs relayed master_counter)"),
+            // Tag 6 is a hash whose contents finding 25 showed do not matter; a byte of it
+            // differing between two frame-sets is hash churn, not a mastership signal.
+            6 => Some("service-params hash (finding 25 — contents do not matter)"),
             _ => None,
         }
     };

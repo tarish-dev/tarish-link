@@ -4872,14 +4872,39 @@ master-correlated byte maps to a field already named. There is no hidden "I am m
 the two-phone data — the protocol encodes mastership entirely through the master address, the
 parent pointer, `distance`, and the relayed counter.
 
-### What the operator's multi-device run would add
+### The multi-device run — done, and it holds
 
-Two phones give two devices' worth of contrast, both the same model family. The negative could
-mean *there is nothing more to find*, or *a byte that only some device classes set is invisible
-until a more diverse room is captured*. Four or five devices cycling through mastership —
-powering off the current master so the next takes over, on cue, into one continuous capture —
-is exactly the diversity that separates those two readings. The instrument is ready; it needs
-only the capture.
+Run at the work site: **six devices** in one continuous capture, metrics spanning **115 to
+539** (plainly different device classes, not one family), the operator powering off the master
+on cue so the next took over. Three clean successions, each metric-ordered and each confirming
+finding 76:
+
+```
+A e6:a6 (538)  ->  B 72:01 (531)  ->  de:03 (had climbed 519->539)  ->  5a:f3 (527)
+```
+
+The second was the good surprise: `de:03` was a follower at 519, re-climbed to 539 (finding
+77's moving metric), and won the succession over `5a:f3` at 527 — the current highest metric
+wins, not the one that was highest a minute ago.
+
+Five devices ended up usable (seen in both roles). **master-diff flags zero novel bytes across
+all of them.** Every master-correlated offset maps to a known field, and the agreement is now
+broad rather than coincidental: `distance` flips for **5** devices, the master address and
+parent pointer for **4** each, the relayed `master_counter` (tag 24 off 13 and tag 12 off 32
+together) for **4**.
+
+So the two-phone negative was not an artifact of low diversity. **Across six varied devices,
+AWDL encodes mastership entirely through the master address, the parent pointer, `distance`,
+and the relayed counter — there is no hidden "I am master" flag.** For a transmitter that means
+claiming mastership is exactly: put your address in the master field, set distance 0, relay
+your own counter. Nothing subtler is being checked.
+
+One byte flagged and was dismissed: tag 6 offset 3 for a single device, values `{9c,aa,d9}`
+master vs `{b8,cb}` follower. Tag 6 is the service-params hash whose contents finding 25 showed
+do not matter; a hash byte splitting by chance across two frame-sets, for one device, is noise.
+The annotation now labels tag 6 so it no longer prints as novel.
+
+Capture kept: `captures/election-succession-6dev.pcap`.
 
 ### The `distance` observation is worth keeping on its own
 
