@@ -113,6 +113,28 @@ impl Fixed {
             target_tx_time,
         }
     }
+
+    /// Offset of `phy_tx_time` within the body [`encode`] produces:
+    /// category(1) + OUI(3) + type(1) + version(1) + subtype(1) + reserved(1) = 8.
+    ///
+    /// Exposed so the transmit path can overwrite `phy_tx_time` at the last moment before
+    /// injection, once it has a better estimate of when the frame actually reaches the air
+    /// than "when we built it". See [`stamp_phy_tx_time`] and finding 81 — a `tx_delay` of a
+    /// literal zero is physically impossible and marks us as a software transmitter.
+    pub const PHY_TX_TIME_BODY_OFFSET: usize = 8;
+}
+
+/// Overwrite `phy_tx_time` in an already-assembled frame.
+///
+/// `body_start` is where the action body begins — the length of the 802.11 management
+/// header that precedes it. Writing here rather than at build time lets the caller stamp
+/// the actual (estimated) air time as late as possible, so `tx_delay = phy - target`
+/// reflects the real injection latency instead of the impossible zero of `for_tx`.
+pub fn stamp_phy_tx_time(frame: &mut [u8], body_start: usize, phy_tx_time: u32) {
+    let at = body_start + Fixed::PHY_TX_TIME_BODY_OFFSET;
+    if at + 4 <= frame.len() {
+        frame[at..at + 4].copy_from_slice(&phy_tx_time.to_le_bytes());
+    }
 }
 
 /// Assemble an AWDL action frame body: the fixed header, then the TLVs in order.

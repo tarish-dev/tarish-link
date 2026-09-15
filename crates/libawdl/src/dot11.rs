@@ -118,6 +118,10 @@ pub const BROADCAST: Mac = Mac([0xff; 6]);
 ///
 /// `seq` occupies the top 12 bits of the sequence-control field; the low 4 are the
 /// fragment number, which is 0 because AWDL action frames are never fragmented.
+/// Length of the 802.11 management header [`management_header`] produces. The action body
+/// begins here, which is what the transmit path needs to locate `phy_tx_time`.
+pub const MGMT_HEADER_LEN: usize = 24;
+
 pub fn management_header(dst: Mac, src: Mac, seq: u16) -> [u8; 24] {
     let mut h = [0u8; 24];
     // Frame control: version 0, type management (0), subtype action (13).

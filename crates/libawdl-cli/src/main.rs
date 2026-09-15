@@ -1450,6 +1450,10 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     let mut n = 0u32;
     let mut first_error: Option<String> = None;
     let mut stepped = false;
+    // Running estimate of injection latency, seeded at a real device's median tx_delay of
+    // 100 us and refined by timing each tx() syscall. Feeds phy_tx_time. Finding 81.
+    let mut tx_latency_est: u64 = 100;
+    let mut tx_latency_seen: u64 = 0;
 
     while std::time::Instant::now() < deadline {
         // The step, once, at the boundary. Logged so the run says when it happened -- an
@@ -1619,8 +1623,23 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             continue;
         }
         let is_mif = psf_per_mif == 0 || n % (psf_per_mif + 1) == 0;
-        let frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
-        match radio.tx(&frame, TxParams::default()) {
+        // target_tx_time is stamped here, at build, from the same clock the sync params
+        // (aw_counter, aw_remaining) use — so the schedule the frame advertises and the
+        // time it claims to be sent agree. phy_tx_time is stamped just below, as late as we
+        // can, so tx_delay = phy - target reflects our real injection latency rather than
+        // the impossible literal zero for_tx would leave. Finding 81.
+        let mut frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
+        let phy_us = now_us + tx_latency_est;
+        libawdl::action::stamp_phy_tx_time(&mut frame, libawdl::dot11::MGMT_HEADER_LEN, phy_us as u32);
+        let tx_start = std::time::Instant::now();
+        let tx_result = radio.tx(&frame, TxParams::default());
+        // The syscall's duration is a real, measured lower bound on how long the frame took
+        // to leave — most of the mt76 USB path is async past this, but it is honest and
+        // non-zero, and an EWMA of it is what the NEXT frame reports as its tx_delay.
+        let tx_dur = tx_start.elapsed().as_micros() as u64;
+        tx_latency_est = (tx_latency_est * 7 + tx_dur) / 8;
+        tx_latency_seen = tx_latency_seen.max(tx_dur);
+        match tx_result {
             Ok(()) => {
                 if is_mif { sent_mif += 1 } else { sent_psf += 1 }
             }
@@ -1667,6 +1686,10 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     }
 
     eprintln!("\nsent {sent_mif} MIF, {sent_psf} PSF, {failed} failed");
+    eprintln!(
+        "  injection latency: EWMA {tx_latency_est} us, peak {tx_latency_seen} us \
+         (this is what tx_delay now carries; 0 was the old, impossible value)"
+    );
     // Printed unconditionally, including the zero. It is the outcome measure of every
     // election experiment this project runs, and a missing line reads as "not looked at".
     eprintln!(

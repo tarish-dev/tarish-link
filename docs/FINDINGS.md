@@ -4992,6 +4992,53 @@ schedules, which this same analysis suggests we already can be.
 
 ---
 
+## 82. Proper transmit timing: tx_delay is now measured, not a literal zero
+
+Finding 81 showed our `tx_delay` was 0 in every frame — physically impossible, and the
+cleanest marker that we are a software transmitter. Fixed properly rather than cosmetically.
+
+### What changed
+
+`target_tx_time` and `phy_tx_time` are now distinct and both meaningful:
+
+- **`target_tx_time`** = our clock at frame build, the *same* clock the tag 4 sync params
+  (`aw_counter`, `aw_remaining`) are derived from. So the schedule the frame advertises and
+  the time it claims to be sent agree — they did before too, but now it is the deliberate
+  "intended" anchor rather than a coincidence.
+- **`phy_tx_time`** = `target + tx_latency_est`, stamped into the frame buffer at the last
+  moment before `radio.tx()` via `action::stamp_phy_tx_time`. `tx_latency_est` is an EWMA of
+  the measured `tx()` syscall duration, seeded at a real device's 100 us median.
+- **`tx_delay`** = the difference, now a natural spread of **22-32 us** on air instead of 0.
+
+### What it does and does not fix — stated plainly
+
+It removes the impossible-zero tell: a peer that range-checks `tx_delay` for "is this real
+hardware" no longer sees an obvious synthetic value.
+
+It does **not** reach real-hardware magnitude. Real devices span 45-8879 us (median 100); our
+measured ~27 us sits below their *minimum*, because `sendto()` on the AF_PACKET monitor socket
+returns in ~20 us while the mt76's USB->PHY transfer happens asynchronously afterward, where we
+cannot time it. Our true air latency is milliseconds and unmeasured. We do **not** pad the
+figure to look bigger — an invented constant is exactly the cargo-culting finding 47 warns
+against, and a measured 27 us is honest where a fabricated 100 us is not.
+
+The deeper anchor problem from finding 81 is unchanged and unfixable on this radio: without a
+hardware TSF, `target_tx_time` rides our software clock, and the real (millisecond, possibly
+jittery) USB latency is neither measured nor reported. If that latency is roughly constant a
+receiver can still absorb it as a fixed offset; if it is jittery, no single `tx_delay` value
+helps. Which of those holds is only knowable by testing adoption with the new timing against a
+real peer — not yet run.
+
+### The honest status
+
+This is a correctness fix to the implementation — we now send a real measured value where we
+sent an impossible one — not a demonstrated improvement to adoption. Whether it moves the
+election outcome is a separate, untested question, and finding 81's conclusion stands until
+that test runs: being a reliable master needs PHY-time timestamping this hardware does not
+provide.
+
+---
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
