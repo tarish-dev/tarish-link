@@ -247,6 +247,7 @@ impl RawSock {
         if n < 0 {
             let e = std::io::Error::last_os_error();
             return match e.raw_os_error() {
+                #[allow(unreachable_patterns)]
                 Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) => Ok(None),
                 _ => Err(Error::Radio(format!("recv on {}: {e}", self.iface))),
             };

@@ -62,8 +62,15 @@ const IFF_TUN: libc::c_short = 0x0001;
 /// presents as "the peer sent us garbage" rather than as a configuration mistake.
 const IFF_NO_PI: libc::c_short = 0x1000;
 
+/// The type `libc::ioctl` takes for its request argument: `c_ulong` on glibc, but `c_int` on
+/// Android's bionic. Same numeric values (all fit in i32); only the declared type differs.
+#[cfg(target_os = "android")]
+type IoctlReq = libc::c_int;
+#[cfg(not(target_os = "android"))]
+type IoctlReq = libc::c_ulong;
+
 /// `TUNSETIFF`. `_IOW('T', 202, int)`, and it is 32-bit on every Linux architecture.
-const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
+const TUNSETIFF: IoctlReq = 0x4004_54ca;
 
 #[repr(C)]
 struct IfReq {
@@ -210,9 +217,9 @@ impl AsRawFd for Tun {
 }
 
 /// `SIOCGIFFLAGS` / `SIOCSIFFLAGS` / `SIOCSIFADDR`.
-const SIOCGIFFLAGS: libc::c_ulong = 0x8913;
-const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
-const SIOCSIFADDR: libc::c_ulong = 0x8916;
+const SIOCGIFFLAGS: IoctlReq = 0x8913;
+const SIOCSIFFLAGS: IoctlReq = 0x8914;
+const SIOCSIFADDR: IoctlReq = 0x8916;
 
 /// `struct in6_ifreq` — the AF_INET6 form, which is a different shape from `ifreq` and is
 /// not interchangeable with it.

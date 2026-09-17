@@ -7,5 +7,5 @@ description = "The contract between an AWDL implementation and the radio underne
 
 [dependencies]
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2"

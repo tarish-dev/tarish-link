@@ -80,7 +80,7 @@ pub struct Nl80211 {
     /// Opened on first use rather than in `new`, so constructing this on a machine with
     /// no such interface -- or without root -- is not an error until someone actually
     /// tries to touch the air.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     sock: Option<crate::rawsock::RawSock>,
 }
 
@@ -89,7 +89,7 @@ pub struct Nl80211 {
 /// Duplicated here rather than depending on `libawdl` because the HAL sits *below* the
 /// protocol crate and must not depend upward. It is a dozen lines and the alternative is
 /// a dependency cycle.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn libawdl_radiotap(b: &[u8]) -> Option<(Option<u64>, Option<u16>, Option<i8>)> {
     if b.len() < 8 || b[0] != 0 {
         return None;
@@ -168,7 +168,7 @@ impl Nl80211 {
             phy: Self::phy_of(managed)?,
             managed: managed.to_string(),
             monitor: monitor.to_string(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             sock: None,
         })
     }
@@ -288,14 +288,14 @@ impl crate::Radio for Nl80211 {
     /// measured. Sending at the driver default is honest; sending at a rate we guessed
     /// and then reporting success would not be. See `TxParams::default`.
     fn tx(&mut self, frame: &[u8], _params: TxParamsAlias) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if self.sock.is_none() {
                 self.sock = Some(crate::rawsock::RawSock::open(&self.monitor)?);
             }
             return self.sock.as_ref().unwrap().tx(frame);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = frame;
             Err(Error::Unsupported("injection needs AF_PACKET, which is Linux-only"))
@@ -303,7 +303,7 @@ impl crate::Radio for Nl80211 {
     }
 
     fn rx(&mut self, timeout_ms: u32) -> Result<Option<crate::RxFrame>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if self.sock.is_none() {
                 let s = crate::rawsock::RawSock::open(&self.monitor)?;
@@ -334,7 +334,7 @@ impl crate::Radio for Nl80211 {
             };
             Ok(Some(crate::RxFrame { bytes: buf, host_us, tsf, freq_mhz: freq, signal_dbm: signal }))
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = timeout_ms;
             Err(Error::Unsupported("capture needs AF_PACKET, which is Linux-only"))

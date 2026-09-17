@@ -1300,7 +1300,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     // over goes out while the peer is deaf, and the sender sees a successful transmit and
     // no reply. So the queue drains in the same windows the beacons go out in.
     let tundev = match datapath {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         Some(name) => match libawdl_hal::tun::Tun::open(name) {
             Ok(t) => {
                 // Configured here, not printed for the operator to paste. The order
@@ -1321,7 +1321,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                 std::process::exit(1);
             }
         },
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         Some(_) => {
             eprintln!("--datapath is Linux only: it needs /dev/net/tun.");
             std::process::exit(1);
@@ -2599,7 +2599,7 @@ fn correlate(files: &[String]) {
 /// caller's job and the commands are printed instead, because an address that does not
 /// match the one peers compute from our MAC means they send to somebody else -- and that
 /// failure looks exactly like nothing listening on the port.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn tun(args: &[String]) {
     use libawdl_hal::tun::Tun;
 
@@ -2642,13 +2642,13 @@ fn tun(args: &[String]) {
     println!("released");
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn tun(_args: &[String]) {
     eprintln!("awdl tun is Linux only: it is /dev/net/tun and a TUNSETIFF ioctl.");
     std::process::exit(1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
@@ -2661,7 +2661,7 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
     Some(m)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn fmt_mac(m: [u8; 6]) -> String {
     m.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }
@@ -2689,7 +2689,7 @@ fn fmt_mac(m: [u8; 6]) -> String {
 /// resolution: a destination is either multicast, or a link-local whose MAC can be
 /// reversed out of it, or undeliverable. Counted and dropped rather than guessed —
 /// a frame sent to an invented MAC goes to nobody and looks like packet loss.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn datapath(args: &[String]) {
     use libawdl::data::{decapsulate, dst_mac_for_ipv6, is_ipv6_multicast, Encap, ETHERTYPE_IPV6};
     use libawdl_hal::{poll::wait_readable, rawsock::RawSock, tun::Tun};
@@ -2828,7 +2828,7 @@ fn datapath(args: &[String]) {
     println!("not awdl  {not_awdl:>8}   everything else on the channel");
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn datapath(_args: &[String]) {
     eprintln!("awdl datapath is Linux only: it needs /dev/net/tun and an AF_PACKET socket.");
     std::process::exit(1);
@@ -2840,7 +2840,7 @@ fn datapath(_args: &[String]) {
 /// availability windows, and it takes at most a handful of packets per visit so that a
 /// busy interface cannot hold the loop past the next window. Missing a window is worse
 /// than a packet waiting one more cycle.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[allow(clippy::too_many_arguments)]
 fn enqueue_from_tun(
     tun: &libawdl_hal::tun::Tun,
@@ -2888,7 +2888,7 @@ fn enqueue_from_tun(
 }
 
 /// Hand a received AWDL data frame to the kernel, if it is one and if it is ours.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn deliver_data_frame(
     bytes: &[u8],
     our_mac: [u8; 6],
@@ -2915,7 +2915,7 @@ fn deliver_data_frame(
 
 // Stubs so the beacon loop compiles on a development machine, where there is no
 // /dev/net/tun and --datapath exits before reaching either of these.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 #[allow(clippy::too_many_arguments)]
 fn enqueue_from_tun(
     _t: &(), _m: [u8; 6], _b: &mut [u8],
@@ -2924,7 +2924,7 @@ fn enqueue_from_tun(
 ) {
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn deliver_data_frame(_bytes: &[u8], _our_mac: [u8; 6], _tun: Option<&()>, _delivered: &mut u64) {}
 
 #[cfg(test)]
@@ -2968,7 +2968,7 @@ mod tests {
     /// divergence would configure the interface with an address no peer computes, and the
     /// symptom would be a peer that discovers us and never gets a reply.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn the_two_copies_of_the_eui64_rule_agree() {
         for mac in [
             [0x00, 0xc0, 0xca, 0xb0, 0x60, 0x4c],

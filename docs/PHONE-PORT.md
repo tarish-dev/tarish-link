@@ -164,3 +164,28 @@ kernel path is tight (finding 88). We do the same.
 
 The protocol is done (Pi). The vendor channel is proven reachable (finding 87). `moseyprobe`
 gives a session on demand. What is new is a Rust cross-build and the wonder injection backend.
+
+### Cross-compile setup (done 2026-09-18) — the core libs build for Android
+
+`libawdl` and `libawdl-hal` now cross-compile for `aarch64-linux-android` with the **real**
+AF_PACKET/tun inject code, not the stubs. What it took:
+
+- `rustup target add aarch64-linux-android`; NDK 30 provides the linker.
+- `.cargo/config.toml` (git-ignored — it hardcodes this machine's NDK path):
+  ```toml
+  [target.aarch64-linux-android]
+  linker = ".../ndk/<ver>/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android31-clang"
+  ar     = ".../bin/llvm-ar"
+  ```
+- **`target_os` gating fixed.** All the inject/tun/nl80211 code was `#[cfg(target_os =
+  "linux")]`; Android's `target_os` is `"android"`, so the build silently used the stubs.
+  Changed to `any(target_os = "linux", target_os = "android")` throughout, and the `libc`
+  dependency's target cfg likewise — otherwise `libc` is not linked for Android.
+- **bionic vs glibc.** `libc::ioctl` takes its request as `c_int` on bionic, `c_ulong` on
+  glibc; added an `IoctlReq` type alias and retyped the four request constants. `EAGAIN` and
+  `EWOULDBLOCK` are equal on bionic, so that match arm is `#[allow(unreachable_patterns)]`.
+
+Build: `cargo build -p libawdl -p libawdl-hal --target aarch64-linux-android --release`.
+Host (macOS) build, tests, and the coverage ratchet are unaffected (the Pi still matches
+`linux`; macOS still gets the stubs). Next: a thin Android inject binary linking these two
+crates (no `pcap`), then the Phase 2 inject-through-wonder test.

@@ -54,17 +54,17 @@ pub mod nl80211;
 
 /// Injection and capture. Genuinely Linux-only: `AF_PACKET` has no equivalent elsewhere,
 /// so unlike `nl80211` this one is compiled out rather than stubbed.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod rawsock;
 
 /// The `awdl0` netdev. Linux-only: this is `/dev/net/tun` and a `TUNSETIFF` ioctl, and
 /// there is no portable equivalent worth pretending about.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod tun;
 
 /// Waiting on the radio and the netdev together. A syscall, so it belongs here rather
 /// than giving the CLI a `libc` dependency to run its loop.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod poll;
 
 pub use caps::{Caps, Tier, TsfPrecision, SOCIAL_CHANNELS};
