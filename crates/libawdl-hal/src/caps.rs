@@ -28,8 +28,14 @@ pub enum Tier {
 
     /// **Hardware-timed.** The radio reads out its MAC TSF and accepts a channel
     /// schedule anchored to it, so window boundaries are met by the MAC rather than by
-    /// the CPU. This is what Apple does, and what Google's `wonder` wiphy exposes on
-    /// Pixels. **This is the tier a manufacturer should target.**
+    /// the CPU. **This is the tier a manufacturer should target.**
+    ///
+    /// NOTE (finding 88): we have not found this tier on any hardware we can reach. The
+    /// Pixel's `wonder` wiphy was assumed to be here — it has `get_mac_tsf` and
+    /// `set_channel_schedule_req` vendor-command *symbols* — but a runtime trace of libmosey
+    /// shows those are non-functional stubs it never calls: wonder is a soft-MAC and libmosey
+    /// times AWDL in software. So `HwTimed` is currently aspirational, and `SoftTimed` with a
+    /// low-jitter injection path is what actually interoperates (which libmosey proves).
     HwTimed,
 }
 

@@ -54,12 +54,23 @@ Probed on the attached Pixel 10 Pro (userdebug, root). See FINDINGS 86 for the f
   finding 81 said the ALFA lacks. MOSEY-ABI's "channel_schedule not implemented" was the
   wondertap-**inactive** message, not the whole story.
 
-So the *hardware* gate is passed: blazer can read the MAC TSF and run a TSF-anchored schedule.
-Two things remain untested and are the next steps:
+**CORRECTED (FINDINGS 88).** The hardware gate is *not* passed the way this section first
+claimed. A runtime trace shows `get_mac_tsf` and `set_channel_schedule_req` are non-functional
+stubs that libmosey never calls — wonder is a soft-MAC radio and libmosey does AWDL timing in
+**software** (CPU-timed channel hopping via `set_frequency`). So there is no hardware TSF to
+read on blazer either.
 
-1. **Injection** on `wonder` (the AF_PACKET half of the gate above) — Phase 2.
-2. **Invoking the vendor commands from our own code** — the `libawdl-hal` wonder backend
-   (NL80211_CMD_VENDOR messages for `get_mac_tsf` / `set_channel_schedule_req`).
+The reframe is favourable: libmosey interoperates with Apple *without* hardware timing, so a
+software timer suffices — what actually separates it from our losing mt76-USB path is injection
+**jitter**, not TSF (FINDINGS 82, 88). wonder's on-board kernel injection is tight; USB is not.
+
+So the real phone-port plan: drive wonder as libmosey does — the five radio vendor commands
+(`set_frequency`, `set_fixed_tx_rate`, `get_if_mac_addr`, `set_filter`, `set_reg`) plus
+libawdl's existing software AWDL timing, injecting through wonder's low-jitter kernel path. The
+next steps:
+
+1. **Injection** on `wonder` (Phase 2) — can libawdl inject AWDL frames through it.
+2. A `libawdl-hal` wonder backend issuing those five radio vendor commands + frame TX/RX.
 
 ## Three phases
 

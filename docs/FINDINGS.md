@@ -5202,7 +5202,13 @@ in the doorway, is the shape. A star of near devices plus one far outlier cannot
   the experiment now needs a *linear* arrangement, not just "one device far".
 
 Captures: `topo-4dev-flat-star.pcap`, `topo-partition-M-far.pcap`.
-## 86. ★★★ The Pixel IS hardware-timed: wonder.ko exposes get_mac_tsf and a TSF-anchored schedule
+## 86. The Pixel IS hardware-timed: wonder.ko exposes get_mac_tsf and a TSF-anchored schedule
+
+> **CORRECTED by finding 88.** This concluded "hardware-timed" from the module's *symbol table*
+> and *log strings*. A runtime trace of libmosey's real bring-up (finding 88) shows those two
+> commands are non-functional stubs that libmosey never calls — wonder is a soft-MAC radio and
+> the Pixel does AWDL timing in **software**. The ABI recovery below is still correct; the
+> capability conclusion is not. Read finding 88.
 
 The operator's question after finding 81: rather than fight the MT7612U's missing TSF, build
 for Android and see whether the Pixel 10 Pro (blazer) chipset can do what the ALFA cannot.
@@ -5264,7 +5270,11 @@ stock stack already drives.
 - Whether monitor **injection** works on `wonder` (Phase 2 gate) is still untested.
 - Everything here is blazer (BCM4390 / wonder). frankel is a different chip (BCM4383) and is not
   covered by this probe.
-## 87. ★★ wonder's vendor commands are reachable from our own userspace — proven on blazer
+## 87. wonder's vendor commands are reachable from our own userspace — proven on blazer
+
+> **Refined by finding 88.** The vendor *channel* is reachable (get_if_mac_addr worked) — that
+> stands. But get_mac_tsf being "not implemented" is not just session-gating: it is stubbed,
+> and libmosey never calls it. See finding 88.
 
 Follow-up to finding 86, on the attached Pixel. Rather than depend on the Tarish app to bring
 up an AWDL session (its AirDrop flow was stuck — `tarishsharingd` polling *"mosey0 has no
@@ -5313,6 +5323,78 @@ decoupled from the app's flaky AirDrop activation. Build it, push it, run it, an
 - `get_if_mac_addr` worked; `get_mac_tsf` is confirmed present-but-session-gated — we have **not
   yet read an actual TSF value**, because we have not had a live session.
 - All blazer (BCM4390 / wonder). The vendor channel and gating are properties of this module.
+## 88. ★★★ CORRECTION: the Pixel is NOT hardware-timed — libmosey does AWDL timing in software
+
+Findings 86 and 87 concluded the Pixel's `wonder.ko` exposes working hardware-timed primitives
+(`get_mac_tsf`, `set_channel_schedule_req`), inferred from the module's symbol table and its
+success-path log strings. **A runtime trace disproves that**, and the honest correction matters
+more than the wrong conclusion did.
+
+### The decisive trace
+
+`test/moseyprobe` (a prebuilt aarch64 binary in the grapheneos repo) `dlopen`s libmosey and
+calls `mosey_start` directly — bringing AWDL fully up with no app, no GMS, no `mosey_server`,
+bypassing the stuck `tarishd`. It returned a live session handle (`0xb400d20…`), `mosey0` came
+up with a link-local address, and `wonder0` appeared. With the log cleared, **every** vendor
+command libmosey sent wonder.ko during bring-up:
+
+```
+SET_FREQUENCY freq=5745 bw=2       set_fixed_tx_rate (mcs=3, nss=2, ...)
+GET_MAC (get_if_mac_addr)          set_filter (BSSID 00:25:00:ff:94:73, the AWDL BSSID)
+set_reg (country QA)               wondertap init -> State set to UP
+```
+
+**`get_mac_tsf` and `set_channel_schedule_req` are absent.** libmosey — the reference that
+interoperates with Apple — drives wonder as a *plain radio* (tune, rate, filter, country) and
+never touches the hardware-timed commands. And when *we* call them directly they return
+`Operation not supported` with `Vendor operation 'get_mac_tsf' is not implemented`, **even with
+the session live**. They are non-functional stubs in this build (2026-08-15); the symbols and
+the "Found TSF" success strings exist but the code path is never reached.
+
+### What is actually true
+
+- **wonder.ko is a soft-MAC radio.** Its working vendor commands are frequency, TX rate, BSSID
+  filter, country, and read-MAC-address. That is it. (This matches MOSEY-ABI's original reading,
+  which finding 86 had wrongly "corrected".)
+- **The Pixel does AWDL timing in software**, in libmosey — CPU-timed channel hopping via
+  `set_frequency`, availability-window scheduling in userspace. Same category as OWL and our
+  own libawdl. It is not hardware-timed.
+- There is therefore **no HwTimed tier available to us on this hardware** either. `caps.rs`'s
+  claim that "Google's wonder wiphy exposes [TSF + scheduled channels] on Pixels" is
+  aspirational, not what this module does.
+
+### Why this is good news, not bad — it reframes finding 81
+
+Finding 81 said we lose elections because our timing rides a software clock with no TSF.
+**libmosey has no TSF either, and it interoperates with Apple.** So hardware TSF is *not
+required* for AWDL — a software timer is enough, if the frames actually land on air when the
+software says they will. The real difference between libmosey (works) and our mt76-USB path
+(loses) is **injection jitter**, exactly finding 82's unmeasured millisecond USB latency:
+
+- libmosey injects through wonder's kernel mac80211 path on an **on-board** radio — tight,
+  low-jitter, so its software-computed window timing lands where advertised.
+- our libawdl injects via AF_PACKET on a **USB** mt76 — milliseconds of variable latency
+  between "send" and "on air", so the same software timing arrives smeared.
+
+**The lever is a low-jitter injection path, not a TSF register.** That is achievable in
+software, and wonder provides it. It also means the RTL8812AU TSF hunt (finding-85 shortlist)
+matters less than thought: even a TSF-less adapter could interoperate if its injection is
+tight enough; a TSF would help but is not the gate.
+
+### What it means for the phone port
+
+libawdl on the phone would drive wonder **exactly as libmosey does** — the five radio vendor
+commands plus software AWDL timing, injecting through wonder's tight kernel path. No TSF, no
+hardware schedule needed. Our protocol logic (already complete on the Pi) plus wonder's
+low-jitter injection is, on this evidence, enough to interoperate — and possibly to win the
+elections our USB path loses, because the timing would finally land where we advertise it.
+
+### The honest lesson about findings 86/87
+
+I read "the symbol exists and there are success log-strings" as "the capability works." It does
+not follow, and a runtime trace is cheap. The ABI recovery (subcmds 0x06/0x07, the vendor
+channel working for get_if_mac_addr) is real and stands; the capability claim was wrong and is
+retracted here.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
