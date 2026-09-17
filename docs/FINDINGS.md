@@ -5264,6 +5264,55 @@ stock stack already drives.
 - Whether monitor **injection** works on `wonder` (Phase 2 gate) is still untested.
 - Everything here is blazer (BCM4390 / wonder). frankel is a different chip (BCM4383) and is not
   covered by this probe.
+## 87. ★★ wonder's vendor commands are reachable from our own userspace — proven on blazer
+
+Follow-up to finding 86, on the attached Pixel. Rather than depend on the Tarish app to bring
+up an AWDL session (its AirDrop flow was stuck — `tarishsharingd` polling *"mosey0 has no
+link-local address yet"* while `tarishd` sat idle), drive the `wonder` radio directly, which
+is what a libawdl HAL backend would do.
+
+Created a monitor interface on the wonder wiphy and issued vendor commands with `iw`:
+
+```
+iw phy wonder interface add awdlmon type monitor      -> ok, on wiphy 0 (wonder)
+iw dev awdlmon vendor recv 0x001a11 0x05 -            -> vendor response: 0a 00 01 00 ...
+   log: [wonder][ven_cmd] Handling GET_MAC. Found MAC: 00:XX:XX:XX:XX:00
+iw dev awdlmon vendor recv 0x001a11 0x07 -            -> -95, "get_mac_tsf is not implemented"
+```
+
+**Two things established:**
+
+1. **The vendor-command channel works from our own process.** `get_if_mac_addr` (0x05) returned
+   a structured nl80211 reply — the first time we have invoked a wonder vendor command
+   ourselves rather than observing libmosey do it. This is the exact mechanism a phone HAL
+   backend needs, demonstrated end to end with a stock tool.
+
+2. **`get_mac_tsf` (0x07) is session-gated, not absent.** It fails with `Operation not supported`
+   and the module logs `Vendor operation 'get_mac_tsf' is not implemented` — which fires
+   specifically when **wondertap is inactive**. So reading the TSF needs an active AWDL session
+   holding wondertap up. The monitor interface also would not come `up` standalone
+   (`Invalid argument`): the wonder soft-MAC needs the Broadcom RF path activated by a session,
+   it cannot run in isolation.
+
+### What this pins down for the phone port
+
+The path is: **a libawdl phone backend must first bring the session up** (do what libmosey does
+to activate wonder's RF, or coexist with a live libmosey session), and *then* `get_mac_tsf`
+(0x07) and `set_channel_schedule_req` (0x06) become available over the same vendor channel we
+just exercised. The channel is confirmed; the gate is session bring-up.
+
+### The immediate next step
+
+To read a live TSF without solving full session bring-up, we need a controlled AWDL session —
+`test/moseyprobe` (grapheneos repo) brings AWDL fully up via libmosey and is the clean way,
+decoupled from the app's flaky AirDrop activation. Build it, push it, run it, and then
+`iw dev <wonder-iface> vendor recv 0x001a11 0x07 -` should return a real TSF. Not yet done.
+
+### Honest boundary
+
+- `get_if_mac_addr` worked; `get_mac_tsf` is confirmed present-but-session-gated — we have **not
+  yet read an actual TSF value**, because we have not had a live session.
+- All blazer (BCM4390 / wonder). The vendor channel and gating are properties of this module.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
