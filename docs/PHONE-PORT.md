@@ -131,3 +131,36 @@ The next concrete step, needing no phone, is:
    supports, stop short of transmitting
 
 Then phase 1 is an `adb push` and one line.
+
+## Direction decided 2026-09-18: the phone/wonder path is THE path (decision B)
+
+The mt76-USB timing question is closed. We cannot precisely work out our transmit air-time
+from userspace on a USB adapter: `send()` returns before the USB transfer starts, the
+transfer+PHY latency is opaque and variable, and there is no userspace hook reporting actual
+air time on mt76. We can shave the systematic offset and reduce scheduling jitter, but not
+close the gap — the USB async variance is the floor (findings 81, 82, 88).
+
+So the definitive timing fix is **a low-jitter injection path**, which means driving a radio
+whose injection is kernel-native rather than USB-async. That is `wonder` on the phone (and
+would also be a non-USB adapter). libmosey proves the model: it has **no** hardware TSF and
+interoperates with Apple purely on software timing, because its injection through wonder's
+kernel path is tight (finding 88). We do the same.
+
+### The Android track — concrete, and de-risked
+
+1. **Cross-compile the inject path.** `pcap` (the only libpcap dep) is in `libawdl-cli`
+   and used only by the file-reading subcommands (`read`, `coverage`, `bytemap`, …). Feature-gate
+   it out — or build a minimal binary linking `libawdl` + `libawdl-hal` only — so the beacon /
+   data-plane path compiles for `aarch64-linux-android`. NDK 30 is installed; the target is a
+   `rustup target add` away. No cross-built libpcap required.
+2. **Phase 2 gate — inject through wonder.** With a session up (`moseyprobe`), can our binary
+   AF_PACKET-inject an AWDL frame through a monitor on the `wonder` wiphy and have it air?
+   Expect a possible mt76-style "second vif" trap; if so, drive wonder's own path.
+3. **The wonder HAL backend.** Drive wonder as libmosey does — the five radio vendor commands
+   (`set_frequency`, `set_fixed_tx_rate`, `get_if_mac_addr`, `set_filter`, `set_reg`, OUI
+   0x001a11) plus libawdl's existing software AWDL timing, injecting through wonder's tight
+   kernel path. No TSF, no hardware schedule — those are stubs (finding 88).
+4. **Then wire libawdl's protocol on top** and test interop against a real Apple peer.
+
+The protocol is done (Pi). The vendor channel is proven reachable (finding 87). `moseyprobe`
+gives a session on demand. What is new is a Rust cross-build and the wonder injection backend.
