@@ -5202,6 +5202,68 @@ in the doorway, is the shape. A star of near devices plus one far outlier cannot
   the experiment now needs a *linear* arrangement, not just "one device far".
 
 Captures: `topo-4dev-flat-star.pcap`, `topo-partition-M-far.pcap`.
+## 86. ★★★ The Pixel IS hardware-timed: wonder.ko exposes get_mac_tsf and a TSF-anchored schedule
+
+The operator's question after finding 81: rather than fight the MT7612U's missing TSF, build
+for Android and see whether the Pixel 10 Pro (blazer) chipset can do what the ALFA cannot.
+Probed on the attached device (userdebug, root) — and the answer is a grounded **yes**.
+
+### The gate, measured on blazer
+
+- `wonder` is a real mac80211/cfg80211 wiphy; `iw phy wonder info` lists **monitor** among its
+  interface modes. `iw` and `tcpdump` are both on the phone, so passive study needs no build.
+- The AWDL timing capability lives in **wonder's vendor commands** (OUI 0x001A11), recovered
+  from the module's own symbol table (`/vendor_dlkm/lib/modules/wonder.ko`):
+
+  ```
+  wonder_vendor_cmd_get_mac_tsf               read the MAC TSF counter
+  wonder_vendor_cmd_set_channel_schedule_req  TSF-anchored channel schedule
+  wonder_vendor_cmd_get_cap / get_if_mac_addr / set_frequency /
+  wonder_vendor_cmd_set_fixed_tx_rate / set_filter / set_reg / set_tx_rate_test
+  ```
+
+- The success-path log strings prove they run, not merely exist:
+  `"Handling GET_MAC_TSF. Found TSF: %u"`, `"Switch TSF: 0x%016x"`,
+  `"Missing time attribute: need either TSF_OFFSET or SWITCH_TIME"`, `"Applied cached channel
+  schedule"`.
+
+**This is exactly the HwTimed tier `caps.rs` describes**, and exactly the two things finding 81
+said the ALFA lacks: read the cluster TSF, and hand the radio a TSF-anchored window schedule
+the MAC executes itself.
+
+### It also corrects a stale claim
+
+MOSEY-ABI recorded `channel_schedule_request` as *"not implemented"*. The strings show that is
+**conditional**: the error path is `"wondertap is inactive, caching incoming schedule
+settings"` — it fires only when no session holds wondertap, and the command is real and cached
+until then. So OWL-PATH's expectation (both vendor commands present) was right; MOSEY-ABI
+generalised an inactive-state message. `docs/MOSEY-ABI.md` in the grapheneos repo is annotated.
+
+### What it changes for libawdl
+
+Finding 81's conclusion — "reliable master needs PHY-time timestamping this hardware does not
+provide" — was true **of the ALFA**, not of the target device. On blazer the timing anchor is
+available:
+
+- `get_mac_tsf` → stamp `target_tx_time`/`phy_tx_time` against the real cluster clock instead of
+  a software epoch (the finding-82 fix becomes real rather than a measured-but-understated 27 us).
+- `set_channel_schedule_req` → availability-window boundaries met by the MAC, not the CPU — the
+  jitter that made us an unlockable anchor goes away.
+
+The frontier is therefore no longer a hardware wall; it is an **implementation task**: a
+`libawdl-hal` backend that speaks wonder's vendor commands (construct the NL80211_CMD_VENDOR
+messages, wire `get_mac_tsf` into the transmit-timestamp path, drive `set_channel_schedule_req`
+for the schedule). Real work, but the capability is confirmed present on silicon that a working
+stock stack already drives.
+
+### Not yet done (honest boundary)
+
+- The vendor commands are confirmed *present and implemented*; we have **not yet invoked one
+  from our own code** — that needs the nl80211 vendor-message backend, which is the first build
+  step, or an active wondertap session to observe them live.
+- Whether monitor **injection** works on `wonder` (Phase 2 gate) is still untested.
+- Everything here is blazer (BCM4390 / wonder). frankel is a different chip (BCM4383) and is not
+  covered by this probe.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

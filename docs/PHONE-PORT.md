@@ -42,6 +42,25 @@ can we add a monitor interface on the "wonder" wiphy, and does AF_PACKET injecti
 - **no**  → we drive wonder's vendor commands instead. A real project, but with an ABI that
   is already documented rather than one that has to be recovered
 
+## Measured on blazer, 2026-09-17 — the capability half of the gate is answered
+
+Probed on the attached Pixel 10 Pro (userdebug, root). See FINDINGS 86 for the full evidence.
+
+- `wonder` is a real mac80211/cfg80211 wiphy and `iw phy wonder info` lists **monitor** mode.
+  `iw` and `tcpdump` ship on the phone, so **Phase 1 (listen) needs no cross-compile**.
+- wonder.ko's vendor commands (OUI 0x001A11), from its own symbol table, include
+  **`get_mac_tsf`** and **`set_channel_schedule_req`** with a working TSF-anchored path
+  (`"Found TSF: %u"`, `"Switch TSF: 0x..."`). This is the HwTimed tier — the exact capability
+  finding 81 said the ALFA lacks. MOSEY-ABI's "channel_schedule not implemented" was the
+  wondertap-**inactive** message, not the whole story.
+
+So the *hardware* gate is passed: blazer can read the MAC TSF and run a TSF-anchored schedule.
+Two things remain untested and are the next steps:
+
+1. **Injection** on `wonder` (the AF_PACKET half of the gate above) — Phase 2.
+2. **Invoking the vendor commands from our own code** — the `libawdl-hal` wonder backend
+   (NL80211_CMD_VENDOR messages for `get_mac_tsf` / `set_channel_schedule_req`).
+
 ## Three phases
 
 ### Phase 1 — listen only. Free, and does not disturb libmosey
