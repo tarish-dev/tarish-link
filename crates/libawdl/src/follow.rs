@@ -314,6 +314,15 @@ pub struct Cluster {
     /// repeatedly is not synchronising to anything, and the symptom without this counter is
     /// a spread figure that looks like jitter and is actually two clusters.
     pub master_changes: u32,
+    /// Relay data for advertising ourselves as a FOLLOWER of this cluster rather than
+    /// always claiming to be master (finding 80/89). Whoever we follow names the root, its
+    /// tenure counter, and its own distance; we relay all three and sit one hop further out.
+    /// `None` until we have heard the cluster; the transmitter then falls back to claiming
+    /// self, which is correct when nothing better is on the air.
+    pub root: Option<[u8; 6]>,
+    pub relay_parent: Option<[u8; 6]>,
+    pub master_counter: Option<u32>,
+    pub follow_distance: Option<u32>,
     pub clock: ClusterClock,
 }
 
@@ -388,6 +397,18 @@ impl Cluster {
                 if claimed != 0 {
                     self.master_metric = Some(claimed);
                 }
+            }
+
+            // Relay data, refreshed from any frame that names our current master. `e` names
+            // the root, carries the root's tenure counter, and states its own distance to
+            // the root; to advertise ourselves as one hop further out we relay the root and
+            // its counter unchanged and add one to the distance. `src` is the node we heard
+            // it from — our upstream parent (the root itself when we follow it directly).
+            if self.master == Some(e.master) {
+                self.root = Some(e.master);
+                self.relay_parent = Some(src);
+                self.master_counter = Some(e.master_counter);
+                self.follow_distance = Some(e.distance.saturating_add(1));
             }
         }
 

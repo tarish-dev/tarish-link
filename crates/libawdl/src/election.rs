@@ -106,6 +106,23 @@ impl ElectionParams {
             tail: vec![0, 0],
         }
     }
+
+    /// A follower's claim: name `root` as master, advertise its metric, and place ourselves
+    /// `distance` hops from it while keeping our own `self_metric`. v1 carries only the
+    /// root. Finding 80: `distance` must track our real role, not sit at 0 while we follow.
+    pub fn following(root: [u8; 6], distance: u8, master_metric: u32, self_metric: u32) -> ElectionParams {
+        ElectionParams {
+            flags: 0,
+            id: 0,
+            distance,
+            reserved_4: 0,
+            master: root,
+            master_metric,
+            self_metric,
+            private_master: None,
+            tail: vec![0, 0],
+        }
+    }
 }
 
 /// Election Parameters v2 (tag 24).
@@ -274,6 +291,34 @@ impl ElectionParamsV2 {
             unknown_28: 0,
             ignored_32: [0; 4],
             self_counter: counter,
+        }
+    }
+
+    /// A follower's claim. We relay the cluster's `root` and the root's tenure
+    /// (`master_counter`) unchanged — a follower reproduces its master's counter, one frame
+    /// behind (finding 49) — name our upstream `parent` in the `other` field, and sit at
+    /// `distance` hops. `self_metric`/`self_counter` remain our own. `unknown_28` stays 0:
+    /// finding 65 showed the receiver reads it and rejects anything else.
+    #[allow(clippy::too_many_arguments)]
+    pub fn following(
+        root: [u8; 6],
+        parent: [u8; 6],
+        distance: u32,
+        master_metric: u32,
+        master_counter: u32,
+        self_metric: u32,
+        self_counter: u32,
+    ) -> ElectionParamsV2 {
+        ElectionParamsV2 {
+            master: root,
+            other: parent,
+            master_counter,
+            distance,
+            master_metric,
+            self_metric,
+            unknown_28: 0,
+            ignored_32: [0; 4],
+            self_counter,
         }
     }
 

@@ -654,3 +654,31 @@ fn t24_probe_addresses_the_read_u32_at_offset_zero() {
     assert_eq!(e.unknown_28, 1);
     assert_eq!(e.ignored_32, [0; 4], "the probe must not disturb the ignored padding");
 }
+
+/// Finding 80/89: a follower must advertise the root it follows, its relayed counter, and a
+/// distance of parent+1 — not claim itself master at distance 0. Round-trip both TLVs.
+#[test]
+fn following_advertises_root_and_distance_not_self() {
+    use libawdl::election::{ElectionParams, ElectionParamsV2};
+    let root = [0x72, 0x01, 0xe2, 0xfd, 0x9d, 0x57];
+    let us = [0x00, 0xc0, 0xca, 0xb1, 0xa6, 0x28];
+
+    // v2: relay root + counter, parent pointer, distance 1, our own self_metric/counter.
+    let v2 = ElectionParamsV2::following(root, root, 1, 540, 4242, 600, 7);
+    let back = ElectionParamsV2::parse(&v2.encode()).expect("v2 round-trips");
+    assert_eq!(back.master, root, "names the root, not us");
+    assert_eq!(back.other, root, "parent is the root when we follow it directly");
+    assert_eq!(back.distance, 1, "one hop from the root");
+    assert_eq!(back.master_counter, 4242, "relays the root's counter");
+    assert_eq!(back.master_metric, 540);
+    assert_eq!(back.self_metric, 600, "our own metric is unchanged");
+    assert_eq!(back.unknown_28, 0, "the read u32 stays zero (finding 65)");
+    assert_ne!(back.master, us);
+
+    // v1: names the root at the given distance, keeps our self_metric.
+    let v1 = ElectionParams::following(root, 2, 540, 600);
+    let b1 = ElectionParams::parse(&v1.encode()).expect("v1 round-trips");
+    assert_eq!(b1.master, root);
+    assert_eq!(b1.distance, 2);
+    assert_eq!(b1.self_metric, 600);
+}

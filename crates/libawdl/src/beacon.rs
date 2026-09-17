@@ -287,6 +287,23 @@ impl Garbage {
     }
 }
 
+/// What to put in the election TLVs when we are FOLLOWING a cluster rather than claiming to
+/// be its master. Built from [`crate::follow::Cluster`] state once a peer we have adopted
+/// beats our own metric. See finding 80/89.
+#[derive(Debug, Clone, Copy)]
+pub struct FollowAdvert {
+    /// The cluster root we name as master.
+    pub root: [u8; 6],
+    /// Our upstream parent — the node we heard the root from (the root itself when direct).
+    pub parent: [u8; 6],
+    /// Our hops to the root: the parent's distance plus one.
+    pub distance: u32,
+    /// The root's advertised metric, relayed unchanged.
+    pub master_metric: u32,
+    /// The root's tenure counter, relayed one frame behind (finding 49).
+    pub master_counter: u32,
+}
+
 /// Everything needed to emit a frame, and the counters that move between frames.
 #[derive(Debug, Clone)]
 pub struct Beacon {
@@ -343,6 +360,11 @@ pub struct Beacon {
     /// old peer, meaningful for a current one. Untested either way — that is the point of
     /// making it settable.
     pub version: Version,
+    /// When set, advertise ourselves as a FOLLOWER of this cluster instead of claiming to be
+    /// master — relaying the root, its counter, and sitting one hop out (finding 80/89). Left
+    /// `None` we claim self at distance 0, which is correct when we are the best node on the
+    /// air. The caller sets this only after adopting a peer whose metric beats ours.
+    pub follow: Option<FollowAdvert>,
     /// Fill measured-constant bytes with [`GARBAGE_BYTE`] instead of zero. See [`Garbage`].
     pub garbage: Garbage,
     /// Occupy this many windows of sixteen instead of Apple's four.
@@ -378,6 +400,7 @@ impl Beacon {
         Beacon {
             garbage: Garbage::default(),
             version: Version { major: 3, minor: 4, device_class: 2 },
+            follow: None,
             addr,
             host: "tarish".to_string(),
             social_channel,
@@ -525,7 +548,11 @@ impl Beacon {
             tlvs.push((4, v));
         }
         tlvs.push((5, {
-            let mut e = ElectionParams::claiming(self.addr, self.metric);
+            let mut e = match &self.follow {
+                Some(f) => ElectionParams::following(
+                    f.root, f.distance.min(255) as u8, f.master_metric, self.metric),
+                None => ElectionParams::claiming(self.addr, self.metric),
+            };
             if self.garbage.t5 {
                 e.reserved_4 = GARBAGE_BYTE;
                 e.tail = vec![GARBAGE_BYTE; 2];
@@ -537,7 +564,12 @@ impl Beacon {
         }
         if !self.garbage.no_t24 {
         tlvs.push((24, {
-            let mut e = ElectionParamsV2::claiming(self.addr, self.metric, self.tenure(now_us));
+            let mut e = match &self.follow {
+                Some(f) => ElectionParamsV2::following(
+                    f.root, f.parent, f.distance, f.master_metric, f.master_counter,
+                    self.metric, self.tenure(now_us)),
+                None => ElectionParamsV2::claiming(self.addr, self.metric, self.tenure(now_us)),
+            };
             // A single-byte probe takes precedence: it is the finer instrument and running
             // both at once would measure neither.
             if let Some(p) = self.garbage.t24_probe {

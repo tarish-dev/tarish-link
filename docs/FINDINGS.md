@@ -5395,6 +5395,37 @@ I read "the symbol exists and there are success log-strings" as "the capability 
 not follow, and a runtime trace is cheap. The ABI recovery (subcmds 0x06/0x07, the vendor
 channel working for get_if_mac_addr) is real and stands; the capability claim was wrong and is
 retracted here.
+## 89. Fix: advertise the correct role — follower with real distance, not always a distance-0 master
+
+Finding 80 noted we send a fixed `distance` of 0 and always name ourselves master, even when
+`--follow` has synced us to a real cluster — which is a lie the moment a better peer exists.
+This implements the protocol-correct behaviour: **advertise the best master we know.**
+
+- **Competing / best on the air** → claim self, distance 0 (unchanged — the compete
+  experiments behave exactly as before).
+- **Adopted a peer that beats our metric** → name the cluster's root as master, relay its
+  tenure counter unchanged (finding 49), put our upstream in the `other`/parent field, and
+  sit at `parent_distance + 1`. Our own `self_metric`/`self_counter` stay ours; `unknown_28`
+  stays 0 (finding 65).
+
+### Shape of the change
+
+- `Cluster` now captures the relay data from the frames that name our master: `root`,
+  `relay_parent`, `master_counter`, and `follow_distance` (the master's distance + 1).
+- `ElectionParams::following` and `ElectionParamsV2::following` build the follower TLVs;
+  `Beacon::follow: Option<FollowAdvert>` selects follower vs `claiming` per frame.
+- The transmit loop sets `follow` only when a cluster master's metric strictly beats
+  `target_metric`, so a high compete metric (600) keeps us claiming self and nothing about
+  the election experiments changes. A round-trip test pins both TLVs.
+
+### What it does and does not do
+
+This corrects what we **advertise** — we now look like a real follower on the wire instead of
+a fleet of distance-0 roots. It does **not** lock our availability-window schedule onto the
+master's clock beyond the existing `--follow` phase-aiming; genuine schedule sync is still the
+larger, separate piece (the finding-83 "credible synced member" path). And per finding 88 it
+will not change adoption on the mt76-USB path, where injection jitter is the ceiling — this is
+correctness, and it is the right shape for the eventual wonder backend where the timing lands.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

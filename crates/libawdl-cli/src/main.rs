@@ -1626,6 +1626,24 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             std::thread::sleep(std::time::Duration::from_micros(3_000));
             continue;
         }
+        // Advertise the best master we know (finding 80/89): claim self while our metric is
+        // the highest on the air, but once we have adopted a peer whose metric strictly
+        // beats ours, name IT as master and place ourselves one hop out with the correct
+        // distance and relayed counter — rather than lying about being a distance-0 root.
+        // The compete experiments are unaffected: with target_metric high (e.g. 600) no
+        // observed peer beats it, so this stays None and we claim self exactly as before.
+        b.follow = match (cluster.master, cluster.master_metric, cluster.root, cluster.follow_distance) {
+            (Some(m), Some(mm), Some(root), Some(dist)) if m != addr && mm > target_metric => {
+                Some(libawdl::beacon::FollowAdvert {
+                    root,
+                    parent: cluster.relay_parent.unwrap_or(root),
+                    distance: dist,
+                    master_metric: mm,
+                    master_counter: cluster.master_counter.unwrap_or(0),
+                })
+            }
+            _ => None,
+        };
         let is_mif = psf_per_mif == 0 || n % (psf_per_mif + 1) == 0;
         // target_tx_time is stamped here, at build, from the same clock the sync params
         // (aw_counter, aw_remaining) use — so the schedule the frame advertises and the
