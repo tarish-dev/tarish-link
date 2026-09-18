@@ -24,10 +24,39 @@ use std::thread::JoinHandle;
 use libawdl_hal::{wonder::Wonder, Radio, TxParams};
 use libawdl_session::Config;
 
-/// The interface the session's data path is carried on. Matches what `tarishd` is pointed at.
-const DATA_IFACE: &str = "tawdl0";
 /// The wonder monitor the backend drives.
 const WONDER_IFACE: &str = "wonder0";
+
+/// The interface the session's data path is carried on — the same name `tarishd` is pointed
+/// at (`persist.tarish.iface`). Defaults to `tawdl0`; set the property to `mosey0` to run
+/// under a daemon build that still expects the old name.
+fn data_iface() -> String {
+    if let Ok(v) = std::env::var("TARISH_IFACE") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    read_property("persist.tarish.iface").unwrap_or_else(|| "tawdl0".to_string())
+}
+
+#[cfg(target_os = "android")]
+fn read_property(name: &str) -> Option<String> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut buf = [0u8; 128];
+    // SAFETY: cname is NUL-terminated and buf is >= PROP_VALUE_MAX.
+    let n = unsafe {
+        libc::__system_property_get(cname.as_ptr(), buf.as_mut_ptr() as *mut libc::c_char)
+    };
+    if n <= 0 {
+        return None;
+    }
+    std::str::from_utf8(&buf[..n as usize]).ok().map(|s| s.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+fn read_property(_name: &str) -> Option<String> {
+    None
+}
 
 /// Opaque session handle handed back to `tarishd`. The session lives exactly as long as this
 /// value — `mosey_stop` drops it, which signals the loop and tears the radio and TUN down.
@@ -105,9 +134,10 @@ pub unsafe extern "C" fn mosey_start_5(
         return std::ptr::null_mut();
     }
 
+    let iface = data_iface();
     let mut cfg = Config::new(channel, cc);
     cfg.follow = true; // participate in the cluster and sync to whoever is master
-    cfg.datapath = Some(DATA_IFACE.to_string());
+    cfg.datapath = Some(iface);
     // duration None: run until mosey_stop.
 
     let stop = Arc::new(AtomicBool::new(false));

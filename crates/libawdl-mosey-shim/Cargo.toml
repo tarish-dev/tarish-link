@@ -16,6 +16,8 @@ libawdl-hal = { path = "../libawdl-hal" }
 libawdl-session = { path = "../libawdl-session" }
 log = "0.4"
 
-# So the session's log output reaches logcat when tarishd loads us on a phone.
+# So the session's log output reaches logcat, and we can read persist.tarish.iface, when
+# tarishd loads us on a phone.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
+libc = "0.2"
