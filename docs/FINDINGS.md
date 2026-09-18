@@ -6174,6 +6174,25 @@ driven: a list of entries `[Freq: %u, BW: %u, Role: %u]` each with a `Dwell TU: 
 SWITCH_TIME`). `get_mac_tsf` (0x07) supplies that TSF. So the *format* is known; the blocker is
 **activation**.
 
+> **Correction, same day — the schedule has no provider at all.** I pulled `bcmdhd4390.ko`
+> (15.6 MB) and listed the wondertap provider ops it actually implements:
+> `dhd_wondertap_ops_init/deinit`, `_bind/_unbind`, `_get_capabilities`, `_ops_set_freq`,
+> `_set_filter`, `_set_fixed_tx_rate`, `_set_reg`. **There is no `set_channel_schedule` and no
+> `get_mac_tsf` op in the provider.** So wonder.ko's 0x06/0x07 return "not implemented" because
+> the provider genuinely does not back them — they are real stubs (finding 88 was right), not an
+> activation gate. The recovered schedule *format* is wonder.ko's parser for a command nothing
+> answers. **There is no TSF-anchored hardware channel schedule on this device.** wondertap is a
+> single-channel monitor: `set_freq` and nothing that hops.
+>
+> So how does stock get multi-channel presence? Not through wondertap. `bcmdhd4390` carries a
+> full **NAN** offload — `aware_nmi0` (NAN Management Interface), geofence, dwell timers,
+> `NAN_DISABLE_CMD` — and Apple AWDL shares NAN's social channels (6/44/149) and discovery-window
+> structure. The likely mechanism is the **firmware NAN/AWDL offload doing the hop autonomously**,
+> with wonder0/wondertap0 as auxiliary monitors on a fixed channel. That is a separate subsystem
+> from wonder.ko, driven through bcmdhd's NAN path, and it is where the multi-channel actually
+> lives. Confirming it needs observing stock during an **active** AirDrop session (see below) —
+> the only state where the offload engages.
+
 **What "wondertap active" requires.** The provider is `bcmdhd4390`. It registers its ops and
 enters the AWDL-offloaded state through the **Broadcom driver's own control path** (a DHD
 private command / iovar putting the chip into AWDL mode), which is what libmosey/`mosey_server`
