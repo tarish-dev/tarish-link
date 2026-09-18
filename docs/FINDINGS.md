@@ -5876,6 +5876,50 @@ and watch AirDrop and Quick Share work*, on the daemon's existing, proven stack.
 multicast reception above stops mattering the moment the daemon is driving discovery over the
 interface the way it already does over `mosey0`.
 
+## 97. ★★★ The libmosey-ABI shim works — a drop-in `.so` backed by our stack
+
+The integration seam, built and proven. Two supporting pieces first: the held-session loop was
+extracted from the CLI into a `libawdl-session` crate (`run(radio, cfg, stop) -> Stats`), so
+more than one caller can host it; then `libawdl-mosey-shim` wraps it in the exact C ABI
+`tarishd` calls — `mosey_start_5` and `mosey_stop` (the only two symbols the daemon binds; see
+`tarish-daemon/src/mosey.rs`). It cross-compiles to **`libmosey_daemon_ffi.so`**, the precise
+soname the daemon searches for, exporting the mosey symbols and linking only `liblog`/`libdl`/
+`libc` — no Google code.
+
+`mosey_start_5` brings wonder up on the caller's thread (so a failure is a synchronous NULL,
+which the daemon knows how to handle), spawns a thread running the session, and returns an
+opaque handle; `mosey_stop` sets the stop flag, joins, and tears the radio and TUN down.
+
+### Verified exactly as the daemon does it
+
+A small `dlopen` probe — the same sequence `tarishd` runs — loaded our `.so` and called
+`mosey_start_5(channels=[6], "QA", op_mode=2, …)`:
+
+```
+mosey_start_5 -> 0xb400cd8dce98e210          (a real handle, not NULL)
+tarish_awdl: mosey shim: session starting on ch6 cc=QA
+tarish_awdl: datapath tawdl0: up on fe80::94f9:8bff:fe2f:d13a
+tarish_awdl: session up: ch6 metric 65 following +datapath
+tarish_awdl: ADOPTED cluster clock: master 72:01:e2:fd:9d:57, spread 0 us
+mosey_start_5 -> ... ; stopped                (mosey_stop tore it down cleanly)
+```
+
+`tawdl0` came up with the derived link-local, `wonder0` aired frames, and the session even
+synced to a live Apple master during the 14 s probe. So the shim is a working drop-in for
+Google's `libmosey_daemon_ffi.so`: point `TARISH_MOSEY_LIB` at it and the daemon gets an AWDL
+session and a data interface driven entirely by our stack.
+
+### The one remaining wiring, and the boundary
+
+- **Interface name.** The shim's data interface is **`tawdl0`** (deliberately not Apple's
+  `awdl0`, not Google's `mosey0`). `tarishd` currently hardcodes `mosey0`, so the last wiring
+  step is making its `IFACE` configurable (`persist.tarish.iface` / `$TARISH_IFACE`) and
+  pointing it at `tawdl0`. Then a full `tarishd` run over the shim — mDNS, TLS, an actual
+  AirDrop transfer — is the end-to-end test.
+- **Single channel.** The session holds one channel; the shim takes the first the daemon
+  offers. Real AirDrop discovery concentrates on ch6 while transfers use 5 GHz, so multi-channel
+  following is the quality work that comes after the daemon integration proves the seam.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
