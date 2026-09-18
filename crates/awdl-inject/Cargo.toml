@@ -1,0 +1,10 @@
+[package]
+name = "awdl-inject"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal AWDL frame injector — build with libawdl, transmit through libawdl-hal, no pcap. The thin Android-portable entry point."
+
+[dependencies]
+libawdl = { path = "../libawdl" }
+libawdl-hal = { path = "../libawdl-hal" }
