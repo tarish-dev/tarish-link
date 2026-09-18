@@ -5469,6 +5469,79 @@ A libawdl wonder backend must either (a) coexist — inject on the `wonder0` lib
 as we just did — or (b) replace libmosey: bring the RF up and create the TX-capable monitor
 itself. The bring-up sequence is the remaining unknown (it is what libmosey's `mosey_start`
 does internally); tracing it is the next thread. Frame TX itself is no longer in question.
+
+## 91. ★★★ The wonder bring-up sequence, decoded — the last unknown from finding 90 is answered
+
+Traced `mosey_start`'s RF bring-up on blazer by capturing nl80211 interface events (`iw event`)
+and wonder.ko's own kernel decode (`dmesg`) on one timeline while `moseyprobe` raised a session.
+The sequence is fully legible, and it is not what I would have guessed.
+
+### Two interfaces, two roles
+
+wonder exposes **two** interfaces, and conflating them is the trap:
+
+- **`wonder0`** — a mac80211 **monitor** (the soft-MAC / netlink side). This is what we inject
+  frames through (finding 90). At bring-up it gets only `del interface type monitor` immediately
+  followed by `new interface type monitor` — libmosey **recreates the monitor**, it does not add
+  a specially-flagged new vif. That recreation is the whole nl80211-visible interface step.
+- **`wondertap0`** — a cfg80211/dhd **static interface on the Broadcom firmware** (bssidx:2,
+  `wl_iftype:13`, `wl_role:5`). This is the actual RF side. It is what the OUI-`0x001a11` vendor
+  commands configure, and it is created/destroyed by wonder.ko's mac80211 `.start()`/`.stop()`,
+  not by libmosey directly.
+
+### The bring-up recipe, in the order the driver logs it
+
+```
+Wondertap Vendor Deinit (Country: QA)      ← tear down prior state, close old wondertap0
+SET_REG          country = QA
+SET_FREQUENCY    freq = 5745 MHz, bw = 2    ← "wondertap is not active; caching"
+SET_FILTER       type 0, BSSID 00:..:73     ← "Caching incoming BSSID filter settings"
+SET_FIXED_TX_RATE pre=2 bw=2 gi=2 nss=2 mcs=3  ← "wondertap is not active; caching"
+HW started                                  ← mac80211 .start() fires
+Wondertap Vendor Init                       ← applies ALL cached settings at once
+   Channel=5745/2  TxRate=pre2/mcs3/gi2/bw2  Country=QA  MAC=02:..:4b  BSSID=00:..:73
+_wl_cfg80211_add_if wondertap0              ← Broadcom static iface created
+dhd_wondertap_set_fixed_tx_rate             ← rate pushed to firmware
+Vendor init successful. State set to UP.    ← RF is live
+wonder_tx_setup(): min_mtu 256              ← TX path armed
+Registered mac80211 RX handler with Vendor  ← RX path armed
+GET_MAC → 02:..:4b                          ← libmosey reads its own MAC back
+```
+
+### The non-obvious part (what I'd have gotten wrong)
+
+The four RF-config vendor commands (`SET_REG`, `SET_FREQUENCY`, `SET_FILTER`,
+`SET_FIXED_TX_RATE`) are issued **while the HW is stopped**, and the driver's own log says
+each one is *cached*, not applied — "wondertap is not active; caching incoming ... settings."
+Nothing takes effect until **`HW started`** fires, which happens when a netif on the wonder
+wiphy is brought **UP** (the recreated `wonder0` monitor). Only then does the driver's
+`.start()` callback run "Wondertap Vendor Init," which flushes every cached setting in one
+batch, creates `wondertap0` on the Broadcom side, and sets state UP. So the ordering that
+matters for a standalone bring-up is: **send the vendor config first (it queues), then bring
+the monitor interface UP to trigger the flush** — not the reverse.
+
+This also explains finding 90's `injmon` false positive. A second monitor added after the
+session is not what mac80211 transmits through; TX rides `wonder0`, the interface whose UP
+event drove `.start()` and armed `wonder_tx_setup`. A late-added vif never participated in
+that and is receive-only.
+
+### What a standalone libawdl wonder backend now needs (no remaining unknown, only work)
+
+1. Recreate `wonder0` as a monitor (nl80211 `DEL_INTERFACE` + `NEW_INTERFACE` type monitor).
+2. Send the four vendor commands over `NL80211_CMD_VENDOR`, OUI `0x001a11`: `SET_REG`(QA),
+   `SET_FREQUENCY`(chan, bw), `SET_FILTER`(type 0 + AWDL BSSID `00:25:00:ff:94:73`),
+   `SET_FIXED_TX_RATE`(pre/bw/gi/nss/mcs). Subcommand numbers are known from the module; the
+   only thing still to lift verbatim is each command's **attribute payload encoding**, which
+   an strace of `moseyprobe`'s `NL80211_CMD_VENDOR` sendmsg gives directly (`gos-awdl-trace.sh`
+   already captures exactly these payloads).
+3. Bring `wonder0` **UP** → triggers `.start()` → cached config flushed → RF live.
+4. `GET_MAC` to read the interface MAC (or read `/sys/class/net/wonder0/address`).
+5. Inject through `wonder0` — proven in finding 90.
+
+The bring-up is no longer a research question; it is an implementation task with one small
+remaining capture (the raw vendor-command payload bytes). The `mosey_start` internal RF
+activation that finding 90 called "the last real unknown" is decoded.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
