@@ -1,7 +1,7 @@
 # tarish-libawdl
 
 **An open AWDL implementation, built from captures — the replacement for
-`libmosey_daemon_ffi.so`, the closed Google library our AirDrop stack sits on.**
+`libmosey_daemon_ffi.so`, the closed Google library the AirDrop stack sits on.**
 
 Apple Wireless Direct Link is how AirDrop moves bytes. This is a clean-room implementation of
 it, written from the frame format rather than around an existing library. It began as a parser
@@ -21,7 +21,7 @@ Proven on a Pixel 10 Pro, against live Apple devices, with **no `libmosey` in th
 
 | capability | state |
 |---|---|
-| **Radio bring-up on `wonder.ko`** | ✅ our own netlink code — the vendor commands, the monitor, the transmit path — brings the RF up and airs AWDL frames |
+| **Radio bring-up on `wonder.ko`** | ✅ netlink code here — the vendor commands, the monitor, the transmit path — brings the RF up and airs AWDL frames |
 | **Apple elects us master** | ✅ real iPhones adopt us; it tracks the metric we advertise (530 loses to a stronger peer, 600 wins) — their own election logic acting on our frames |
 | **We synchronise to an Apple master** | ✅ track a real master's availability windows in software (~2–12 ms inside a 65 ms slot), the way `libmosey` does |
 | **Data path** | ✅ `awdl0` netdev up with the correct derived address; we encapsulate and air IP, and decapsulate real Apple data frames (multicast mDNS) onto the interface |
@@ -43,7 +43,7 @@ image. This project opens the load-bearing one:
 
 | Layer | Today | This project |
 |---|---|---|
-| AirDrop protocol, mDNS, transfers | **ours** (`tarish-daemon`) | — |
+| AirDrop protocol, mDNS, transfers | **open source** (`tarish-daemon`) | — |
 | **AWDL protocol** — election, sync, peer tables, channel sequence | `libmosey_daemon_ffi.so` (closed blob) | **this — an open reimplementation** |
 | MAC/radio shim — `wonder.ko` | Google, GPL, a *virtual* mac80211 wiphy | driven directly over netlink; the one layer that stays a vendor's |
 | Chip driver — `bcmdhd` | Broadcom FullMAC | no |
