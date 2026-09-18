@@ -251,15 +251,22 @@ impl Tun {
     /// any other value is wrong by construction — AWDL peers compute it, they are never
     /// told it.
     pub fn configure(&self, mac: [u8; 6]) -> Result<std::net::Ipv6Addr> {
-        let raw = crate::tun::addr_gen_mode_path(&self.name);
-        // Written before IFF_UP. std::fs rather than an ioctl because this is a sysctl and
-        // there is no ioctl for it.
-        std::fs::write(&raw, "1\n").map_err(|e| {
-            Error::Radio(format!(
-                "write {raw}: {e}. Without addr_gen_mode=1 the kernel adds its own \
-                 link-local and may prefer it as the source address"
-            ))
-        })?;
+        // ifindex first (a bare syscall, always permitted), so addr_gen_mode can be set over
+        // netlink below.
+        let cname = std::ffi::CString::new(self.name.as_str())
+            .map_err(|_| Error::Radio("bad interface name".into()))?;
+        // SAFETY: cname is NUL-terminated.
+        let ifidx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+        if ifidx == 0 {
+            return Err(Error::Radio(format!("if_nametoindex {}: not found", self.name)));
+        }
+        // addr_gen_mode = none, BEFORE the interface comes up (it is read once, at that point).
+        // Set over rtnetlink, not /proc/sys: a TUN has no MAC, so without mode 1 the kernel
+        // adds a stable-privacy link-local beside our derived one and may prefer it as the
+        // source. The /proc write is denied under `tarishd`'s SELinux policy (`proc_net`),
+        // while rtnetlink (`RTM_NEWLINK` + `IFLA_AF_SPEC`) is allowed — and is what libmosey
+        // does.
+        set_addr_gen_mode_none(ifidx)?;
 
         // SAFETY: a socket used only as an ioctl handle; closed below.
         let sock = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
@@ -318,8 +325,93 @@ impl Tun {
     }
 }
 
-fn addr_gen_mode_path(iface: &str) -> String {
-    format!("/proc/sys/net/ipv6/conf/{iface}/addr_gen_mode")
+/// Append one netlink attribute (`nla_len`, `nla_type`, data, 4-byte pad).
+fn push_nlattr(v: &mut Vec<u8>, atype: u16, data: &[u8]) {
+    let len = 4 + data.len();
+    v.extend_from_slice(&(len as u16).to_ne_bytes());
+    v.extend_from_slice(&atype.to_ne_bytes());
+    v.extend_from_slice(data);
+    let pad = (4 - (len % 4)) % 4;
+    v.extend(std::iter::repeat(0u8).take(pad));
+}
+
+/// Set `addr_gen_mode = none` on an interface over rtnetlink, the equivalent of writing 1 to
+/// `/proc/sys/net/ipv6/conf/<if>/addr_gen_mode` but without touching `proc_net` (denied under
+/// `tarishd`'s SELinux policy). `RTM_NEWLINK` with `IFLA_AF_SPEC` → `AF_INET6` →
+/// `IFLA_INET6_ADDR_GEN_MODE`. The socket is unbound (auto-bind on send), as libmosey's is.
+fn set_addr_gen_mode_none(ifindex: u32) -> Result<()> {
+    const RTM_NEWLINK: u16 = 16;
+    const NLM_F_REQUEST: u16 = 1;
+    const NLM_F_ACK: u16 = 4;
+    const NLMSG_ERROR: u16 = 2;
+    const IFLA_AF_SPEC: u16 = 26;
+    const AF_INET6_ATTR: u16 = 10;
+    const IFLA_INET6_ADDR_GEN_MODE: u16 = 8;
+    const IN6_ADDR_GEN_MODE_NONE: u8 = 1;
+
+    // Innermost first: ADDR_GEN_MODE = none, wrapped in AF_INET6, wrapped in AF_SPEC.
+    let mut inet6 = Vec::new();
+    push_nlattr(&mut inet6, IFLA_INET6_ADDR_GEN_MODE, &[IN6_ADDR_GEN_MODE_NONE]);
+    let mut afspec = Vec::new();
+    push_nlattr(&mut afspec, AF_INET6_ATTR, &inet6);
+
+    // ifinfomsg: family(u8) pad(u8) type(u16) index(i32) flags(u32) change(u32).
+    let mut body = Vec::new();
+    body.push(0); // AF_UNSPEC
+    body.push(0); // pad
+    body.extend_from_slice(&0u16.to_ne_bytes());
+    body.extend_from_slice(&(ifindex as i32).to_ne_bytes());
+    body.extend_from_slice(&0u32.to_ne_bytes()); // flags
+    body.extend_from_slice(&0u32.to_ne_bytes()); // change
+    push_nlattr(&mut body, IFLA_AF_SPEC, &afspec);
+
+    let total = 16 + body.len();
+    let mut msg = Vec::with_capacity(total);
+    msg.extend_from_slice(&(total as u32).to_ne_bytes());
+    msg.extend_from_slice(&RTM_NEWLINK.to_ne_bytes());
+    msg.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
+    msg.extend_from_slice(&1u32.to_ne_bytes()); // seq
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // pid
+    msg.extend_from_slice(&body);
+
+    // SAFETY: a short-lived rtnetlink socket, closed before return.
+    let fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE) };
+    if fd < 0 {
+        return Err(Error::Radio(format!(
+            "addr_gen_mode: netlink socket: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let mut dst: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    dst.nl_family = libc::AF_NETLINK as u16;
+    let n = unsafe {
+        libc::sendto(
+            fd,
+            msg.as_ptr() as *const libc::c_void,
+            msg.len(),
+            0,
+            &dst as *const libc::sockaddr_nl as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_nl>() as u32,
+        )
+    };
+    if n < 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(Error::Radio(format!("addr_gen_mode: send: {e}")));
+    }
+    let mut rbuf = [0u8; 256];
+    let r = unsafe { libc::recv(fd, rbuf.as_mut_ptr() as *mut libc::c_void, rbuf.len(), 0) };
+    unsafe { libc::close(fd) };
+    if r >= 20 && u16::from_ne_bytes([rbuf[4], rbuf[5]]) == NLMSG_ERROR {
+        let code = i32::from_ne_bytes([rbuf[16], rbuf[17], rbuf[18], rbuf[19]]);
+        if code != 0 {
+            return Err(Error::Radio(format!(
+                "addr_gen_mode: kernel rejected it: {}",
+                std::io::Error::from_raw_os_error(-code)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The modified-EUI-64 link-local of a MAC.

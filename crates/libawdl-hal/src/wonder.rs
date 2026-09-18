@@ -186,21 +186,12 @@ impl NlSock {
                 std::io::Error::last_os_error()
             )));
         }
-        // Bind with nl_pid=0 so the kernel assigns our port id; replies are unicast to it.
-        let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
-        addr.nl_family = libc::AF_NETLINK as u16;
-        let rc = unsafe {
-            libc::bind(
-                fd,
-                &addr as *const libc::sockaddr_nl as *const libc::sockaddr,
-                std::mem::size_of::<libc::sockaddr_nl>() as u32,
-            )
-        };
-        if rc < 0 {
-            let e = std::io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(Error::Radio(format!("netlink bind: {e}")));
-        }
+        // Deliberately NOT bound. The kernel auto-assigns a port id on the first `sendto`
+        // and unicasts replies back to it, so an explicit `bind` is unnecessary — and it is
+        // denied for us: libmosey never binds its rtnetlink socket, so `tarishd`'s SELinux
+        // policy grants netlink_route_socket create/read/write but not `bind`
+        // (`avc: denied { bind } ... tclass=netlink_route_socket`). libmosey's netlink usage
+        // is what the policy was written for; matching it keeps us inside it.
         Ok(NlSock { fd, seq: 0 })
     }
 
@@ -292,8 +283,9 @@ impl Drop for NlSock {
 pub struct Wonder {
     /// The monitor interface AWDL rides on — `wonder0` on a Pixel.
     pub monitor: String,
-    /// The wiphy index behind it, needed to recreate the monitor.
-    wiphy: u32,
+    /// The interface MAC, cached from netlink at bring-up (sysfs is denied under tarishd's
+    /// policy — see [`Wonder::query_wiphy`]).
+    mac: Option<[u8; 6]>,
     /// Generic-netlink socket for nl80211, opened lazily on first air-touching call.
     genl: Option<NlSock>,
     /// AF_PACKET socket for TX/RX, opened lazily like [`crate::nl80211::Nl80211`].
@@ -301,32 +293,87 @@ pub struct Wonder {
 }
 
 impl Wonder {
-    /// Construct against an existing wonder interface (its wiphy is read now; the index is
-    /// not stable across reboots, so it is derived rather than assumed — see
-    /// [`crate::nl80211::Nl80211::phy_of`]).
+    /// Construct against an existing wonder interface. The wiphy index is resolved over
+    /// netlink at bring-up (not here), so `new` touches nothing that needs privilege.
     pub fn new(monitor: &str) -> Result<Wonder> {
-        let wiphy = Self::wiphy_of(monitor)?;
-        Ok(Wonder { monitor: monitor.to_string(), wiphy, genl: None, sock: None })
+        Ok(Wonder { monitor: monitor.to_string(), mac: None, genl: None, sock: None })
     }
 
-    /// Read the wiphy index behind an interface from sysfs.
+    /// The interface MAC over netlink (`GET_INTERFACE` → `NL80211_ATTR_MAC`), for the same
+    /// policy reason as [`query_wiphy`](Self::query_wiphy).
+    fn query_mac(&mut self, family: u16, ifindex: u32) -> Result<[u8; 6]> {
+        const NL80211_CMD_GET_INTERFACE: u8 = 5;
+        const NL80211_ATTR_MAC: u16 = 6;
+        let sock = self.genl()?;
+        let seq = sock.next_seq();
+        let mut m = NlMsg::genl(family, NLM_F_REQUEST, seq, NL80211_CMD_GET_INTERFACE, 1);
+        m.attr_u32(NL80211_ATTR_IFINDEX, ifindex);
+        sock.send(&m.finish())?;
+        let mut buf = [0u8; 4096];
+        // SAFETY: reading into a stack buffer from our own netlink socket.
+        let n = unsafe { libc::recv(sock.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+        if n < 20 {
+            return Err(Error::Radio(format!("GET_INTERFACE for MAC: short reply ({n})")));
+        }
+        let n = n as usize;
+        let mut off = 20;
+        while off + 4 <= n {
+            let alen = u16::from_ne_bytes([buf[off], buf[off + 1]]) as usize;
+            let atype = u16::from_ne_bytes([buf[off + 2], buf[off + 3]]);
+            if alen < 4 || off + alen > n {
+                break;
+            }
+            if atype == NL80211_ATTR_MAC && alen >= 10 {
+                return Ok(buf[off + 4..off + 10].try_into().unwrap());
+            }
+            off += (alen + 3) & !3;
+        }
+        Err(Error::Radio("MAC not present in GET_INTERFACE reply".into()))
+    }
+
+    /// The wiphy index behind an interface, over netlink (`NL80211_CMD_GET_INTERFACE`).
     ///
-    /// **The phy NAME is not the index.** `wonder.ko` names its phy `wonder`, not `phyN`,
-    /// so parsing a number out of the name fails ("unparseable phy name"). The numeric
-    /// index nl80211 wants lives in `/sys/class/ieee80211/<name>/index` — a separate file —
-    /// and there it is `0`. The symlink gives the name; that file gives the index.
-    fn wiphy_of(iface: &str) -> Result<u32> {
-        let link = std::fs::read_link(format!("/sys/class/net/{iface}/phy80211"))
-            .map_err(|e| Error::Radio(format!("no phy for {iface}: {e} — is wonder loaded?")))?;
-        let name = link
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or(Error::Radio("unreadable phy link".into()))?;
-        let idx = std::fs::read_to_string(format!("/sys/class/ieee80211/{name}/index"))
-            .map_err(|e| Error::Radio(format!("no index for phy {name}: {e}")))?;
-        idx.trim()
-            .parse::<u32>()
-            .map_err(|_| Error::Radio(format!("unparseable phy index {:?} for {name}", idx.trim())))
+    /// **Not from sysfs.** `/sys/class/ieee80211/<phy>/index` gives the same number, but it
+    /// is a plain `sysfs` file, and libmosey's SELinux policy (which `tarishd` reuses to load
+    /// us) allows `netlink_generic` yet not that read — so a sysfs lookup is denied under
+    /// enforcing (`avc: denied { read } name="index"`). libmosey resolves it over netlink for
+    /// the same reason, and so do we. `GET_INTERFACE` by ifindex replies with the interface's
+    /// attributes, `NL80211_ATTR_WIPHY` among them.
+    fn query_wiphy(&mut self, family: u16, ifindex: u32) -> Result<u32> {
+        const NL80211_CMD_GET_INTERFACE: u8 = 5;
+        let sock = self.genl()?;
+        let seq = sock.next_seq();
+        let mut m = NlMsg::genl(family, NLM_F_REQUEST, seq, NL80211_CMD_GET_INTERFACE, 1);
+        m.attr_u32(NL80211_ATTR_IFINDEX, ifindex);
+        sock.send(&m.finish())?;
+
+        let mut buf = [0u8; 4096];
+        // SAFETY: reading into a stack buffer from our own netlink socket.
+        let n = unsafe {
+            libc::recv(sock.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
+        };
+        if n < 20 {
+            return Err(Error::Radio(format!(
+                "GET_INTERFACE for wiphy: short reply ({n})"
+            )));
+        }
+        let n = n as usize;
+        // Attributes follow nlmsghdr(16) + genlmsghdr(4).
+        let mut off = 20;
+        while off + 4 <= n {
+            let alen = u16::from_ne_bytes([buf[off], buf[off + 1]]) as usize;
+            let atype = u16::from_ne_bytes([buf[off + 2], buf[off + 3]]);
+            if alen < 4 || off + alen > n {
+                break;
+            }
+            if atype == NL80211_ATTR_WIPHY && alen >= 8 {
+                return Ok(u32::from_ne_bytes([
+                    buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+                ]));
+            }
+            off += (alen + 3) & !3; // NLA_ALIGN
+        }
+        Err(Error::Radio("wiphy index not present in GET_INTERFACE reply".into()))
     }
 
     fn ifindex(&self) -> Result<u32> {
@@ -411,15 +458,17 @@ impl Wonder {
     /// it). See the module note.
     pub fn bring_up(&mut self, channel: u8, params: TxParams, country: [u8; 2]) -> Result<()> {
         let family = self.nl80211_family()?;
-        let wiphy = self.wiphy;
+        // Resolve the wiphy over netlink from the existing monitor (it persists on a Pixel),
+        // before we tear it down — see query_wiphy for why not sysfs.
+        let old_idx = self.ifindex()?;
+        let wiphy = self.query_wiphy(family, old_idx)?;
 
         // 1. DEL + NEW: recreate wonder0 as a fresh monitor.
         {
-            let old_idx = self.ifindex().ok();
             let sock = self.genl.as_mut().unwrap();
-            if let Some(idx) = old_idx {
+            {
                 let mut m = NlMsg::genl(family, NLM_F_REQUEST, 0, NL80211_CMD_DEL_INTERFACE, 1);
-                m.attr_u32(NL80211_ATTR_IFINDEX, idx);
+                m.attr_u32(NL80211_ATTR_IFINDEX, old_idx);
                 sock.send_acked(m, "DEL_INTERFACE wonder0")?;
             }
             let mut m = NlMsg::genl(family, NLM_F_REQUEST, 0, NL80211_CMD_NEW_INTERFACE, 1);
@@ -433,6 +482,9 @@ impl Wonder {
 
         // The recreated interface has a new index — look it up now, target the rest at it.
         let ifindex = self.ifindex()?;
+        // Cache the MAC over netlink while we have the socket, so mac_address() need not read
+        // sysfs (denied under tarishd's policy).
+        self.mac = self.query_mac(family, ifindex).ok();
 
         // 2. The four RF-config vendor commands. wonder.ko caches each (HW still stopped).
         //    SET_REG: one string attr, country + NUL, exactly as captured.
@@ -536,6 +588,12 @@ impl crate::Radio for Wonder {
     }
 
     fn mac_address(&self) -> Result<[u8; 6]> {
+        // Prefer the MAC cached from netlink at bring-up. The sysfs fallback is for callers
+        // that never brought the radio up (e.g. host tooling); under tarishd's policy that
+        // read is denied, but by then `mac` is already populated.
+        if let Some(m) = self.mac {
+            return Ok(m);
+        }
         let s = std::fs::read_to_string(format!("/sys/class/net/{}/address", self.monitor))
             .map_err(|e| Error::Radio(format!("reading MAC: {e}")))?;
         let mut mac = [0u8; 6];

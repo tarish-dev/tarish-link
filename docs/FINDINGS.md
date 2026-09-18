@@ -5920,6 +5920,69 @@ session and a data interface driven entirely by our stack.
   offers. Real AirDrop discovery concentrates on ch6 while transfers use 5 GHz, so multi-channel
   following is the quality work that comes after the daemon integration proves the seam.
 
+## 98. ★★★ The real Tarish AirDrop daemon runs on our AWDL — discovery works, transfer is the frontier
+
+The whole thing, wired together on hardware: the shipping `tarishd` + `tarishsharingd`, unchanged
+except for a configurable interface name, driving **our** AWDL stack instead of Google's
+`libmosey`, under **enforcing** SELinux, discovering a real iPhone.
+
+### How it was run without a build host
+
+The build host was unreachable, so instead of rebuilding the image we swapped the one file:
+backed up `/system_ext/lib64/libmosey_daemon_ffi.so`, pushed our shim over it (same soname,
+relabelled `system_lib_file`), set `persist.tarish.iface`, and `ctl.restart tarishd`. The daemon
+`dlopen`ed our shim as libmosey and called `mosey_start_5`. No `setenforce` — `tarishd`'s policy,
+written for libmosey, already grants exactly what our shim needs (`netlink_generic`,
+`netlink_route`, `packet_socket`, `tun_device`, and `udp_socket` ioctls incl. SIOCSIFFLAGS/ADDR).
+The policy comment even reads *"mosey0 is a TUN interface libmosey creates"* — libmosey uses a
+TUN, like us.
+
+### What worked, end to end
+
+```
+tarishd: AWDL session up, handle=0x…, mode=Netlink, channel=6, country=QA
+mosey shim: session starting on ch6 cc=QA
+datapath mosey0: up on fe80::94f9:8bff:fe2f:d13a
+tarishsharingd::httpd: listening on [fe80::…%mosey0]:8770
+tarishsharingd: AirDrop server up as "Pixel 10 Pro"
+libawdl_session: ADOPTED cluster clock: master 72:01:e2:fd:9d:57
+tarishd: route: fe80::/64 dev mosey0 table 111 ; rule: oif mosey0 lookup 111
+tarishsharingd::mdns: advertising as …_airdrop._tcp.local
+tarishsharingd::mdns: answered 8 record(s) to ["_airdrop._tcp.local/12"]
+tarishsharingd::mdns: peer discovered: a24f9f863500
+```
+
+Every layer above the radio did its real job on our AWDL: the session, the `mosey0` data
+interface, the routing (`route.rs`, no ENETUNREACH), the AirDrop HTTP server, and **bidirectional
+mDNS** — we answered the iPhone's `_airdrop._tcp` queries and discovered its peer.
+
+### Three SELinux-policy fits, done in the shim (not by loosening policy)
+
+Our backend diverged from libmosey in three sysfs/procfs/bind spots; each was moved onto the
+netlink path the policy already allows, matching what libmosey does:
+- wiphy index: `/sys/class/ieee80211/<phy>/index` (denied, plain `sysfs`) → `NL80211_CMD_GET_INTERFACE`.
+- the rtnetlink socket: we `bind`'d it (denied, `netlink_route` has no `bind`) → don't bind, the
+  kernel auto-binds on send.
+- `addr_gen_mode`: `/proc/sys/.../addr_gen_mode` (denied, `proc_net`) → `RTM_NEWLINK` +
+  `IFLA_AF_SPEC`/`IFLA_INET6_ADDR_GEN_MODE`.
+The MAC also moved to netlink (`GET_INTERFACE`), though `sysfs_net` reads turned out to be allowed.
+
+### The frontier: the transfer, not the stack
+
+No file has crossed yet. Two symptoms, one cause:
+- **Visibility is intermittent** — sometimes the iPhone lists "Pixel 10 Pro", sometimes not.
+  Our mDNS answer only lands if the iPhone is on our channel during the window we send it.
+- **Unicast times out** — our own `/Discover` probe to the peer returned `Connection timed out`,
+  and a receive needs the iPhone's TCP to reach our `:8770` the same way.
+
+Both are the single-channel + software-sync limitation of finding 96, now seen through the real
+daemon: multicast discovery gets through often enough to be visible, but a **TCP connection**
+(the transfer) needs sustained same-channel overlap that one fixed channel and ~ms-scale software
+sync do not provide. The identified next work is unchanged and now concrete: **follow the
+master's channel sequence** (be on ch6 for discovery and the peer's data channel when connecting)
+and tighten sync. That is the difference between "the daemon runs on our AWDL and sees Apple" —
+proven here — and "a file transfers over it".
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
