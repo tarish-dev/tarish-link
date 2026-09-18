@@ -6218,6 +6218,60 @@ goal):
    our AWDL protocol above it. Fastest to multi-channel, but leans on Google's binary for the
    radio — the thing libawdl exists to remove.
 
+## 102. ★★★ Multi-channel is NOT the wall — our clean-room stack runs single-channel like stock, and matches it on-air, yet iOS still won't peer us
+
+The channel-following track (findings 96–101) assumed stock reaches iOS via multi-channel and
+we could not. **Both halves are wrong.** Tested exhaustively on blazer against a live two-iPhone
+cluster, with the Pi's ALFA as an independent ch6/ch149 witness and `mosey0` captures for the
+IP layer.
+
+**Stock is single-channel ch6.** With stock libmosey driving the radio, the Pi sees stock's
+mosey0 MAC transmit **~0 frames on ch149** (1 in 6 s) and a full rate on ch6. Stock AirDrop
+works from ch6 alone. So the whole "be on [6,149]" premise is moot for discovery.
+
+**Our pure stack now runs end to end, no Google binary.** Our shim (516 KB) replaces
+`/system_ext/lib64/libmosey_daemon_ffi.so`; `tarishd` loads it, brings wonder up on ch6, creates
+`mosey0` with our AWDL MAC, installs the fe80 route/rule; `tarishsharingd` advertises
+`_airdrop._tcp` and answers queries — `mosey_server` stopped. Verified live.
+
+**Then a methodical elimination, each rebuilt/flashed and checked on the iPhone — all "nothing":**
+
+- ch149 (can't sync there — master PSFs are on ch6, so we self-elect); ch6 (syncs, spread 0).
+- Higher PSF rate concentrated in ch6 slots (`channel_lock`): 9/s, above stock's 7/s.
+- Tag 6 (Service Parameters) — we had omitted it; now emitted (AirDrop bloom).
+- Dense channel sequence: 16/16 slots on ch6 (stock's shape), not the sparse apple_shaped 4.
+- Tag 12 (Data Path State) replicated byte-for-byte to stock's shape (flags 0x8f24 + tail).
+- Fresh rotating LAA each session, as Apple does (rules out negative MAC caching).
+
+**One real bug was found and fixed along the way (worth having regardless):** our tag 4 sync
+params hardcoded `master = self` and an own-clock `aw_counter`, so every frame declared us a
+**separate, lower-metric cluster on our own timeline** — which Apple will never peer. We now
+advertise the master's address (`master 72:01`, 231/233 frames), follow (0 claiming self), and a
+projected master AW counter aligned to the master's (~30560 both). Still "nothing".
+
+**Where the gap is NOT.** After all of the above, a byte-level tag diff (stock vs us) leaves only
+trivia: tag 5's own-metric byte, and one tag 7 HT-caps byte (`2d` vs `6f`, a radio-capability
+bit). Everything semantic — channel, sync, counter, election/follow, tag 6, tag 12, schedule,
+version, MAC hygiene — matches stock. **The iPhone peers stock (unicasts to it, /Discover on
+:8770) and sends us essentially nothing (1 unicast in 8 s).** So it is not the periodic AWDL
+frame content, not the channel, not sync convergence, not the mDNS records (identical binary),
+and not the AWDL data-frame encapsulation (identical `03 04 <seq> 00 00 00 86dd` header).
+
+**What remains, for the next session (needs a different instrument than on-air frame diff):**
+
+1. **Timing precision / the data path.** Our sync is software (host timestamps), spread ~8 ms
+   against a 16 ms AW; stock also times in software but drives the radio with far less latency.
+   iOS may require tighter phase to open a *unicast* data path, and it never unicasts to us. The
+   honest read is that broadcast PSFs tolerate our jitter but the unicast handshake may not.
+2. **Whether iOS even adds us to its peer table** — this needs the iPhone's own side (a second
+   Apple device's `sharingd`/AWDL logs, or a Mac with `log stream`), not our captures.
+3. **The BLE layer** — identical app in both cases, so low prior, but unverified end to end.
+
+The engine, the pure-stack integration, the follow/counter correctness, the instrumentation
+(`hopprobe`, per-channel occupancy, tag decode, the Pi witness) all stand. The last mile —
+Apple's `sharingd` accepting a clean-room AWDL peer — is the open problem, consistent with the
+operator's standing note that Apple's protocol was never fully reverse engineered.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
