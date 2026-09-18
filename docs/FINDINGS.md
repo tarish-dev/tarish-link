@@ -5542,6 +5542,69 @@ The bring-up is no longer a research question; it is an implementation task with
 remaining capture (the raw vendor-command payload bytes). The `mosey_start` internal RF
 activation that finding 90 called "the last real unknown" is decoded.
 
+## 92. ★★★ The bring-up wire format, byte-for-byte — the HAL spec, nothing left to reverse
+
+Captured the raw netlink payloads by launching `moseyprobe` **under** strace
+(`strace -f -tt -s 8192 -xx -e trace=network`), so every `sendto`/`recvfrom` on the nl80211
+and rtnetlink sockets is in the log with full hex. Every command below was ACKed with
+`error=0`. (`moseyprobe` then exited 1, but only because strace 4.25 on this device crashes
+decoding the *subsequent* `AF_PACKET bind()` — `sprint_ifname: got unexpected return value` —
+which killed the traced process. That is a tracer artifact; the RF bring-up had already
+completed and every ACK was success.)
+
+This turns finding 91's recipe into an implementation spec. nl80211 attributes are
+`{len:u16 LE, type:u16 LE, data, pad to 4}`; a genl message is `{cmd:u8, ver:u8, resv:u16}`
+then attributes. Constants seen: `NL80211_ATTR_IFINDEX`=3, `IFNAME`=4, `IFTYPE`=5, `WIPHY`=1;
+`VENDOR_ID`=0xc3, `VENDOR_SUBCMD`=0xc4, `VENDOR_DATA`=0xc5. `NL80211_CMD_VENDOR`=0x67,
+`NEW_INTERFACE`=0x07, `DEL_INTERFACE`=0x08, `GET_INTERFACE`=0x05, `GET_WIPHY`=0x01.
+
+### Sequence on the NETLINK_GENERIC (nl80211) socket
+
+```
+seq 3  DEL_INTERFACE   IFINDEX=59                       ← remove the existing wonder0
+seq 4  GET_WIPHY       (SPLIT_WIPHY_DUMP)               ← enumerate the wiphy
+seq 5  NEW_INTERFACE   WIPHY=0, IFTYPE=6(monitor), IFNAME="wonder0"   ← recreate as monitor
+seq 6  GET_INTERFACE                                    ← read it back
+seq 7  VENDOR SET_REG          subcmd=0x04  data{ attr1 = "QA\0" }
+seq 8  VENDOR SET_FREQUENCY    subcmd=0x01  data{ attr1:u32 = 5745, attr2:u16 = 2 }
+seq 9  VENDOR SET_FILTER       subcmd=0x02  data{ attr1:u32 = 0 (filter type),
+                                                  attr2:nested{ attr1:u8 = 1 (enabled),
+                                                                attr2:[6] = 00:25:00:ff:94:73 } }
+seq 10 VENDOR SET_FIXED_TX_RATE subcmd=0x03 data{ attr1=preamble(2), attr2=bw(2),
+                                                  attr3=gi(2), attr4=nss(2), attr5=mcs(3) }
+seq 11 VENDOR subcmd=0x08       (empty VENDOR_DATA)     ← ACK ok; purpose not yet identified
+```
+
+All four config VENDOR commands (`VENDOR_ID` = `0x00001a11`) are sent here while the HW is
+stopped — the kernel logs each as *cached* (finding 91). Verbatim example, `SET_REG`
+(seq 7): genl `67 01 00 00`, then `08 00 03 00 3d 00 00 00` (IFINDEX=0x3d), `08 00 c3 00
+11 1a 00 00` (VENDOR_ID=0x1a11), `08 00 c4 00 04 00 00 00` (SUBCMD=4), `0b 00 c5 00 07 00
+01 00 51 41 00 00` (VENDOR_DATA → attr type1 = "QA").
+
+### The trigger, on the NETLINK_ROUTE socket
+
+```
+seq 1  RTM_SETLINK   ifinfomsg{ flags=IFF_UP, change=IFF_UP }, IFLA_IFNAME="wonder0"
+```
+
+This single rtnetlink message — **bring `wonder0` UP** — is what fires mac80211 `.start()`,
+which flushes the cached vendor config and lights the RF (finding 91). It is sent *after* all
+the vendor commands, confirming the ordering: configure (queues), then UP (applies).
+
+### Notes for the implementation
+
+- Attribute widths are inconsistent (`bw` is u16 in both `SET_FREQUENCY` and `SET_FIXED_TX_RATE`
+  but appears as separate attrs; `nss`/`mcs` are u8, `freq`/`gi`/`preamble` u32). wonder.ko
+  reads each by its own expected width, so match the capture per-attr rather than assuming u32.
+- `SET_FILTER`'s attr2 is a **nested** attribute (enabled flag + 6-byte BSSID), not flat.
+- The AWDL BSSID `00:25:00:ff:94:73` is a constant here, as elsewhere in the protocol.
+- subcmd 0x08 (empty) is issued last before UP and ACKs cleanly; it is not `GET_MAC` (0x05).
+  Left labelled rather than guessed — a follow-up capture that reads its *response* will say.
+- Our `libawdl-hal` already opens `NETLINK_GENERIC` (nl80211.rs) and does AF_PACKET TX
+  (rawsock.rs, finding 90). What it lacks is: the `NL80211_CMD_VENDOR` builder (OUI + subcmd +
+  nested data), the DEL/NEW monitor dance, and one `RTM_SETLINK` UP over rtnetlink. That is the
+  next piece of code, and it is fully specified above.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
