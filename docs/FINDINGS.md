@@ -6143,6 +6143,62 @@ consumer of whatever retune primitive actually works, and only the one `radio.se
 call at the bottom is proven inert. `follow_channels` in the shim is therefore currently a
 no-op, not a fix.
 
+## 101. ★★★ The channel hop is a Broadcom-offload capability behind wonder.ko, not a software primitive we can drive
+
+Chasing finding 100's "how does stock hop", I pulled `wonder.ko` (`/vendor_dlkm/lib/modules/wonder.ko`,
+87 KB, blazer) and read its symbols and log strings. `wonder.ko` is a **shim**: every RF
+operation — `set_frequency` (0x01) and `set_channel_schedule_req` (0x06) alike — forwards to a
+separate **`wondertap` provider** (`wondertap_ops`, registered via `wondertap_register_ops`,
+declared in DTS as `wondertap-provider`). The provider is **`bcmdhd4390`**, the Broadcom Wi-Fi
+driver (`lsmod`: `wonder` and `bcmdhd4390` both sit on `cfg80211`).
+
+When the provider is not active, the shim does not tune anything — it caches and returns "not
+implemented":
+
+```
+wondertap is not active; caching incoming channel settings.     (set_freq path)
+wondertap is inactive, caching incoming schedule settings.      (schedule path)
+wondertap is invalid or not up.
+Vendor operation 'get_mac_tsf' is not implemented               (0x07 while inactive)
+```
+
+That reconciles every earlier symptom: `SET_CHANNEL` was a no-op (finding 100) because it never
+reaches the Broadcom RF; live vendor `SET_FREQUENCY` returned EOPNOTSUPP because wondertap was
+inactive; `get_mac_tsf`/`set_channel_schedule_req` return "not implemented" for the same reason —
+even with `mosey_server` idle. Bring-up "works" only in the sense that the cached channel is
+applied when the interface comes up on the single home channel; it is not a live tune.
+
+**The schedule payload is fully recoverable** from the strings, for when the provider can be
+driven: a list of entries `[Freq: %u, BW: %u, Role: %u]` each with a `Dwell TU: %u`, plus
+`List Len`, `Next Idx`, `Country`, and a `Switch TSF: 0x%016x` anchor (`need either TSF_OFFSET or
+SWITCH_TIME`). `get_mac_tsf` (0x07) supplies that TSF. So the *format* is known; the blocker is
+**activation**.
+
+**What "wondertap active" requires.** The provider is `bcmdhd4390`. It registers its ops and
+enters the AWDL-offloaded state through the **Broadcom driver's own control path** (a DHD
+private command / iovar putting the chip into AWDL mode), which is what libmosey/`mosey_server`
+drives — *not* a `wonder.ko` vendor command and not anything reachable with `iw vendor send`.
+
+**Consequence for the project.** Hardware channel-following (firmware executing a TSF-anchored
+6/44/149 schedule) is a **Broadcom-offload** feature. Reaching it means driving `bcmdhd4390`'s
+AWDL enable, which is the proprietary path we set out to avoid. Our pure-software stack over the
+`wonder0` monitor is therefore inherently **single-channel**: whatever channel wonder is brought
+up on, and no live hop. This does not undo the software AWDL work — election, sync, framing, the
+data path all stand — but multi-channel presence is gated on the Broadcom offload.
+
+The three ways forward, for the operator to weigh (they trade directly against the no-Google
+goal):
+
+1. **Single-channel, optimised.** Keep pure-software, pick the channel deliberately, lean on the
+   tightened sync and window-aimed TX from the finding-100 engine. Enough for discovery on the
+   shared social channel; the transfer is the open question.
+2. **Drive the Broadcom AWDL offload ourselves.** Reverse `bcmdhd4390`'s AWDL enable (the DHD
+   iovar/private command sequence) so we can activate wondertap and then use 0x06/0x07 from our
+   own code. Pure-Tarish end state, but a real bcmdhd reversing effort.
+3. **Hybrid.** Let libmosey/the Broadcom path own only radio activation + the schedule, and run
+   our AWDL protocol above it. Fastest to multi-channel, but leans on Google's binary for the
+   radio — the thing libawdl exists to remove.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
