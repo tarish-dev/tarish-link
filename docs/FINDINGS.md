@@ -5760,6 +5760,54 @@ zero — which is the protocol working, not a failure. The claim is therefore pr
 we advertise a winning, verifiable claim, real Apple devices adopt us as master*, and that
 adoption tracks our metric parameter causally.
 
+## 95. ★★★ The other direction — we synchronise to a real Apple master over wonder
+
+Findings 90–94 had us as master (peers adopt *us*). The complementary half is following: can
+our stack track an Apple device's availability-window schedule and align to it? It can, and
+the machinery for it (`follow::Cluster` + `ClusterClock`) was already built — it had just
+never been exercised on the radio, because every prior run competed (as master, there is
+nothing to sync to).
+
+`awdl beacon wonder0 wonder0 149 30 --follow --wonder`, declining the election (metric 65) so
+an Apple device stays master:
+
+```
+metric 65 — declining the election
+ADOPTED cluster clock: master 72:01:e2:fd:9d:57, slots [0, 2, 8, 10], spread 0 us
+DROPPED (estimate degraded) ... spread 485451 us
+ADOPTED cluster clock: ... spread 9598 us
+cluster: 64 anchors, master 72:01:e2:fd:9d:57, phase 480420, spread 12946 us,
+         1 master change(s), adopted=true    (rx 280 frames)
+```
+
+- We **adopt a real Apple master's clock** (`72:01:e2:fd:9d:57` — the same peer that adopts us
+  when we compete; it becomes master once we decline, which is coherent election behavior).
+- The sync is **in software**, off kernel RX timestamps, because wonder's hardware TSF read is
+  a stub (finding 88). This is exactly what libmosey does — finding 88 predicted it and this
+  confirms our path matches.
+- **Quality:** spread settles at ~10–13 ms against a 65 ms slot (presence mode 4). Loose but
+  usable — aiming at the slot centre, a 13 ms error still lands inside the window. The one
+  `DROPPED` at 485 ms coincides with the "1 master change" and is the clock correctly
+  resetting when its anchor stops being comparable, then re-adopting — not drift.
+
+### The honest ceiling on sync quality
+
+Software sync off host timestamps is the ceiling here, and it is not a limitation we can
+engineer past on wonder: tightening it further would want the radio's own TSF at both RX
+(anchor) and TX (schedule), and wonder exposes neither (`get_mac_tsf` is a stub). The 65 ms
+window is wide enough that ~10 ms of spread is workable for landing transmits in it, which is
+why libmosey ships on the same software-timing approach. This is enough to attempt a data path
+(the next layer); if the data path proves to need tighter timing, better host timestamps
+(reducing socket backlog, `SO_TIMESTAMPNS`) are the lever, not the TSF the hardware won't give.
+
+### Where this leaves the Tarish-on-our-stack path
+
+Election (94) and sync-follow (95) are both demonstrated on wonder. The remaining load-bearing
+piece before Tarish can run on our stack is a **proven data path** — IPv6 over the `awdl0`
+netdev to a real Apple peer, transmitted in the master's windows (the loop already has the tun
+and an in-window drain queue; it is unproven against a peer) — and then the libmosey-ABI shim
+so `tarishd` uses our stack unchanged. Sync was the hard protocol unknown; it is answered.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
