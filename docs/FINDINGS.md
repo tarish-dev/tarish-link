@@ -5808,6 +5808,62 @@ netdev to a real Apple peer, transmitted in the master's windows (the loop alrea
 and an in-window drain queue; it is unproven against a peer) — and then the libmosey-ABI shim
 so `tarishd` uses our stack unchanged. Sync was the hard protocol unknown; it is answered.
 
+## 96. ★★★ The data path carries real Apple frames — but only on the discovery channel
+
+The data plane, run on wonder for the first time. `awdl beacon ... --follow --wonder --datapath
+awdl0` brings up the `awdl0` TUN, follows an Apple master, and moves IP:
+
+- **`awdl0` comes up correctly on Android:** address `fe80::94f9:8bff:fe2f:d13a` — the exact
+  modified-EUI-64 of our MAC `96:f9:8b:2f:d1:3a`, and *only* that address (the `addr_gen_mode=1`
+  + derived-address handling in `tun.rs` works on the phone, single address, no stable-privacy
+  twin).
+- **TX plumbing works:** the kernel's own bring-up IPv6 (MLD reports, neighbour solicitations)
+  is read off the TUN, encapsulated into AWDL QoS-Data frames, and aired in-window — `3–4 sent
+  in-window` every run.
+- **RX proven:** on **channel 6**, we received real Apple AWDL **data** frames — their multicast
+  mDNS — decapsulated them, and delivered the IPv6 to `awdl0`. `2 delivered`, and the frame
+  breakdown `298 mgmt, 0 ctrl, 2 data` shows they are genuine 802.11 Data frames, not action
+  frames misread.
+
+### The channel is the whole story, and a diagnostic settled it
+
+The first attempts (ch149, ch44) delivered **0** data frames despite receiving hundreds of
+management frames. That looked like it might be a wonder limitation — a monitor that only hands
+up management frames, with data routed to a separate netdev the way libmosey uses `mosey0`. A
+per-type RX counter (`rx frames by 802.11 type`) ruled that out: on **ch6** data frames arrive
+(`0 ctrl, 2 data`), so wonder's monitor *does* deliver Data frames. The zero on 149/44 was the
+**channel** — Apple concentrates its mDNS/discovery multicast on channel 6, the fixed
+cross-band rendezvous every device keeps slot 8 on. Fix the bring-up bandwidth for 2.4 GHz
+(20 MHz, not the 80 MHz used on 5 GHz) and the traffic is there.
+
+A second effect confirms 6 is where the master lives: **sync is far tighter there** — spread
+~2 ms on ch6 against ~12 ms on ch149. We overlap the master's windows more, so the anchors are
+better.
+
+### The honest boundary
+
+- **Reception is sporadic.** One 25 s run delivered 2 frames; a 45 s run delivered 0 — and the
+  zero run had the looser sync (~16 ms). Apple's mDNS is periodic and sparse, and we catch it
+  only when well-synced and on-channel during an announcement. That is Apple's traffic pattern
+  plus our single-channel, software-timed listening — not a defect in the data path, which
+  decapsulated every data frame it did see. Tighter, more consistent sync and/or actively
+  *sending* an mDNS query (which makes Apple answer on demand) would turn a trickle into a
+  reliable stream.
+- **Not yet a round-trip, and not a unicast connection.** We have received multicast (mDNS) and
+  transmitted the kernel's link-local multicast. We have not completed a query→response, nor
+  moved unicast IP to a specific peer — the latter needs Android's fwmark routing solved (an
+  `ip rule` for `awdl0`; the documented trap in `tun.rs`), because the kernel will not route to
+  `awdl0` from an empty per-network table on its own.
+
+### What this establishes
+
+The data path is real on wonder: the TUN, the encapsulation, the in-window drain, and the
+decapsulate-to-netdev RX all work end to end against a live Apple device — the first IP our
+stack has carried to and from Apple hardware with no libmosey. What remains for a *usable* data
+path is engineering, not unknowns: send our own mDNS (discovery both ways), and the `awdl0`
+routing rule for unicast so a TCP/TLS connection — the thing AirDrop and Quick Share actually
+run over — can be established. Then the libmosey-ABI shim, and Tarish rides our stack.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

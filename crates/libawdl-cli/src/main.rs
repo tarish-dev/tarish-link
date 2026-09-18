@@ -1274,8 +1274,10 @@ fn open_wonder(monitor: &str, channel: u8) -> Box<dyn libawdl_hal::Radio> {
             std::process::exit(1);
         }
     };
-    // libmosey's captured bring-up rate: VHT, 80 MHz, 2 streams, MCS 3 (finding 92).
-    let params = TxParams { mcs: 3, nss: 2, bandwidth: 2, short_gi: false };
+    // libmosey's captured bring-up rate on 5 GHz is VHT/80 MHz (finding 92); on the 2.4 GHz
+    // social channel (6) that width is invalid, so drop to 20 MHz there. bandwidth: 0=20, 2=80.
+    let bandwidth = if channel < 36 { 0 } else { 2 };
+    let params = TxParams { mcs: 3, nss: 2, bandwidth, short_gi: false };
     if let Err(e) = w.bring_up(channel, params, *b"QA") {
         eprintln!("wonder bring_up failed: {e:?}");
         std::process::exit(1);
@@ -1402,6 +1404,10 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
     let mut outbound: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
     let mut tbuf = vec![0u8; 4096];
     let (mut dp_sent, mut dp_recvd, mut dp_noroute, mut dp_dropped) = (0u64, 0u64, 0u64, 0u64);
+    // Received-frame breakdown by 802.11 type, so a data path that delivers nothing can be
+    // told apart from a radio that only hands up management frames. Cheap, and it answers a
+    // real question: are Apple DATA frames even reaching us, or only their action frames?
+    let (mut rx_mgmt, mut rx_ctrl, mut rx_data) = (0u64, 0u64, 0u64);
     let mut awdl_data_seq: u16 = 0;
     let mut d11_data_seq: u16 = 0;
     if compete {
@@ -1611,6 +1617,17 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
                     .host_us
                     .map(|t| t.saturating_sub(epoch_realtime_us))
                     .unwrap_or_else(|| epoch.elapsed().as_micros() as u64);
+                // Count what the radio actually hands up, by 802.11 type. TYPE 2 is Data.
+                if let Some(fc) = Radiotap::parse(&rx.bytes)
+                    .and_then(|rt| rt.payload(&rx.bytes))
+                    .and_then(libawdl::dot11::FrameControl::parse)
+                {
+                    match fc.frame_type {
+                        2 => rx_data += 1,
+                        1 => rx_ctrl += 1,
+                        _ => rx_mgmt += 1,
+                    }
+                }
                 // A data frame is not an action frame, so it never reaches parse_awdl and
                 // would otherwise be silently discarded by a loop that only looks for
                 // election state.
@@ -1801,6 +1818,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             outbound.len()
         );
     }
+    eprintln!("  rx frames by 802.11 type: {rx_mgmt} mgmt, {rx_ctrl} ctrl, {rx_data} data");
     if follow {
         eprintln!(
             "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, \
