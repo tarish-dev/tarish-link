@@ -89,6 +89,18 @@ fn init_log() {}
 /// # Safety
 /// `channels` and `country` must be valid pointers for their stated lengths, as they are when
 /// `tarishd` calls this. `country` is a NUL-terminated 2-letter code.
+/// A fresh locally-administered unicast MAC (LAA bit set, multicast bit clear), from
+/// `/dev/urandom` — what Apple's own AWDL uses for each session.
+fn random_laa() -> [u8; 6] {
+    let mut m = [0u8; 6];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut m);
+    }
+    m[0] = (m[0] & 0xfc) | 0x02; // locally administered, unicast
+    m
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mosey_start_5(
     channels: *const u8,
@@ -109,8 +121,19 @@ pub unsafe extern "C" fn mosey_start_5(
         log::error!("mosey shim: no channels given");
         return std::ptr::null_mut();
     }
-    // The session holds one channel at a time; take the first the daemon offers.
-    let channel = unsafe { *channels };
+    // The session holds one channel at a time. Prefer the 5 GHz social channel (149) when the
+    // daemon offers it: the radio cannot hop (findings 100/101 — no hardware schedule, live
+    // retune is a no-op), so the single channel we sit on has to be the one the peer attends,
+    // and 149 is quieter than the 2.4 GHz social channel. Falls back to the first offered.
+    // TARISH_CHANNEL overrides for experiments.
+    let offered = unsafe { std::slice::from_raw_parts(channels, n_channels as usize) };
+    let channel = std::env::var("TARISH_CHANNEL")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .filter(|c| offered.contains(c))
+        .or_else(|| offered.contains(&149).then_some(149))
+        .unwrap_or(offered[0]);
+    log::info!("mosey shim: offered channels {offered:?}, sitting on ch{channel}");
     let cc: [u8; 2] = if country.is_null() {
         *b"QA"
     } else {
@@ -137,10 +160,14 @@ pub unsafe extern "C" fn mosey_start_5(
     let iface = data_iface();
     let mut cfg = Config::new(channel, cc);
     cfg.follow = true; // participate in the cluster and sync to whoever is master
-    // Follow the master's channel sequence too: a real Apple cluster runs over [6, 149], so
-    // sitting on the single bring-up channel is only intermittently reachable (finding 99).
-    // wonder retunes live in ~0.6 ms, so per-slot hopping costs nothing worth saving.
-    cfg.follow_channels = true;
+    // wonder cannot hop (findings 100/101: no live retune, no hardware schedule), so instead of
+    // chasing the master across [6, 149] we LOCK to our single channel and transmit only in the
+    // master's windows that are on it — bursting PSFs there so Apple peers us reliably despite
+    // being present on just one social channel.
+    cfg.channel_lock = true;
+    // Rotate a fresh locally-administered MAC each session, as Apple devices do — a fixed AWDL
+    // address reused across many discovery attempts can be negatively cached by iOS.
+    cfg.override_mac = Some(random_laa());
     cfg.datapath = Some(iface);
     // duration None: run until mosey_stop.
 

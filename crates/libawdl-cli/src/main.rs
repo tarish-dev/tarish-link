@@ -1476,10 +1476,12 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         metric_floor,
         per_window,
         windows,
-        // --hop (channel-following) is meaningless without following the cluster's windows,
-        // so it implies --follow.
+        // --hop now means channel-LOCK (wonder cannot live-retune — findings 100/101): lock to
+        // our channel and transmit only in the master windows on it. It implies --follow.
         follow: follow || hop,
-        follow_channels: hop,
+        follow_channels: false,
+        channel_lock: hop,
+        override_mac: None,
         tenure,
         legacy_timing: legacy,
         version,

@@ -39,6 +39,17 @@ pub struct Config {
     /// `follow`; without it a multi-channel cluster (e.g. [6, 149]) is only intermittently
     /// reachable — see finding 99. The radio backend must support live `set_channel`.
     pub follow_channels: bool,
+    /// Single-channel backend that cannot hop (wonder — findings 100/101): transmit only in the
+    /// master's windows that are on our channel, and lift the one-frame-per-window throttle so we
+    /// send several PSFs into each such window. A hop-less radio can still be peered by Apple, but
+    /// only if its sync frames arrive while the peer is on our channel, and often enough to hold a
+    /// peer-table entry.
+    pub channel_lock: bool,
+    /// Use this AWDL address instead of the radio's hardware MAC. Apple devices rotate a fresh
+    /// locally-administered MAC every AWDL session (privacy), and a peer that reuses one fixed
+    /// address across many failed discovery attempts can be negatively cached. `None` keeps the
+    /// radio's own MAC.
+    pub override_mac: Option<[u8; 6]>,
     pub tenure: Option<u32>,
     pub legacy_timing: bool,
     pub version: Option<(u8, u8)>,
@@ -63,6 +74,8 @@ impl Config {
             windows: None,
             follow: false,
             follow_channels: false,
+            channel_lock: false,
+            override_mac: None,
             tenure: None,
             legacy_timing: false,
             version: None,
@@ -116,7 +129,13 @@ const DRAIN_PER_WINDOW: usize = 4;
 /// Run the session on `radio` (already brought up) until `stop` is set or `cfg.duration`
 /// elapses. Returns what it did.
 pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Stats> {
-    let addr = radio.mac_address()?;
+    let addr = match cfg.override_mac {
+        Some(m) => {
+            log::info!("using override AWDL MAC {}", libawdl::dot11::Mac(m));
+            m
+        }
+        None => radio.mac_address()?,
+    };
     let mut b = Beacon::new(addr, cfg.channel, core::str::from_utf8(&cfg.country).unwrap_or("QA"));
 
     if let Some((major, minor)) = cfg.version {
@@ -156,6 +175,15 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     }
     if let Some(w) = cfg.windows {
         b.windows = Some(w);
+    }
+    // A single-channel backend that never leaves its channel must advertise DENSE presence —
+    // all 16 slots on that channel — so a browsing peer knows it is always reachable there.
+    // Stock libmosey does exactly this (16x ch6); our default apple_shaped schedule claims only
+    // ~4 slots, which tells the peer we are asleep 12/16 of the time and is why iOS would not
+    // peer us. windows=Some(16) makes schedule() emit all 16 slots on our channel.
+    if cfg.channel_lock {
+        b.windows = Some(16);
+        b.stock_dp_shape = true;
     }
     if let Some(g) = cfg.garbage {
         b.garbage = g;
@@ -285,7 +313,16 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // actually attends. The switch is ~0.6 ms (finding 99), done once per slot transition.
         let now_us = epoch.elapsed().as_micros() as u64;
         let wait = if cfg.follow && adopted {
-            if cfg.follow_channels {
+            if cfg.channel_lock {
+                // Single-channel backend that cannot hop (wonder): aim ONLY at the master's
+                // windows that are on our channel, so every frame lands when the peer is
+                // demonstrably on it. Falls back to our own advertised window if the master
+                // holds no slot on this channel.
+                cluster
+                    .next_master_window_on(now_us, current_channel)
+                    .map(|(w, _slot)| w)
+                    .unwrap_or_else(|| b.us_until_next_advertised_window(now_us))
+            } else if cfg.follow_channels {
                 if let Some((w, _slot, ch)) = cluster.next_master_window(now_us) {
                     if ch != current_channel {
                         match radio.set_channel(ch) {
@@ -328,8 +365,11 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             continue;
         }
         let now_us = epoch.elapsed().as_micros() as u64;
-        // One frame per window visit.
+        // One frame per window visit — UNLESS channel_lock, where we deliberately blast several
+        // PSFs into each on-channel window so the peer receives our sync reliably enough to hold
+        // a peer-table entry (a hop-less radio has only these windows to be heard in).
         if cfg.follow
+            && !cfg.channel_lock
             && last_tx_us > 0
             && now_us.saturating_sub(last_tx_us) < u64::from(libawdl::beacon::SLOT_US) / 2
         {
@@ -337,19 +377,30 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             continue;
         }
         // Advertise the best master we know: claim self while our metric leads, else name the
-        // adopted peer and place ourselves one hop out (finding 80/89).
-        b.follow = match (cluster.master, cluster.master_metric, cluster.root, cluster.follow_distance) {
-            (Some(m), Some(mm), Some(root), Some(dist)) if m != addr && mm > target_metric => {
-                Some(FollowAdvert {
-                    root,
-                    parent: cluster.relay_parent.unwrap_or(root),
-                    distance: dist,
+        // adopted cluster's master and present as a MEMBER of it — same master address, same
+        // window timeline (finding 80/89, and the AirDrop-peering finding). Relative to the
+        // earlier version this no longer requires root/follow_distance to be known before it
+        // will follow: without them we still name the master and sit one hop out, because
+        // claiming self against a stronger master is exactly what stops Apple peering us.
+        match (cluster.master, cluster.master_metric) {
+            (Some(m), Some(mm)) if m != addr && mm > target_metric => {
+                b.follow = Some(FollowAdvert {
+                    root: cluster.root.unwrap_or(m),
+                    parent: cluster.relay_parent.unwrap_or(m),
+                    distance: cluster.follow_distance.unwrap_or(1),
                     master_metric: mm,
                     master_counter: cluster.master_counter.unwrap_or(0),
-                })
+                });
+                // Present in the tag 4 sync params as a member of the master's cluster.
+                b.follow_master = Some(m);
+                b.follow_aw_counter = cluster.projected_master_counter(now_us);
             }
-            _ => None,
-        };
+            _ => {
+                b.follow = None;
+                b.follow_master = None;
+                b.follow_aw_counter = None;
+            }
+        }
         let is_mif = cfg.psf_per_mif == 0 || n % (cfg.psf_per_mif + 1) == 0;
         // target_tx_time at build; phy_tx_time as late as possible, so tx_delay reflects real
         // injection latency rather than the impossible literal zero. Finding 81/82.
@@ -397,9 +448,15 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         b.advance();
         n += 1;
         last_tx_us = epoch.elapsed().as_micros() as u64;
-        std::thread::sleep(Duration::from_micros(
-            b.psf_interval_us() / u64::from(cfg.per_window.max(1)),
-        ));
+        // In channel_lock we burst within the on-channel window: a short inter-frame gap, and the
+        // loop stops on its own when next_master_window_on reports the window has passed. Normally,
+        // pace by the PSF interval.
+        let gap_us = if cfg.channel_lock {
+            8_000
+        } else {
+            b.psf_interval_us() / u64::from(cfg.per_window.max(1))
+        };
+        std::thread::sleep(Duration::from_micros(gap_us));
     }
 
     if cfg.follow_channels {

@@ -52,6 +52,14 @@ use crate::{
     sync::{ChannelSequence, SyncParams, TU_US},
 };
 
+/// AWDL Service Parameters (tag 6) advertising that we offer AirDrop. This is the bloom filter
+/// a browsing peer checks before it will connect; its hash is not yet computed from our own
+/// service names (docs/GAPS.md), so this replicates a real AirDrop-offering peer's filter
+/// verbatim — a captured iOS master's tag 6, which necessarily has the `_airdrop` bit set.
+const SERVICE_PARAMS_AIRDROP: &[u8] = &[
+    0x00, 0x00, 0x00, 0x56, 0x07, 0x30, 0x00, 0x08, 0xc8, 0x01, 0x20, 0x40, 0x02, 0x20, 0x10,
+];
+
 /// One Availability Window in microseconds: 16 TU.
 ///
 /// From the wire, not the paper — `aw_period` reads 16 in all 18157 captured frames.
@@ -381,6 +389,14 @@ pub struct Beacon {
     ///
     /// `None` is Apple's measured shape and the right default.
     pub windows: Option<usize>,
+    /// Emit tag 12 in stock libmosey's exact shape (flags 0x8f24 + extended tail) rather than our
+    /// own describing() output (flags 0x0304). Set when chasing the AirDrop-peering gap.
+    pub stock_dp_shape: bool,
+    /// When following a cluster, the master's address and current AW counter to advertise in the
+    /// tag 4 sync params — so we present as a MEMBER of the master's cluster on its timeline, not
+    /// as our own competing master. `None` means we are the master and advertise ourselves.
+    pub follow_master: Option<[u8; 6]>,
+    pub follow_aw_counter: Option<u16>,
     /// **Reproduce the timing defect of the first transmit run, on purpose.**
     ///
     /// `aw_remaining` becomes 0 in every frame and `aw_counter` follows the frame count
@@ -419,6 +435,9 @@ impl Beacon {
                 trailing: vec![0, 0],
             },
             windows: None,
+            stock_dp_shape: false,
+            follow_master: None,
+            follow_aw_counter: None,
             legacy_timing: false,
         }
     }
@@ -510,14 +529,21 @@ impl Beacon {
             ext_max_multicast: 3,
             ext_max_unicast: 3,
             ext_max_af: 3,
-            master: self.addr,
+            // Following a cluster: advertise the MASTER's address, not ours. Claiming self here
+            // (which we did unconditionally) makes every receiver see a separate cluster with a
+            // lower metric, and Apple will not peer a rival master. See finding on AirDrop peering.
+            master: self.follow_master.unwrap_or(self.addr),
             presence_mode: 4,
             reserved_28: if self.garbage.t4 { GARBAGE_BYTE } else { 0 },
             // Derived from the clock rather than from the frame count. Those only agree
             // if every frame goes out exactly one window apart, which no scheduler
             // guarantees -- and a counter that drifts from its own clock is a counter a
             // follower cannot use.
-            aw_counter: if self.legacy_timing {
+            // Following: advertise the MASTER's projected AW counter so the cluster shares one
+            // window timeline. Only fall back to our own clock when we are the master.
+            aw_counter: if let Some(c) = self.follow_aw_counter {
+                c
+            } else if self.legacy_timing {
                 // 16 windows per frame, assumed rather than measured -- the original bug.
                 self.sent.wrapping_mul(16)
             } else {
@@ -593,6 +619,25 @@ impl Beacon {
             e.encode()
         }));
         }
+        if self.stock_dp_shape {
+            // Replicate stock libmosey's exact tag 12 (Data Path State) shape: flags 0x8f24 (the
+            // extra capability bits 0x8000/0x0800/0x0400/0x0020 beyond our COUNTRY|SOCIAL|AWDL),
+            // country, a 0x01 byte, our AWDL MAC, and a 2-byte extended tail. Our default shape
+            // (flags 0x0304) is on-air near-identical to stock in every OTHER tag, yet iOS peers
+            // stock and not us — tag 12 is the last on-air difference, and these capability bits
+            // are the candidate. Built verbatim (not via describing) because the extra flags
+            // change the field layout. See finding on AirDrop peering.
+            let cc = self.country.as_bytes();
+            let mut v = vec![
+                0x24u8, 0x8f,
+                cc.first().copied().unwrap_or(b'Q'),
+                cc.get(1).copied().unwrap_or(b'A'),
+                0x00, 0x01, 0x00,
+            ];
+            v.extend_from_slice(&self.addr);
+            v.extend_from_slice(&[0x00, 0x00]);
+            tlvs.push((12, v));
+        } else {
         tlvs.push((
             12,
             {
@@ -637,6 +682,7 @@ impl Beacon {
                 }
             },
         ));
+        }
         tlvs.push((7, {
             let mut h = self.ht.clone();
             if self.garbage.t7 {
@@ -644,6 +690,15 @@ impl Beacon {
             }
             h.encode()
         }));
+        // Tag 6 (Service Parameters): the bloom filter a browsing peer uses to decide whether we
+        // offer a service it wants (AirDrop). We long OMITTED it (its hash was uncomputed), and a
+        // hop-less single-channel build turned out invisible to iOS with everything else matching
+        // stock — because Apple's sharingd filters candidate peers by this tag before it will
+        // connect. Emitting it, even with a replicated AirDrop-offering filter rather than one
+        // computed from our own names, is what makes iOS treat us as an AirDrop peer. See
+        // `docs/GAPS.md` and finding on tag-6 visibility.
+        // TODO: compute the bloom from our advertised service names instead of replicating.
+        tlvs.push((6, SERVICE_PARAMS_AIRDROP.to_vec()));
         tlvs.push((
             17,
             Ieee80211Container { elements: vec![(ELEM_VHT_CAPABILITIES, self.vht.to_vec())] }

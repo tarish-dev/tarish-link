@@ -371,6 +371,10 @@ pub struct Cluster {
     pub relay_parent: Option<[u8; 6]>,
     pub master_counter: Option<u32>,
     pub follow_distance: Option<u32>,
+    /// The master's AW counter (tag 4 `aw_counter`) and when we saw it, for projecting the
+    /// current value. A follower must advertise the MASTER's window counter, not its own, or it
+    /// looks like a separate cluster on its own timeline — which Apple will not peer.
+    pub last_master_aw: Option<(u16, u64)>,
     pub clock: ClusterClock,
 }
 
@@ -440,6 +444,7 @@ impl Cluster {
                     self.clock.reset();
                     self.master_slots.clear();
                     self.master_channels.clear();
+                    self.last_master_aw = None;
                     self.master_changes += 1;
                 }
                 self.master = Some(e.master);
@@ -474,6 +479,7 @@ impl Cluster {
                     .collect();
                 self.master_channels = seq.channels.clone();
             }
+            self.last_master_aw = Some((sync.aw_counter, arrived_us));
             self.clock.observe(Sighting {
                 arrived_us,
                 counter: sync.aw_counter,
@@ -517,6 +523,15 @@ impl Cluster {
             .min()
     }
 
+    /// The master's AW counter projected to `now_us`: the counter it advertised, plus one per
+    /// availability window elapsed since. This is what a follower must put in its own tag 4
+    /// `aw_counter` so the whole cluster shares one window timeline.
+    pub fn projected_master_counter(&self, now_us: u64) -> Option<u16> {
+        let (c, t) = self.last_master_aw?;
+        let elapsed_aws = now_us.saturating_sub(t) / AW_US;
+        Some(c.wrapping_add(elapsed_aws as u16))
+    }
+
     /// Override the master's per-slot channel map from an OpClass Channel Sequence (tag 18).
     ///
     /// Prefer this to the sequence embedded in Sync Params (tag 4): that one is **Legacy**
@@ -536,6 +551,30 @@ impl Cluster {
             .filter(|(_, c)| **c != 0)
             .map(|(i, _)| i)
             .collect();
+    }
+
+    /// The nearest master window **on a specific channel** — for a single-channel backend that
+    /// cannot hop (wonder: findings 100/101). Transmitting in a master slot whose channel we are
+    /// not on is wasted: the peer is on that slot's channel, not ours. Restricting to windows
+    /// whose channel equals `channel` puts every frame on the air when the peer is demonstrably
+    /// on our channel. Returns 0 wait when we are already inside such a window. `None` if the
+    /// sequence is unknown or the master occupies no slot on this channel.
+    pub fn next_master_window_on(&self, now_us: u64, channel: u8) -> Option<(u64, usize)> {
+        if !self.clock.is_usable() {
+            return None;
+        }
+        if let Some(now_slot) = self.clock.slot_at(now_us) {
+            if self.master_slots.contains(&now_slot)
+                && self.master_channels.get(now_slot).copied() == Some(channel)
+            {
+                return Some((0, now_slot));
+            }
+        }
+        self.master_slots
+            .iter()
+            .filter(|&&s| self.master_channels.get(s).copied() == Some(channel))
+            .filter_map(|&s| Some((self.clock.us_until_slot_centre(now_us, s)?, s)))
+            .min_by_key(|(w, _)| *w)
     }
 
     /// The nearest master window as `(microseconds until it, its slot, the channel it uses)`.
