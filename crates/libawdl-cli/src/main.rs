@@ -1292,8 +1292,7 @@ fn open_wonder(_monitor: &str, _channel: u8) -> Box<dyn libawdl_hal::Radio> {
 }
 
 fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>, metric_floor: Option<u64>, wonder: bool) {
-    use libawdl::beacon::Beacon;
-    use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
+    use libawdl_hal::{nl80211::Nl80211, Radio};
 
     // Either backend, behind the same trait. --wonder drives Google's radio shim with our
     // own netlink (the Pixel path); the default is the mainline nl80211/monitor backend (the
@@ -1316,494 +1315,85 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         }
         Box::new(n)
     };
-    let addr = match radio.mac_address() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("no MAC for {monitor}: {e:?}");
-            std::process::exit(1);
-        }
-    };
+    // Fail early with a clear message if the radio has no MAC; the session reads it itself.
+    if let Err(e) = radio.mac_address() {
+        eprintln!("no MAC for {monitor}: {e:?}");
+        std::process::exit(1);
+    }
 
-    let mut b = Beacon::new(addr, channel, "QA");
-    // `--version 10.0` announces something other than the v3.4 libmosey and OWL both send.
-    // REFUSED RATHER THAN GUESSED on a malformed value: announcing the wrong version is a
-    // capability claim, and silently falling back to the default would make a whole run
-    // measure the control condition while its log said otherwise.
-    if let Some(v) = version {
-        match v.split_once('.').and_then(|(a, b)| Some((a.parse::<u8>().ok()?, b.parse::<u8>().ok()?))) {
-            Some((major, minor)) if major < 16 && minor < 16 => {
-                b.version = libawdl::state::Version { major, minor, device_class: 2 };
-            }
+    // --version 10.0 announces a version other than the v3.4 libmosey/OWL send. Refused
+    // rather than guessed on a malformed value.
+    let version = match version {
+        None => None,
+        Some(v) => match v.split_once('.').and_then(|(a, b)| Some((a.parse::<u8>().ok()?, b.parse::<u8>().ok()?))) {
+            Some((maj, min)) if maj < 16 && min < 16 => Some((maj, min)),
             _ => {
-                eprintln!("--version wants MAJOR.MINOR with each below 16, e.g. 10.0 — got {v:?}");
+                eprintln!("--version wants MAJOR.MINOR with each below 16, e.g. 10.0 -- got {v:?}");
                 std::process::exit(2);
             }
-        }
-    }
-    eprintln!(
-        "  announcing AWDL v{}.{}{}",
-        b.version.major,
-        b.version.minor,
-        if version.is_some() { "  (overridden)" } else { "  — what libmosey and OWL send; Apple sends 10.0" },
-    );
-    // Listening as well as transmitting. Everything before this aimed at OUR cycle, whose
-    // phase is decided by when the process started; a cluster already on the air has its
-    // own, and it tells us what it is in every frame. See libawdl::follow.
-    // for_us, not new: a peer naming our address is an outcome to record, not a cluster
-    // to follow. See Cluster::adopters.
-    let mut cluster = libawdl::follow::Cluster::for_us(addr);
-    let mut adopted = false;
-
-    // The data plane shares this loop and this radio. It is not a second process, because
-    // two processes cannot both inject on one phy -- the mt76 answers the second with
-    // EAGAIN and says nothing in dmesg.
-    //
-    // OUTBOUND PACKETS ARE QUEUED, NOT SENT ON ARRIVAL, and that is the whole reason this
-    // had to merge with the beacon rather than run beside it. An AWDL peer listens only
-    // during its availability windows; a data frame sent the moment the kernel hands it
-    // over goes out while the peer is deaf, and the sender sees a successful transmit and
-    // no reply. So the queue drains in the same windows the beacons go out in.
-    let tundev = match datapath {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        Some(name) => match libawdl_hal::tun::Tun::open(name) {
-            Ok(t) => {
-                // Configured here, not printed for the operator to paste. The order
-                // matters and one of the three steps fails silently when done late --
-                // see Tun::configure.
-                match t.configure(addr) {
-                    Ok(a) => eprintln!("  --datapath {name}: up on {a}, IPv6 queued and drained in-window"),
-                    Err(e) => {
-                        eprintln!("  --datapath {name}: opened but NOT configured: {e:?}");
-                        eprintln!("  the interface exists and carries no address, so nothing will flow.");
-                        std::process::exit(1);
-                    }
-                }
-                Some(t)
-            }
-            Err(e) => {
-                eprintln!("{e:?}");
-                std::process::exit(1);
-            }
         },
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        Some(_) => {
-            eprintln!("--datapath is Linux only: it needs /dev/net/tun.");
-            std::process::exit(1);
-        }
-        None => None,
     };
-    // Bounded deliberately. An unbounded queue turns a burst the radio cannot keep up with
-    // into unbounded memory and ever-staler packets; dropping the OLDEST is right for a
-    // link where a late packet is worth less than a fresh one.
-    const OUTBOUND_MAX: usize = 64;
-    /// How many queued packets to drain per window visit. One beacon plus a few data
-    /// frames fits an extended availability window; emptying a full queue into one window
-    /// would overrun it and transmit into the next slot, which is the thing this project
-    /// spent three build cycles learning not to do.
-    const DRAIN_PER_WINDOW: usize = 4;
-    let mut outbound: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
-    let mut tbuf = vec![0u8; 4096];
-    let (mut dp_sent, mut dp_recvd, mut dp_noroute, mut dp_dropped) = (0u64, 0u64, 0u64, 0u64);
-    // Received-frame breakdown by 802.11 type, so a data path that delivers nothing can be
-    // told apart from a radio that only hands up management frames. Cheap, and it answers a
-    // real question: are Apple DATA frames even reaching us, or only their action frames?
-    let (mut rx_mgmt, mut rx_ctrl, mut rx_data) = (0u64, 0u64, 0u64);
-    let mut awdl_data_seq: u16 = 0;
-    let mut d11_data_seq: u16 = 0;
-    if compete {
-        b.metric = libawdl::beacon::METRIC_COMPETE;
-    }
-    // --metric N overrides both. Apple's metrics are NOT fixed: devices have been observed
-    // at 510, 515, 530, 537 and 539 in one room, so a constant compiled in here goes stale
-    // the moment a newer phone walks in. METRIC_COMPETE was calibrated at 510-530 and was
-    // already being outranked by an iPhone at 539 the same evening.
-    if let Some(m) = metric {
-        b.metric = m;
-    }
-    // --metric-floor SECS: announce METRIC_DECLINE (65) for the first SECS, then step to
-    // the real metric. THIS IS WHAT APPLE DOES, and it is not a ramp -- finding 77 caught a
-    // device at 65 for a couple of seconds after restarting its availability-window clock,
-    // then stepping to 533 in one move and holding it. The floor is a claim about being a
-    // credible timing anchor, and a node whose clock just started is not one yet.
-    //
-    // We have always announced one constant metric from our first frame, which no Apple
-    // device ever does. Whether a peer judges us on that is exactly what this flag tests.
-    let target_metric = b.metric;
-    let floor_until = metric_floor.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
-    if let Some(secs) = metric_floor {
-        b.metric = libawdl::beacon::METRIC_DECLINE;
-        eprintln!(
-            "  --metric-floor {}s: announcing {} first, then stepping to {}",
-            secs,
-            libawdl::beacon::METRIC_DECLINE,
-            target_metric,
-        );
-    }
-    if let Some(t) = tenure {
-        // Sets where our election COUNTER starts. It exists to make the counter and the
-        // metric disagree on purpose: OWL orders the election counter-first and this crate
-        // orders it metric-first, and no capture held tests the difference because every
-        // one begins with the devices already synchronised. Advertising a high metric with
-        // a low counter (or the reverse) makes the two rules predict opposite outcomes,
-        // so a peer joining from cold answers the question by which way it goes.
-        // See FINDINGS 42.
-        b.tenure_base = t;
-    }
-    if let Some(w) = windows {
-        // An experimental control. See Beacon::windows.
-        b.windows = Some(w);
-    }
-    if let Some(spec) = garbage {
-        match libawdl::beacon::Garbage::parse(spec) {
+    let garbage = match garbage {
+        None => None,
+        Some(spec) => match libawdl::beacon::Garbage::parse(spec) {
             Some(g) if g.any() => {
-                b.garbage = g;
-                eprintln!("  --garbage {spec}: {}", g.describe());
                 eprintln!(
-                    "    filling measured-constant bytes with 0x{:02x} instead of zero.",
+                    "  --garbage {spec}: {} (filling measured-constant bytes with 0x{:02x})",
+                    g.describe(),
                     libawdl::beacon::GARBAGE_BYTE
                 );
-                eprintln!("    CONFIRM IN THE CAPTURE that our frames carry it: an encoder that");
-                eprintln!("    dropped the change would make this look like a success.");
+                Some(g)
             }
             _ => {
                 eprintln!("--garbage: unknown group in {spec:?}. Use t4, t5, t16, t24, all.");
                 std::process::exit(2);
             }
+        },
+    };
+
+    init_stderr_log();
+    let cfg = libawdl_session::Config {
+        channel,
+        country: *b"QA",
+        psf_per_mif,
+        compete,
+        metric,
+        metric_floor,
+        per_window,
+        windows,
+        follow,
+        tenure,
+        legacy_timing: legacy,
+        version,
+        garbage,
+        datapath: datapath.map(|s| s.to_string()),
+        duration: Some(std::time::Duration::from_secs(secs)),
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let stats = match libawdl_session::run(radio.as_mut(), &cfg, &stop) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("session error: {e:?}");
+            std::process::exit(1);
         }
-    }
-    if legacy {
-        // An experimental control. See Beacon::legacy_timing.
-        b.legacy_timing = true;
-    }
-    // Our epoch. Every timing field in the frame is derived from this one monotonic
-    // reading, which is what makes them agree with each other -- a master's timing has to
-    // be self-consistent, and does not have to agree with anybody else's.
-    let epoch = std::time::Instant::now();
-    // The kernel stamps frames in CLOCK_REALTIME microseconds; the loop thinks in
-    // microseconds since `epoch`. One base captured at the same moment converts between
-    // them. The two clocks drift relative to each other, but over a run of seconds that is
-    // far below the millisecond scale that matters here -- and an NTP step, which is the
-    // one thing that would break it, is visible as a discontinuity rather than as slow rot.
-    let epoch_realtime_us = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0);
-    eprintln!("beaconing as {} on channel {channel} for {secs}s", libawdl::dot11::Mac(addr));
-    eprintln!("  election counter starts at {}", b.tenure_base);
+    };
+
+    eprintln!("\nsent {} MIF, {} PSF, {} failed", stats.sent_mif, stats.sent_psf, stats.failed);
     eprintln!(
-        "  metric {} — {}",
-        b.metric,
-        if b.metric >= libawdl::beacon::METRIC_COMPETE {
-            "competing: above the values Apple devices were seen advertising"
-        } else {
-            "declining the election"
-        }
+        "  injection latency: EWMA {} us, peak {} us (this is what tx_delay now carries; 0 was the old, impossible value)",
+        stats.tx_latency_est, stats.tx_latency_seen
     );
-    eprintln!("  MIF {} bytes, PSF {} bytes, 1 MIF per {psf_per_mif} PSF", b.mif(0).len(), b.psf(0).len());
-    if legacy {
-        eprintln!("  --legacy-timing: aw_remaining pinned to 0. EXPERIMENTAL CONTROL ONLY.");
-    }
-    if follow {
-        eprintln!("  --follow: listening for a cluster and adopting its window phase");
-    } else {
-        eprintln!("  not synchronised to any peer; self-consistent from a monotonic clock");
-    }
-
-    // Transmit inside the windows we ADVERTISE, rather than on a fixed period.
-    //
-    // The old loop slept exactly one cycle between frames, which pinned us to whatever
-    // phase the process started on -- measured on the air as 3 of 16 slots, none of them
-    // the ones we announce. `awdl phase` is the check.
-    eprintln!("  transmitting in advertised slots {:?} of 16, {per_window} frame(s) per window",
-        b.advertised_slots());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    let (mut sent_mif, mut sent_psf, mut failed) = (0u64, 0u64, 0u64);
-    let mut last_tx_us = 0u64;
-    let mut n = 0u32;
-    let mut first_error: Option<String> = None;
-    let mut stepped = false;
-    // Running estimate of injection latency, seeded at a real device's median tx_delay of
-    // 100 us and refined by timing each tx() syscall. Feeds phy_tx_time. Finding 81.
-    let mut tx_latency_est: u64 = 100;
-    let mut tx_latency_seen: u64 = 0;
-
-    while std::time::Instant::now() < deadline {
-        // The step, once, at the boundary. Logged so the run says when it happened -- an
-        // outcome that changes at this instant is the whole point of the flag.
-        if let Some(t) = floor_until {
-            if !stepped && std::time::Instant::now() >= t {
-                b.metric = target_metric;
-                stepped = true;
-                eprintln!("  metric floor lifted: now announcing {target_metric}");
-            }
-        }
-        // LISTEN FIRST. A frame from the cluster carries aw_counter and aw_remaining, which
-        // place a slot boundary on our own clock -- so a short receive before each decision
-        // is what turns "our phase" into "theirs". The timeout is deliberately small: this
-        // is a poll between transmissions, not a receive loop.
-        // ALWAYS LISTEN. Following is about whose phase we AIM at; listening is how we
-        // learn anything at all, including the one thing every election experiment here is
-        // trying to measure.
-        //
-        // This block was gated behind --follow, and a run without it reported "adopted by 0
-        // peer(s)" while the capture of the same run showed two Apple devices naming us
-        // master in 1,223 frames. The counter was not wrong, it was blind — which is worse,
-        // because a zero reads as a measurement.
-        {
-            // A SHORT poll, and the reason is arithmetic. We stamp a frame when `rx`
-            // returns, not when it reached the antenna, so the poll interval is injected
-            // straight into every anchor as quantisation. At 20 ms against a 65 ms slot
-            // that was most of a slot of self-inflicted jitter, and the measured spread
-            // went from 3.8-12.4 ms offline to 65 ms live.
-            //
-            // The real fix is SO_TIMESTAMP -- ask the kernel when the frame arrived rather
-            // than asking the clock when we noticed. This is the cheap approximation.
-            // DRAIN, do not take one frame and move on.
-            //
-            // `arrived_us` is stamped when `rx` returns, so it measures when we noticed,
-            // not when the frame landed. Reading a single frame per pass is fine in a
-            // quiet room and wrong in a busy one: a capture here counted ~270 frames a
-            // second while the loop iterates every few milliseconds, so any hiccup leaves
-            // a backlog in the socket buffer, and every frame behind it gets stamped late
-            // by however long the queue is. That turns into spread, which reads as drift,
-            // which reads as "the estimate degraded" -- measured at 248 ms and 285 ms
-            // against a 65 ms slot, while the same runs briefly adopted at 28 ms.
-            //
-            // BOUNDED BY THE SLACK BEFORE THE NEXT WINDOW, and that bound is not optional.
-            //
-            // The first version drained unconditionally at the top of every pass. In a room
-            // sending 270 frames a second there is always another frame, so the loop spent
-            // its time receiving and almost never reached the transmit branch: a 75-second
-            // run sent SEVEN frames where a 30-second run had previously sent 86. The clock
-            // was excellent and there was nothing on the air to hear it.
-            //
-            // Receiving is what makes the next transmission well-aimed; it is not the job.
-            // So the transmit deadline is computed first and the drain gets whatever is
-            // left, which is most of the time and none of it when a window is imminent.
-            let slack_us = {
-                let now_us = epoch.elapsed().as_micros() as u64;
-                match cluster.us_until_master_window(now_us) {
-                    Some(w) if adopted => w,
-                    _ => b.us_until_next_advertised_window(now_us),
-                }
-            };
-            // Under 4 ms to a window: go and transmit -- but still take whatever is
-            // already queued, because a non-blocking read of a waiting frame costs
-            // microseconds and reading nothing costs the experiment its result.
-            //
-            // `max_drain = 0` here meant we did not even ATTEMPT a read. That is not a
-            // small bias, and it is worst precisely when the room is interesting: once a
-            // competing cluster exists we adopt its clock, `slack_us` then measures the
-            // time to THAT master's window, and a master with frequent slots keeps it
-            // under 4 ms nearly always. Run E3b counted 14 adoptions where the capture of
-            // the same run held 2,123 from three peers -- two orders of magnitude, and in
-            // the direction that reads as "the peers ignored us". Runs E1 and E2 agreed
-            // with their captures to within one frame only because every peer named US,
-            // so `observe` returned early, no master was ever set, and this branch was
-            // never taken. Finding 70.
-            let budget_ms = if slack_us < 4_000 { 0 } else { 2 };
-            let max_drain = if slack_us < 4_000 { 4 } else { 32 };
-
-            let mut drained = 0;
-            while drained < max_drain {
-            if let Ok(Some(rx)) = radio.rx(if drained == 0 { budget_ms } else { 0 }) {
-                drained += 1;
-                // THE KERNEL'S ARRIVAL TIME, not ours. Reading the clock here measures
-                // when we got round to this frame, so a backlog in the socket buffer is
-                // added to every frame behind it -- which showed up as a cluster-clock
-                // spread oscillating between 9 ms and 105 ms purely with how busy the
-                // transmit side was. Falling back to our own clock is honest but degraded.
-                let now_us = rx
-                    .host_us
-                    .map(|t| t.saturating_sub(epoch_realtime_us))
-                    .unwrap_or_else(|| epoch.elapsed().as_micros() as u64);
-                // Count what the radio actually hands up, by 802.11 type. TYPE 2 is Data.
-                if let Some(fc) = Radiotap::parse(&rx.bytes)
-                    .and_then(|rt| rt.payload(&rx.bytes))
-                    .and_then(libawdl::dot11::FrameControl::parse)
-                {
-                    match fc.frame_type {
-                        2 => rx_data += 1,
-                        1 => rx_ctrl += 1,
-                        _ => rx_mgmt += 1,
-                    }
-                }
-                // A data frame is not an action frame, so it never reaches parse_awdl and
-                // would otherwise be silently discarded by a loop that only looks for
-                // election state.
-                if tundev.is_some() {
-                    deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd);
-                }
-                if let Some((src, sync, elect)) = parse_awdl(&rx.bytes) {
-                    // Never synchronise to ourselves. Monitor mode hands our own
-                    // transmissions straight back, and adopting them would lock the
-                    // estimate to the phase we are trying to replace.
-                    if src != addr {
-                        cluster.observe(now_us, src, &sync, elect.as_ref());
-                    }
-                }
-            } else {
-                break;
-            }
-            }
-            // Re-evaluated every pass, not latched. An earlier version set this once and
-            // kept aiming with an estimate that had since degraded from 0 to 156 ms of
-            // spread -- worse than not following at all, because it was confident.
-            let usable = cluster.clock.is_usable();
-            if usable != adopted {
-                adopted = usable;
-                if follow {
-                eprintln!(
-                    "  {} cluster clock: master {:?}, slots {:?}, spread {:?} us",
-                    if usable { "ADOPTED" } else { "DROPPED (estimate degraded)" },
-                    cluster.master.map(libawdl::dot11::Mac),
-                    cluster.master_slots,
-                    cluster.clock.spread_us()
-                );
-                }
-            }
-        }
-
-        // Only transmit INSIDE a window we advertise.
-        //
-        // The first version of this loop sent unconditionally at the top and then waited,
-        // which fired in slot 2, slept one window, and fired again in slot 3 -- a slot we
-        // do not advertise. Half of every run's frames were in the wrong windows, visible
-        // in `awdl phase` as adjacent pairs, and the frame rate was double what it should
-        // have been. Waiting FIRST is the whole fix.
-        let now_us = epoch.elapsed().as_micros() as u64;
-        // Aim at a window the CLUSTER attends when we know where those are; fall back to
-        // our own advertised schedule when we do not. `us_until_master_window` already
-        // targets slot centres, which is the only sane place to aim.
-        let wait = match cluster.us_until_master_window(now_us) {
-            Some(w) if follow && adopted => w,
-            _ => b.us_until_next_advertised_window(now_us),
-        };
-        if wait > 0 {
-            // Sleep in short hops so reception continues while we wait, rather than going
-            // deaf for most of a cycle.
-            // Hop in short steps for the same reason: a long sleep is a long deaf spell,
-            // and the next frame's timestamp is only as good as how promptly we read it.
-            //
-            // The gap between windows is also when the kernel's packets are collected. The
-            // tun is read here and the frames are BUILT here, but not sent -- see the queue
-            // note above.
-            if let Some(t) = tundev.as_ref() {
-                enqueue_from_tun(
-                    t, addr, &mut tbuf, &mut outbound, OUTBOUND_MAX,
-                    &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
-                );
-            }
-            let hop = wait.min(3_000);
-            std::thread::sleep(std::time::Duration::from_micros(hop));
-            continue;
-        }
-        let now_us = epoch.elapsed().as_micros() as u64;
-        // One frame per visit to a window. Without this the centre-aimed target stays
-        // satisfied for the whole window and the loop spins inside it.
-        if follow && last_tx_us > 0 && now_us.saturating_sub(last_tx_us) < u64::from(libawdl::beacon::SLOT_US) / 2 {
-            std::thread::sleep(std::time::Duration::from_micros(3_000));
-            continue;
-        }
-        // Advertise the best master we know (finding 80/89): claim self while our metric is
-        // the highest on the air, but once we have adopted a peer whose metric strictly
-        // beats ours, name IT as master and place ourselves one hop out with the correct
-        // distance and relayed counter — rather than lying about being a distance-0 root.
-        // The compete experiments are unaffected: with target_metric high (e.g. 600) no
-        // observed peer beats it, so this stays None and we claim self exactly as before.
-        b.follow = match (cluster.master, cluster.master_metric, cluster.root, cluster.follow_distance) {
-            (Some(m), Some(mm), Some(root), Some(dist)) if m != addr && mm > target_metric => {
-                Some(libawdl::beacon::FollowAdvert {
-                    root,
-                    parent: cluster.relay_parent.unwrap_or(root),
-                    distance: dist,
-                    master_metric: mm,
-                    master_counter: cluster.master_counter.unwrap_or(0),
-                })
-            }
-            _ => None,
-        };
-        let is_mif = psf_per_mif == 0 || n % (psf_per_mif + 1) == 0;
-        // target_tx_time is stamped here, at build, from the same clock the sync params
-        // (aw_counter, aw_remaining) use — so the schedule the frame advertises and the
-        // time it claims to be sent agree. phy_tx_time is stamped just below, as late as we
-        // can, so tx_delay = phy - target reflects our real injection latency rather than
-        // the impossible literal zero for_tx would leave. Finding 81.
-        let mut frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
-        let phy_us = now_us + tx_latency_est;
-        libawdl::action::stamp_phy_tx_time(&mut frame, libawdl::dot11::MGMT_HEADER_LEN, phy_us as u32);
-        let tx_start = std::time::Instant::now();
-        let tx_result = radio.tx(&frame, TxParams::default());
-        // The syscall's duration is a real, measured lower bound on how long the frame took
-        // to leave — most of the mt76 USB path is async past this, but it is honest and
-        // non-zero, and an EWMA of it is what the NEXT frame reports as its tx_delay.
-        let tx_dur = tx_start.elapsed().as_micros() as u64;
-        tx_latency_est = (tx_latency_est * 7 + tx_dur) / 8;
-        tx_latency_seen = tx_latency_seen.max(tx_dur);
-        match tx_result {
-            Ok(()) => {
-                if is_mif { sent_mif += 1 } else { sent_psf += 1 }
-            }
-            Err(e) => {
-                failed += 1;
-                if first_error.is_none() {
-                    first_error = Some(format!("{e:?}"));
-                }
-            }
-        }
-        // IN-WINDOW DRAIN. The beacon has just gone out, so we are inside a slot the
-        // cluster attends and the peer is listening. This is the only moment a data frame
-        // is worth sending.
-        for _ in 0..DRAIN_PER_WINDOW {
-            let Some(f) = outbound.pop_front() else { break };
-            match radio.tx(&f, TxParams::default()) {
-                Ok(()) => dp_sent += 1,
-                Err(e) => {
-                    failed += 1;
-                    if first_error.is_none() {
-                        first_error = Some(format!("{e:?}"));
-                    }
-                }
-            }
-        }
-
-        b.advance();
-        n += 1;
-        last_tx_us = epoch.elapsed().as_micros() as u64;
-        // Pace by the interval we ADVERTISE. `action_frame_period` is the PSF interval --
-        // OWL sets the field from its own psf_interval and paces by it, and every Apple
-        // frame carries 110 TU. Emitting the number and sending at some other rate
-        // misdescribes us to every receiver, which this loop did until FINDINGS 42.
-        //
-        // `per_window` still divides it, as an experimental control only.
-        //
-        // This knob exists as an EXPERIMENTAL CONTROL, not a tuning parameter. Trial E
-        // won an election at 22.5 frames/s while trial F lost one at 11.2 with the same
-        // alignment and metric, so rate and window-count were confounded. Holding the
-        // windows correct and raising only the rate is what separates them.
-        std::thread::sleep(std::time::Duration::from_micros(
-            b.psf_interval_us() / u64::from(per_window.max(1)),
-        ));
-    }
-
-    eprintln!("\nsent {sent_mif} MIF, {sent_psf} PSF, {failed} failed");
-    eprintln!(
-        "  injection latency: EWMA {tx_latency_est} us, peak {tx_latency_seen} us \
-         (this is what tx_delay now carries; 0 was the old, impossible value)"
-    );
-    // Printed unconditionally, including the zero. It is the outcome measure of every
-    // election experiment this project runs, and a missing line reads as "not looked at".
     eprintln!(
         "adopted by {} peer(s), {} frame(s) naming us master{}",
-        cluster.adopters.len(),
-        cluster.adoption_frames(),
-        if cluster.adopters.is_empty() {
+        stats.adopters,
+        stats.adoption_frames,
+        if stats.adopter_list.is_empty() {
             String::new()
         } else {
             format!(
                 ": {}",
-                cluster
-                    .adopters
+                stats
+                    .adopter_list
                     .iter()
                     .map(|(m, n)| format!("{} x{n}", libawdl::dot11::Mac(*m)))
                     .collect::<Vec<_>>()
@@ -1811,36 +1401,51 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             )
         }
     );
-    if tundev.is_some() {
+    if stats.datapath {
         eprintln!(
-            "datapath: {dp_sent} sent in-window, {dp_recvd} delivered, {dp_noroute} unroutable, \
-             {dp_dropped} dropped (queue full), {} still queued",
-            outbound.len()
+            "datapath: {} sent in-window, {} delivered, {} unroutable, {} dropped (queue full), {} still queued",
+            stats.dp_sent, stats.dp_recvd, stats.dp_noroute, stats.dp_dropped, stats.outbound_len
         );
     }
-    eprintln!("  rx frames by 802.11 type: {rx_mgmt} mgmt, {rx_ctrl} ctrl, {rx_data} data");
+    eprintln!(
+        "  rx frames by 802.11 type: {} mgmt, {} ctrl, {} data",
+        stats.rx_mgmt, stats.rx_ctrl, stats.rx_data
+    );
     if follow {
         eprintln!(
-            "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, \
-             {} master change(s), adopted={adopted}",
-            cluster.clock.observations(),
-            cluster.master.map(libawdl::dot11::Mac),
-            cluster.clock.phase_us(),
-            cluster.clock.spread_us(),
-            cluster.master_changes
+            "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, {} master change(s), adopted={}",
+            stats.anchors,
+            stats.master.map(libawdl::dot11::Mac),
+            stats.phase_us,
+            stats.spread_us,
+            stats.master_changes,
+            stats.adopted
         );
     }
-    if let Some(e) = first_error {
+    if let Some(e) = stats.first_error {
         eprintln!("first error: {e}");
         eprintln!("EAGAIN here means another vif on the same phy is up, not a full buffer.");
     }
-    let end_us = epoch.elapsed().as_micros() as u64;
-    eprintln!(
-        "tx_counter {}, aw_counter {}, tenure {}",
-        b.sent,
-        Beacon::aws_at(end_us) & 0xffff,
-        libawdl::election::ElectionParamsV2::counter_after(b.tenure_base, Beacon::aws_at(end_us))
-    );
+}
+
+/// A minimal stderr logger so `libawdl-session`'s `log` output shows as it used to.
+fn init_stderr_log() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        struct L;
+        impl log::Log for L {
+            fn enabled(&self, _: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, r: &log::Record) {
+                eprintln!("  {}", r.args());
+            }
+            fn flush(&self) {}
+        }
+        let _ = log::set_boxed_logger(Box::new(L));
+        log::set_max_level(log::LevelFilter::Info);
+    });
 }
 
 /// Where in the AWDL cycle does each node actually transmit?
@@ -2035,33 +1640,6 @@ fn follow<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
         }
         _ => println!("not enough anchors for a phase"),
     }
-}
-
-/// Pull the two TLVs the clock needs out of a received frame.
-///
-/// Returns the sender as well, because a sighting is only meaningful attributed — and
-/// because our own frames come straight back on a monitor interface and must be dropped.
-fn parse_awdl(
-    bytes: &[u8],
-) -> Option<([u8; 6], libawdl::sync::SyncParams, Option<libawdl::election::ElectionParamsV2>)> {
-    use libawdl::{action::ActionFrame, dot11::Dot11, election::ElectionParamsV2, radiotap::Radiotap,
-                  sync::SyncParams, tlv};
-    let rt = Radiotap::parse(bytes)?;
-    let body = rt.payload(bytes)?;
-    let d = Dot11::parse(body)?;
-    if !d.is_action() {
-        return None;
-    }
-    let af = ActionFrame::parse(body.get(d.body_offset..)?)?;
-    let (mut sync, mut elect) = (None, None);
-    for t in tlv::Tlvs::new(af.tagged) {
-        match t.tag {
-            4 => sync = SyncParams::parse(t.value),
-            24 => elect = ElectionParamsV2::parse(t.value),
-            _ => {}
-        }
-    }
-    Some((d.src.0, sync?, elect))
 }
 
 /// Which bytes of a tag ever change, measured over the whole corpus.
@@ -2922,96 +2500,6 @@ fn datapath(_args: &[String]) {
 
 /// Collect whatever the kernel has for us and build frames, WITHOUT sending them.
 ///
-/// Reading is non-blocking by construction: this is only called from the gap between
-/// availability windows, and it takes at most a handful of packets per visit so that a
-/// busy interface cannot hold the loop past the next window. Missing a window is worse
-/// than a packet waiting one more cycle.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-#[allow(clippy::too_many_arguments)]
-fn enqueue_from_tun(
-    tun: &libawdl_hal::tun::Tun,
-    our_mac: [u8; 6],
-    buf: &mut [u8],
-    queue: &mut std::collections::VecDeque<Vec<u8>>,
-    max: usize,
-    d11_seq: &mut u16,
-    awdl_seq: &mut u16,
-    unroutable: &mut u64,
-    dropped: &mut u64,
-) {
-    use libawdl::data::{dst_mac_for_ipv6, Encap, ETHERTYPE_IPV6};
-    use libawdl_hal::poll::wait_readable;
-    use std::os::fd::AsRawFd;
-
-    for _ in 0..4 {
-        // Polled with a zero timeout rather than read blindly: a TUN read with nothing
-        // waiting blocks, and blocking here means going deaf and missing the window.
-        match wait_readable(tun.as_raw_fd(), tun.as_raw_fd(), 0) {
-            Ok(r) if r.first => {}
-            _ => return,
-        }
-        let n = match tun.read(buf) {
-            Ok(n) => n,
-            Err(_) => return,
-        };
-        let pkt = &buf[..n];
-        let Some(dst) = dst_mac_for_ipv6(pkt) else {
-            *unroutable += 1;
-            continue;
-        };
-        let frame =
-            Encap::unicast(our_mac, dst).frame(*d11_seq, *awdl_seq, ETHERTYPE_IPV6, pkt);
-        *d11_seq = (*d11_seq + 1) & 0x0fff;
-        *awdl_seq = awdl_seq.wrapping_add(1);
-        if queue.len() >= max {
-            // Oldest first. On a link where a packet may wait a whole cycle, the stale end
-            // of the queue is the part worth losing.
-            queue.pop_front();
-            *dropped += 1;
-        }
-        queue.push_back(frame);
-    }
-}
-
-/// Hand a received AWDL data frame to the kernel, if it is one and if it is ours.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn deliver_data_frame(
-    bytes: &[u8],
-    our_mac: [u8; 6],
-    tun: Option<&libawdl_hal::tun::Tun>,
-    delivered: &mut u64,
-) {
-    use libawdl::data::{decapsulate, is_ipv6_multicast};
-
-    let Some(tun) = tun else { return };
-    let Some(d) = Radiotap::parse(bytes).and_then(|rt| rt.payload(bytes)).and_then(decapsulate)
-    else {
-        return;
-    };
-    // Ours, or a group we are in. Our own frames are excluded for the reason in
-    // `datapath`: whether a monitor hears its own injections is adapter-dependent, and a
-    // feedback loop is much worse than a redundant comparison.
-    if d.src == our_mac || (d.dst != our_mac && !is_ipv6_multicast(d.dst)) {
-        return;
-    }
-    if tun.write(d.payload).is_ok() {
-        *delivered += 1;
-    }
-}
-
-// Stubs so the beacon loop compiles on a development machine, where there is no
-// /dev/net/tun and --datapath exits before reaching either of these.
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-#[allow(clippy::too_many_arguments)]
-fn enqueue_from_tun(
-    _t: &(), _m: [u8; 6], _b: &mut [u8],
-    _q: &mut std::collections::VecDeque<Vec<u8>>, _max: usize,
-    _d: &mut u16, _a: &mut u16, _u: &mut u64, _dr: &mut u64,
-) {
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn deliver_data_frame(_bytes: &[u8], _our_mac: [u8; 6], _tun: Option<&()>, _delivered: &mut u64) {}
 
 #[cfg(test)]
 mod tests {

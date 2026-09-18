@@ -1,0 +1,11 @@
+[package]
+name = "libawdl-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The held AWDL session loop — beacon, election, sync and the data path — over a Radio."
+
+[dependencies]
+libawdl = { path = "../libawdl" }
+libawdl-hal = { path = "../libawdl-hal" }
+log = "0.4"

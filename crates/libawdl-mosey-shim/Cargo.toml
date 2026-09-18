@@ -1,0 +1,17 @@
+[package]
+name = "libawdl-mosey-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A drop-in libmosey_daemon_ffi ABI backed by libawdl + the wonder backend."
+
+[lib]
+# tarishd dlopens this by soname; it must be a C dynamic library exposing the mosey_* symbols.
+name = "mosey_daemon_ffi"
+crate-type = ["cdylib"]
+
+[dependencies]
+libawdl = { path = "../libawdl" }
+libawdl-hal = { path = "../libawdl-hal" }
+libawdl-session = { path = "../libawdl-session" }
+log = "0.4"
