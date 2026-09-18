@@ -5426,6 +5426,49 @@ master's clock beyond the existing `--follow` phase-aiming; genuine schedule syn
 larger, separate piece (the finding-83 "credible synced member" path). And per finding 88 it
 will not change adoption on the mt76-USB path, where injection jitter is the ceiling — this is
 correctness, and it is the right shape for the eventual wonder backend where the timing lands.
+## 90. ★★★ libawdl injects AWDL frames through wonder — our own code, TX-confirmed on blazer
+
+The Phase 2 gate, passed for real. `awdl-inject` (our thin aarch64 binary: `libawdl` frames,
+`libawdl-hal` AF_PACKET TX, no pcap) transmitted AWDL frames through the Pixel's `wonder`
+radio, confirmed by the interface TX counter — not by absence of error.
+
+### The false positive, caught
+
+First attempt injected on a freshly-added monitor (`injmon`) on the wonder wiphy during a
+`moseyprobe` session. `awdl-inject` reported **"sent 20, failed 0"** — and `injmon`'s TX
+counter was **0 packets.** The `sendto()` calls succeeded while the driver silently dropped
+every frame. This is the project's canonical trap (a success that isn't); the TX counter is
+what exposed it. A second, non-primary monitor on wonder accepts injected frames and airs
+none.
+
+### The real pass
+
+`wonder0` — the monitor interface libmosey itself created and transmits through (it had TX
+662 packets from the live session) — **does** transmit our frames. Injecting 20 frames on
+`wonder0` moved its TX counter 662 -> 682, a delta of exactly 20. Our frames aired.
+
+So injection through wonder works, but only through the driver's **TX-capable** monitor —
+the active one libmosey set up — not an arbitrary added vif. mac80211 evidently routes
+transmit through the primary monitor and treats a second as receive-only.
+
+### What this establishes, and what it doesn't
+
+- **Established:** our cross-compiled Rust code drives frame TX through wonder.ko on the real
+  target. This is libawdl talking to wonder at the frame level — the substance of "replace
+  libmosey," beyond the single vendor command of finding 87.
+- **Not yet:** we injected *alongside* a live libmosey session (moseyprobe) that had already
+  brought the RF up and created the TX-capable `wonder0`. A standalone libawdl still has to do
+  what libmosey does at bring-up: activate wonder's RF and create a monitor with the flags
+  that make it transmit. We have not replicated that; moseyprobe (libmosey) did it for us.
+- The delta was exactly 20 with no libmosey frames interleaved in the window, so the count is
+  clean, but a second-device capture would be the belt-and-braces confirmation.
+
+### The wonder-backend shape this implies
+
+A libawdl wonder backend must either (a) coexist — inject on the `wonder0` libmosey creates,
+as we just did — or (b) replace libmosey: bring the RF up and create the TX-capable monitor
+itself. The bring-up sequence is the remaining unknown (it is what libmosey's `mosey_start`
+does internally); tracing it is the next thread. Frame TX itself is no longer in question.
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
