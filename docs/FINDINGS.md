@@ -5859,10 +5859,22 @@ better.
 
 The data path is real on wonder: the TUN, the encapsulation, the in-window drain, and the
 decapsulate-to-netdev RX all work end to end against a live Apple device — the first IP our
-stack has carried to and from Apple hardware with no libmosey. What remains for a *usable* data
-path is engineering, not unknowns: send our own mDNS (discovery both ways), and the `awdl0`
-routing rule for unicast so a TCP/TLS connection — the thing AirDrop and Quick Share actually
-run over — can be established. Then the libmosey-ABI shim, and Tarish rides our stack.
+stack has carried to and from Apple hardware with no libmosey.
+
+**libawdl does not need to implement mDNS, TLS or the transfer protocols — the Tarish daemon
+already does all of that** (`tarishsharingd` / `libtarish_protocol`, done and tested over
+`mosey0`). libawdl's only job is to present a working netdev, the equivalent of `mosey0`. So
+what remains for a *usable* data path is engineering, not unknowns, and it is narrow:
+
+1. Make `awdl0` fully routable — the Android `ip rule` for its fwmark table so **unicast**
+   routes (the documented trap in `tun.rs`), so a TCP/TLS connection can be established over it.
+2. The libmosey-ABI shim, so `tarishd` (which resolves its mosey lib via `TARISH_MOSEY_LIB`)
+   brings up wonder + our libawdl session + `awdl0` instead of Google's library.
+
+Then the end-to-end test is not "send mDNS from libawdl" — it is *point the daemon at `awdl0`
+and watch AirDrop and Quick Share work*, on the daemon's existing, proven stack. The sporadic
+multicast reception above stops mattering the moment the daemon is driving discovery over the
+interface the way it already does over `mosey0`.
 
 ## Open, not yet investigated
 
