@@ -5675,6 +5675,57 @@ symlink gives one, that file gives the other. A backend written against `mt76` (
 - subcmd `0x08` (finding 92's unidentified empty command) was replicated and the bring-up
   succeeds with it; it is still not decoded, but it is not in the way.
 
+## 94. ★★★ Real Apple devices adopt us as master over our own wonder backend — bidirectional interop
+
+The whole stack, end to end, against real hardware. `libawdl`'s beacon/election loop, running
+on the `libawdl-hal::wonder` backend (findings 91–93), with **no libmosey anywhere in the
+path**, held a session that real Apple devices discovered, believed, and answered.
+
+### The run
+
+`awdl beacon wonder0 wonder0 <ch> 22 --wonder --compete` — standalone wonder bring-up, then
+the held session — on the two 5 GHz AWDL social channels, with an iPhone's AirDrop sheet open
+nearby:
+
+```
+channel 44 : sent 21 MIF / 42 PSF, rx_packets 0 -> 0,   adopted by 0 peers
+channel 149: sent 21 MIF / 42 PSF, rx_packets 0 -> 290, adopted by 2 peers,
+             222 frames naming us master: 72:01:e2:fd:9d:57 x175, 8e:f1:4f:8d:f1:75 x47
+```
+
+### What each half proves
+
+- **TX believed.** Two distinct Apple peers received our beacons, and because our advertised
+  metric (530) beat theirs, they **adopted us as master** and began advertising us as their
+  master — 222 frames across the two, naming our MAC (`96:f9:8b:2f:d1:3a`). That is not an
+  echo of our own frames: these are frames *from other MACs* whose election TLV lists us as
+  the master. Apple's own election logic acted on what our code put on the air.
+- **RX works through wonder — now confirmed.** `rx_packets 0 -> 290`. Findings 90–93 proved
+  TX through `wonder0` but left RX unverified; this closes it. wonder delivers received frames
+  to our `AF_PACKET` monitor socket, our radiotap parser reads them, and `Cluster::observe`
+  parses the election TLVs correctly enough to detect adoption. The `SET_FILTER` we set at
+  bring-up (AWDL BSSID only) is why channel 44 stayed at 0 and 149 carried only AWDL — it does
+  exactly what it should.
+- **The channel split is the peers' location, not a defect.** The Apple devices were on 149;
+  44 was empty. We hold one channel at a time (this loop does not hop), so we see a peer only
+  when we share its channel — expected, and the reason 149 lit up and 44 did not.
+
+### What this establishes, and the honest boundary
+
+- **Established:** discovery + election interop with real Apple devices, on a fully open stack
+  — our protocol engine, our radio backend, our netlink bring-up, our frame parser. The thing
+  the AWDL-replacement track set out to prove — that libmosey can be replaced — is proven at
+  the level of *a real Apple peer cannot tell our master claim from Apple's own and acts on
+  it.*
+- **Not yet, and not claimed here:** this is election-level adoption, not a completed time
+  **sync**, not a data-path association, and not a file transfer. The peers named us master;
+  we have not yet verified we track their TSF, hold a common channel sequence, or move IP
+  traffic over `mosey0`/`awdl0` to them. Those are the next layers, and each is its own test —
+  the same discipline as findings 86→88: adoption is strong evidence, not the whole session.
+- Two peers from one open iPhone sheet is consistent with it advertising more than one address
+  or with a second Apple device in range; we did not distinguish them, and it does not matter
+  to the result.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
