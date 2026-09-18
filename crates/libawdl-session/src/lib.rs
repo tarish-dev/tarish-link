@@ -34,6 +34,11 @@ pub struct Config {
     pub windows: Option<usize>,
     /// Aim transmits at the cluster's windows once its clock is usable.
     pub follow: bool,
+    /// Follow the master's channel sequence: retune the radio to each master window's channel
+    /// so our frames land on the channel the peer attends, not just at the right time. Needs
+    /// `follow`; without it a multi-channel cluster (e.g. [6, 149]) is only intermittently
+    /// reachable — see finding 99. The radio backend must support live `set_channel`.
+    pub follow_channels: bool,
     pub tenure: Option<u32>,
     pub legacy_timing: bool,
     pub version: Option<(u8, u8)>,
@@ -57,6 +62,7 @@ impl Config {
             per_window: 1,
             windows: None,
             follow: false,
+            follow_channels: false,
             tenure: None,
             legacy_timing: false,
             version: None,
@@ -93,6 +99,10 @@ pub struct Stats {
     pub spread_us: Option<u64>,
     pub master_changes: u32,
     pub adopted: bool,
+    /// How many times we retuned the radio to follow the master's channel sequence.
+    pub hops: u64,
+    /// How many retune attempts the radio rejected.
+    pub hop_fail: u64,
     pub first_error: Option<String>,
 }
 
@@ -179,6 +189,12 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     // Injection-latency estimate, seeded at a real device's median and refined per tx().
     let mut tx_latency_est: u64 = 100;
     let mut tx_latency_seen: u64 = 0;
+    // The channel the radio is currently tuned to. We only retune on a change, so
+    // channel-following costs one ~0.6 ms set_channel per slot transition (finding 99), not
+    // one per loop pass.
+    let mut current_channel = cfg.channel;
+    let mut hops = 0u64;
+    let mut hop_fail = 0u64;
 
     while !stop.load(Ordering::Relaxed) {
         if let Some(dl) = deadline {
@@ -227,10 +243,18 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     if tundev.is_some() {
                         deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd);
                     }
-                    if let Some((src, sync, elect)) = parse_awdl(&rx.bytes) {
+                    if let Some((src, sync, elect, chanseq)) = parse_awdl(&rx.bytes) {
                         // Never synchronise to our own transmissions handed back by the monitor.
                         if src != addr {
                             cluster.observe(now_us, src, &sync, elect.as_ref());
+                            // Prefer the OpClass channel map (tag 18) for the master's schedule:
+                            // the Legacy one in Sync Params encodes a 40 MHz centre we cannot
+                            // tune to (finding 99). Only the master's own sequence counts.
+                            if cluster.master == Some(src) {
+                                if let Some(cs) = chanseq {
+                                    cluster.set_master_channels(&cs);
+                                }
+                            }
                         }
                     }
                 } else {
@@ -252,11 +276,41 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             }
         }
 
-        // Transmit only INSIDE a window we advertise. Wait first.
+        // Transmit only INSIDE a window we advertise. Wait first — and if we are following the
+        // cluster's channel sequence, retune to the channel of the window we are heading for,
+        // so both this LISTEN's successor and the transmit below land on the channel the peer
+        // actually attends. The switch is ~0.6 ms (finding 99), done once per slot transition.
         let now_us = epoch.elapsed().as_micros() as u64;
-        let wait = match cluster.us_until_master_window(now_us) {
-            Some(w) if cfg.follow && adopted => w,
-            _ => b.us_until_next_advertised_window(now_us),
+        let wait = if cfg.follow && adopted {
+            if cfg.follow_channels {
+                if let Some((w, _slot, ch)) = cluster.next_master_window(now_us) {
+                    if ch != current_channel {
+                        match radio.set_channel(ch) {
+                            Ok(()) => {
+                                log::debug!("hop ch{current_channel} -> ch{ch} (slot {_slot})");
+                                current_channel = ch;
+                                hops += 1;
+                            }
+                            Err(e) => {
+                                hop_fail += 1;
+                                log::warn!("hop ch{current_channel} -> ch{ch} (slot {_slot}) failed: {e:?}");
+                                if first_error.is_none() {
+                                    first_error = Some(format!("set_channel {ch}: {e:?}"));
+                                }
+                            }
+                        }
+                    }
+                    w
+                } else {
+                    b.us_until_next_advertised_window(now_us)
+                }
+            } else {
+                cluster
+                    .us_until_master_window(now_us)
+                    .unwrap_or_else(|| b.us_until_next_advertised_window(now_us))
+            }
+        } else {
+            b.us_until_next_advertised_window(now_us)
         };
         if wait > 0 {
             // The gap between windows is when the kernel's packets are collected: read the
@@ -365,6 +419,8 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         spread_us: cluster.clock.spread_us(),
         master_changes: cluster.master_changes,
         adopted,
+        hops,
+        hop_fail,
         first_error,
     })
 }
@@ -376,12 +432,21 @@ fn frame_type(bytes: &[u8]) -> Option<u8> {
     libawdl::dot11::FrameControl::parse(body).map(|fc| fc.frame_type)
 }
 
-/// Parse an AWDL action frame into (src, sync params, election v2).
+/// Parse an AWDL action frame into (src, sync params, election v2, OpClass channel sequence).
+///
+/// The channel sequence is the standalone tag 18 (OpClass), kept separate from the Legacy one
+/// inside Sync Params: tag 18 carries the primary 20 MHz channel we can actually tune to,
+/// where the Legacy channel byte is a 40 MHz centre (finding 99).
 fn parse_awdl(
     bytes: &[u8],
-) -> Option<([u8; 6], libawdl::sync::SyncParams, Option<libawdl::election::ElectionParamsV2>)> {
+) -> Option<(
+    [u8; 6],
+    libawdl::sync::SyncParams,
+    Option<libawdl::election::ElectionParamsV2>,
+    Option<libawdl::sync::ChannelSequence>,
+)> {
     use libawdl::{action::ActionFrame, dot11::Dot11, election::ElectionParamsV2, radiotap::Radiotap,
-                  sync::SyncParams, tlv};
+                  sync::{ChannelSequence, SyncParams}, tlv};
     let rt = Radiotap::parse(bytes)?;
     let body = rt.payload(bytes)?;
     let d = Dot11::parse(body)?;
@@ -389,15 +454,16 @@ fn parse_awdl(
         return None;
     }
     let af = ActionFrame::parse(body.get(d.body_offset..)?)?;
-    let (mut sync, mut elect) = (None, None);
+    let (mut sync, mut elect, mut chanseq) = (None, None, None);
     for t in tlv::Tlvs::new(af.tagged) {
         match t.tag {
             4 => sync = SyncParams::parse(t.value),
+            18 => chanseq = ChannelSequence::parse(t.value),
             24 => elect = ElectionParamsV2::parse(t.value),
             _ => {}
         }
     }
-    Some((d.src.0, sync?, elect))
+    Some((d.src.0, sync?, elect, chanseq))
 }
 
 // --- data path -------------------------------------------------------------------------

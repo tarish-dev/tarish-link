@@ -339,6 +339,12 @@ pub struct Cluster {
     pub master_metric: Option<u32>,
     /// The slots the master says it occupies.
     pub master_slots: Vec<usize>,
+    /// The channel the master listens on in each slot, indexed by slot (0 = not present).
+    /// Kept alongside `master_slots` so a follower can be on the RIGHT channel for each
+    /// window, not merely awake at the right time: a sequence over [6, 149] needs us on 149
+    /// for its 149 slots, and sitting on ch6 through them is exactly the intermittent-visibility
+    /// failure (finding 99).
+    pub master_channels: Vec<u8>,
     /// Our own address, so a peer naming US can be told from a cluster to follow.
     pub self_addr: Option<[u8; 6]>,
     /// Peers that have named us master, and how many frames each spent saying so.
@@ -433,6 +439,7 @@ impl Cluster {
                     // old one's timeline and is now meaningless.
                     self.clock.reset();
                     self.master_slots.clear();
+                    self.master_channels.clear();
                     self.master_changes += 1;
                 }
                 self.master = Some(e.master);
@@ -465,6 +472,7 @@ impl Cluster {
                     .filter(|(_, c)| **c != 0)
                     .map(|(i, _)| i)
                     .collect();
+                self.master_channels = seq.channels.clone();
             }
             self.clock.observe(Sighting {
                 arrived_us,
@@ -507,5 +515,57 @@ impl Cluster {
             .iter()
             .filter_map(|s| self.clock.us_until_slot_centre(now_us, *s))
             .min()
+    }
+
+    /// Override the master's per-slot channel map from an OpClass Channel Sequence (tag 18).
+    ///
+    /// Prefer this to the sequence embedded in Sync Params (tag 4): that one is **Legacy**
+    /// encoded, and for a 40 MHz cluster its channel byte is the 40 MHz *centre* (e.g. 151 for
+    /// the 149+153 pair), which is not a valid 20 MHz channel — `set_channel` to it is rejected
+    /// with `EINVAL` and the radio wedges (finding 99). The OpClass sequence carries the
+    /// **primary** 20 MHz channel (149) directly, which is what we retune to. The occupied
+    /// slots are the same either way, so this recomputes both from the OpClass channels.
+    ///
+    /// The caller is responsible for only passing the master's own sequence.
+    pub fn set_master_channels(&mut self, seq: &crate::sync::ChannelSequence) {
+        self.master_channels = seq.channels.clone();
+        self.master_slots = seq
+            .channels
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c != 0)
+            .map(|(i, _)| i)
+            .collect();
+    }
+
+    /// The nearest master window as `(microseconds until it, its slot, the channel it uses)`.
+    ///
+    /// Like [`us_until_master_window`](Self::us_until_master_window), but also reports which
+    /// channel that window is on, because a follower has to retune to it — being awake in the
+    /// right slot on the wrong channel hears nothing. Returns a wait of 0 when we are already
+    /// inside a master slot. Slots whose channel is unknown (the sequence not yet seen) are
+    /// skipped, so this yields `None` until the master's channel sequence has been observed.
+    pub fn next_master_window(&self, now_us: u64) -> Option<(u64, usize, u8)> {
+        if !self.clock.is_usable() || self.master_slots.is_empty() {
+            return None;
+        }
+        // Already inside one? Answer now — same reasoning as us_until_master_window.
+        if let Some(now_slot) = self.clock.slot_at(now_us) {
+            if self.master_slots.contains(&now_slot) {
+                if let Some(&ch) = self.master_channels.get(now_slot) {
+                    if ch != 0 {
+                        return Some((0, now_slot, ch));
+                    }
+                }
+            }
+        }
+        self.master_slots
+            .iter()
+            .filter_map(|&s| {
+                let w = self.clock.us_until_slot_centre(now_us, s)?;
+                let ch = *self.master_channels.get(s)?;
+                (ch != 0).then_some((w, s, ch))
+            })
+            .min_by_key(|(w, _, _)| *w)
     }
 }

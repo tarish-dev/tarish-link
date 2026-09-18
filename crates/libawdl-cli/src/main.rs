@@ -585,7 +585,7 @@ fn usage() -> ! {
     eprintln!("                                         RUN THE PIPE: tun <-> radio. root, Linux");
     eprintln!("  awdl phase <file.pcap>                 WHEN in the AWDL cycle each node transmits");
     eprintln!("  awdl follow <file.pcap>                recover the cluster's clock from its own frames");
-    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--tenure N] [--datapath NAME] [--garbage t4,t5,t16,t24|all] [--version 10.0] [--metric-floor SECS]");
+    eprintln!("  awdl beacon <managed> <mon> [chan] [secs] [psf-per-mif] [--compete] [--legacy-timing] [--metric N] [--per-window N] [--windows N] [--follow] [--hop] [--tenure N] [--datapath NAME] [--garbage t4,t5,t16,t24|all] [--version 10.0] [--metric-floor SECS]");
     eprintln!("                                         TRANSMIT. needs root. see the fn comment");
     std::process::exit(2)
 }
@@ -664,6 +664,7 @@ fn main() {
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse::<u64>().ok()),
                 args.iter().any(|a| a == "--wonder"),
+                args.iter().any(|a| a == "--hop"),
             );
         }
         #[cfg(feature = "capture")]
@@ -1404,7 +1405,8 @@ fn open_wonder(_monitor: &str, _channel: u8) -> Box<dyn libawdl_hal::Radio> {
     std::process::exit(1);
 }
 
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>, metric_floor: Option<u64>, wonder: bool) {
+#[allow(clippy::too_many_arguments)]
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>, metric_floor: Option<u64>, wonder: bool, hop: bool) {
     use libawdl_hal::{nl80211::Nl80211, Radio};
 
     // Either backend, behind the same trait. --wonder drives Google's radio shim with our
@@ -1474,7 +1476,10 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         metric_floor,
         per_window,
         windows,
-        follow,
+        // --hop (channel-following) is meaningless without following the cluster's windows,
+        // so it implies --follow.
+        follow: follow || hop,
+        follow_channels: hop,
         tenure,
         legacy_timing: legacy,
         version,
@@ -1524,7 +1529,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         "  rx frames by 802.11 type: {} mgmt, {} ctrl, {} data",
         stats.rx_mgmt, stats.rx_ctrl, stats.rx_data
     );
-    if follow {
+    if follow || hop {
         eprintln!(
             "cluster: {} anchors, master {:?}, phase {:?}, spread {:?} us, {} master change(s), adopted={}",
             stats.anchors,
@@ -1534,6 +1539,12 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
             stats.master_changes,
             stats.adopted
         );
+        if hop {
+            eprintln!(
+                "channel-following: {} hop(s) across the master's sequence, {} rejected",
+                stats.hops, stats.hop_fail
+            );
+        }
     }
     if let Some(e) = stats.first_error {
         eprintln!("first error: {e}");

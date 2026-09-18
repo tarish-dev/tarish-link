@@ -137,6 +137,10 @@ pub unsafe extern "C" fn mosey_start_5(
     let iface = data_iface();
     let mut cfg = Config::new(channel, cc);
     cfg.follow = true; // participate in the cluster and sync to whoever is master
+    // Follow the master's channel sequence too: a real Apple cluster runs over [6, 149], so
+    // sitting on the single bring-up channel is only intermittently reachable (finding 99).
+    // wonder retunes live in ~0.6 ms, so per-slot hopping costs nothing worth saving.
+    cfg.follow_channels = true;
     cfg.datapath = Some(iface);
     // duration None: run until mosey_stop.
 
