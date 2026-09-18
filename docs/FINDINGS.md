@@ -5726,6 +5726,40 @@ channel 149: sent 21 MIF / 42 PSF, rx_packets 0 -> 290, adopted by 2 peers,
   or with a second Apple device in range; we did not distinguish them, and it does not matter
   to the result.
 
+### The controlled confirmation — "is it not libmosey doing it?"
+
+The right challenge (the operator's) to any "it worked" here is the project's standing one:
+is GMS's `libmosey` secretly doing the work while our code takes credit? The first run did
+not, on its own, exclude that — `mosey_server` (GMS's libmosey daemon) was running. So it was
+tested directly, and the result is stronger than the original observation.
+
+- **Our binary contains no libmosey.** `llvm-readelf -d` on the cross-compiled `awdl`: the
+  only NEEDED libraries are `libdl.so` and `libc.so`. No `dlopen` anywhere in the source. It
+  builds AWDL frames with `libawdl` and sends them over `AF_PACKET`; it cannot call into
+  libmosey.
+- **Our netlink commands drive the bring-up.** `dmesg` during a run (with `mosey_server` just
+  killed) shows *our* `SET_REG`/`SET_FREQUENCY`/`SET_FILTER`/`SET_FIXED_TX_RATE` → `Vendor
+  Init` → `State set to UP`. (`mosey_server` respawns instantly under GMS, so it could not be
+  kept dead — but see the causal test, which does not depend on killing it.)
+- **The adoption is causally controlled by our `--metric` flag — this is the decisive part.**
+  Reproducing was not automatic: at `--metric 530` (inside Apple's observed 510–539 range) the
+  session drew **0 adoptions**, because a stronger Apple master was present and the peers
+  followed it. At `--metric 600` (above any Apple device) adoption returned immediately:
+  1 peer, 190 frames naming us master — **the same peer** (`72:01:e2:fd:9d:57`) as the first
+  run. A command-line metric on *our* process flips Apple's election outcome. If `libmosey`
+  were the entity being adopted, our flag could not move that needle; it moves it exactly,
+  which is only explicable if Apple is running election against **our** beacon.
+- **The named master is our identity, not libmosey's.** Peers name `96:f9:8b:2f:d1:3a` —
+  `wonder0`'s MAC, which is what our beacon uses as its AWDL address. libmosey's AWDL identity
+  is `mosey0`'s rotating address (`56:ba:4f…`, `f6:49:75…` in prior captures), never this one.
+
+**Refinement this forces on the finding:** adoption is not deterministic. It happens only when
+our advertised metric out-ranks every Apple master in range *and* our timing is verifiable
+(finding 81). At a metric inside Apple's range we correctly lose to a stronger peer and draw
+zero — which is the protocol working, not a failure. The claim is therefore precisely: *when
+we advertise a winning, verifiable claim, real Apple devices adopt us as master*, and that
+adoption tracks our metric parameter causally.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
