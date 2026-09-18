@@ -702,6 +702,18 @@ fn main() {
         "datapath" => {
             datapath(&args[2..]);
         }
+        "hopprobe" => {
+            // awdl hopprobe <monitor> [iterations] [--dwell-ms N]
+            if args.len() < 3 {
+                usage();
+            }
+            let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
+            let dwell = args.iter().position(|a| a == "--dwell-ms")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300u32);
+            hopprobe(&args[2], iters, dwell);
+        }
         #[cfg(feature = "capture")]
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
@@ -1261,6 +1273,107 @@ fn check_baseline(path: &str, floors: &std::collections::BTreeMap<u8, Floor>) ->
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
 #[allow(clippy::too_many_arguments)]
+/// Measure wonder's channel-switch cost — the number that decides whether software per-slot
+/// channel-following is viable at all. For each hop we record two things:
+///
+///   * `ack`     — the netlink round-trip of the SET_FREQUENCY vendor command.
+///   * `firstrx` — the time from issuing the switch to the first frame actually *received*
+///                 on the new channel. This is the retune-to-usable cost, and a 65 ms AWDL
+///                 slot cannot afford tens of ms of it.
+///
+/// It hops the AWDL social set (149/44/6) so we get the cross-band cost, and needs a live
+/// cluster on air (e.g. two iPhones AirDropping) so there is traffic to receive on each
+/// channel. `freq_mhz` from radiotap is what tells us which channel a frame arrived on; the
+/// diagnostic line at the end reports whether wonder.ko actually stamps it.
+fn hopprobe(monitor: &str, iterations: u32, dwell_ms: u32) {
+    use libawdl_hal::Radio;
+    use std::collections::BTreeMap;
+    use std::time::Instant;
+
+    init_stderr_log();
+    let mut radio = open_wonder(monitor, 6);
+    let seq: [u8; 3] = [149, 44, 6];
+    let freq_of = |c: u8| -> u16 { if c <= 14 { 2407 + c as u16 * 5 } else { 5000 + c as u16 * 5 } };
+
+    let mut ack_us: BTreeMap<u8, Vec<u128>> = BTreeMap::new();
+    let mut firstrx_us: BTreeMap<u8, Vec<u128>> = BTreeMap::new();
+    let mut misses: BTreeMap<u8, u32> = BTreeMap::new();
+    let mut frames: BTreeMap<u8, u64> = BTreeMap::new();
+    let (mut with_freq, mut no_freq) = (0u64, 0u64);
+
+    eprintln!("hopprobe: {iterations} hops over {seq:?}, dwell {dwell_ms} ms/hop — needs a live cluster on air");
+    for i in 0..iterations {
+        let ch = seq[(i as usize) % seq.len()];
+        let target = freq_of(ch);
+        let t0 = Instant::now();
+        if let Err(e) = radio.set_channel(ch) {
+            eprintln!("set_channel({ch}) failed: {e:?}");
+            *misses.entry(ch).or_default() += 1;
+            continue;
+        }
+        ack_us.entry(ch).or_default().push(t0.elapsed().as_micros());
+
+        // Drain RX for the WHOLE dwell: record the first on-channel frame (retune-to-usable),
+        // and count every on-channel frame (occupancy — where the cluster actually talks).
+        let mut got = None;
+        let mut on_ch = 0u64;
+        loop {
+            let left = dwell_ms.saturating_sub(t0.elapsed().as_millis() as u32);
+            if left == 0 { break; }
+            match radio.rx(left.min(20)) {
+                Ok(Some(f)) => {
+                    match f.freq_mhz {
+                        Some(_) => with_freq += 1,
+                        None => no_freq += 1,
+                    }
+                    if f.freq_mhz == Some(target) {
+                        if got.is_none() { got = Some(t0.elapsed().as_micros()); }
+                        on_ch += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => { eprintln!("rx error: {e:?}"); break; }
+            }
+        }
+        *frames.entry(ch).or_default() += on_ch;
+        match got {
+            Some(us) => firstrx_us.entry(ch).or_default().push(us),
+            None => *misses.entry(ch).or_default() += 1,
+        }
+    }
+
+    let pct = |v: &mut Vec<u128>, p: f64| -> u128 {
+        if v.is_empty() { return 0; }
+        v.sort_unstable();
+        let idx = ((v.len() as f64 - 1.0) * p).round() as usize;
+        v[idx]
+    };
+    eprintln!("\n=== wonder channel-switch latency ===");
+    eprintln!("{:<5} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>6} {:>8}",
+        "ch", "n", "ackp50us", "ackp95us", "rxp50ms", "rxp95ms", "rxmaxms", "miss", "frm/s");
+    for &ch in &[6u8, 44, 149] {
+        let mut a = ack_us.remove(&ch).unwrap_or_default();
+        let mut r = firstrx_us.remove(&ch).unwrap_or_default();
+        let n = a.len();
+        let miss = misses.get(&ch).copied().unwrap_or(0);
+        let (ap50, ap95) = (pct(&mut a, 0.5), pct(&mut a, 0.95));
+        let rp50 = pct(&mut r, 0.5) as f64 / 1000.0;
+        let rp95 = pct(&mut r, 0.95) as f64 / 1000.0;
+        let rmax = r.iter().copied().max().unwrap_or(0) as f64 / 1000.0;
+        // frames/sec on this channel = total on-channel frames / total dwell time spent here
+        let dwell_s = (n as f64) * (dwell_ms as f64) / 1000.0;
+        let fps = if dwell_s > 0.0 { frames.get(&ch).copied().unwrap_or(0) as f64 / dwell_s } else { 0.0 };
+        eprintln!("{:<5} {:>5} {:>9} {:>9} {:>9.2} {:>9.2} {:>9.2} {:>6} {:>8.1}",
+            ch, n, ap50, ap95, rp50, rp95, rmax, miss, fps);
+    }
+    eprintln!("\nrx_* = SET_FREQUENCY issued -> first frame received on the new channel (retune-to-usable).");
+    eprintln!("radiotap freq present on {with_freq} frames, absent on {no_freq}.");
+    if with_freq == 0 {
+        eprintln!("!! no frame carried a radiotap frequency — the rx-based measure is blind here;");
+        eprintln!("   fall back to GET_INTERFACE channel confirmation instead.");
+    }
+}
+
 /// Open Google's `wonder.ko` through our own netlink backend and bring its RF up (findings
 /// 91–93). Returned as a trait object so the beacon loop is identical whichever radio it runs
 /// on. `managed` has no analogue here — wonder has no separate managed vif to hold down.

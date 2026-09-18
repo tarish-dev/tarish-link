@@ -6025,6 +6025,67 @@ So the remaining work is now a single item, and unambiguous:
 both wait on channel-following + sync — the same conclusion as finding 96, now with every other
 layer eliminated as a suspect.
 
+## 99. ★★★ Channel-following is feasible — the switch costs ~1 ms, and the vendor command was the wrong primitive
+
+Finding 98 reduced the remaining work to one item: follow the master's channel sequence so our
+frames land in windows the hopping peer attends. Before writing that engine, its one real risk
+had to be measured — **how long does retuning `wonder0` cost?** A 65 ms slot cannot afford tens
+of ms of blind retune. Measured on a Pixel 10 Pro (blazer) against a live two-iPhone cluster,
+with `mosey_server`/`tarishd`/`tarishsharingd` stopped so the radio was ours alone. Tool:
+`awdl hopprobe` (new, in `libawdl-cli`), hopping 149/44/6 and timing each switch in-process.
+
+**The vendor `SET_FREQUENCY` is a bring-up-cache primitive, not a live-retune one.** Re-issuing
+it on a *running* monitor is rejected — `EOPNOTSUPP` (os error 95), every time after the first
+one or two. This matches the module note (the four RF-config vendor commands are cached while the
+HW is stopped and applied on `.start()`); it is not how you change channel on a live interface.
+The first probe run therefore measured nothing but rejections.
+
+**Live retuning uses the STANDARD `NL80211_CMD_SET_CHANNEL`** (`ATTR_WIPHY_FREQ` +
+`ATTR_CHANNEL_WIDTH = 20_NOHT`), exactly what `iw dev wonder0 set freq` sends. `wonder.ko` is a
+mac80211 driver, so this retunes the up monitor live — confirmed with `iw` (rc=0, `iw info`
+reflects the new channel) and then in-process. `Wonder::set_channel` now uses this path;
+`bring_up` still uses the vendor command (correct there — it is caching for `.start()`).
+
+**The switch is fast. This is the gate, and it passes:**
+
+```
+ch     n  ackp50us  ackp95us   rxp50ms   rxp95ms   rxmaxms   miss   frm/s
+6     20       631      1940     68.32    206.72    255.89      0     11.1
+44    20       638      2057      0.00      0.00      0.00     20      0.0
+149   20       642      1352      0.00      0.00      0.00     20      0.0
+```
+
+The `SET_CHANNEL` netlink round-trip acks in **~0.6 ms median, ~2 ms p95** — three to four
+orders of magnitude under a slot. Per-slot software channel-following is viable at the switch
+cost. (The `iw` numbers looked like ~110 ms, but that is `iw`'s own process-spawn on Android: a
+bare `iw dev wonder0 info` with no switch costs the same ~100 ms. Never measure this from a
+shell.)
+
+The `rx*` columns are **not** switch latency — they are how long after landing on a channel the
+first frame arrives, i.e. cluster occupancy. Here they revealed a second fact:
+
+**The cluster is on ch6 and ch149 — not ch6 alone.** The occupancy sample saw traffic only on
+ch6 (~11 frame/s, nothing on 44/149 in 7 s of dwell each), which looked like a 2.4 GHz-only
+cluster. But the master's own advertisement is authoritative, and it says otherwise:
+
+```
+tag18 (Channel Sequence) OpClass, 16 slots -> [6, 149]     master 72:01:e2:fd:9d:57, metric 540, v10.0 iOS
+tag4  (Sync Params)      Legacy,  16 slots -> [6, 151]
+```
+
+So the sequence spends most slots on ch6 (where the PSFs are, which is why occupancy saw only
+ch6) but reserves ch149 slots too. Sitting on ch6 catches the sync/discovery PSFs — hence
+*intermittent* visibility — but misses whatever the peer schedules on the ch149 slots, which is
+what stalls the AirDrop exchange. This is the same conclusion as findings 96 and 98, now with the
+sequence read off the wire and the switch cost measured: **following [6, 149] on the master's
+schedule is the piece, and nothing about the radio prevents it.**
+
+`libawdl` already parses tag 18 into the slot map and already keeps a synced `ClusterClock`, so
+the engine is: at each slot boundary, index the current slot from the synced TSF, look up its
+channel, `set_channel`. The instrumentation (`hopprobe`, per-channel occupancy, passive tag-18
+decode via `awdl tlv <pcap> 18`) is the controlled harness finding 98 asked for — no iPhone
+visibility roulette.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

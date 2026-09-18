@@ -51,9 +51,16 @@ const NLM_F_REQUEST: u16 = 0x1;
 const NLM_F_ACK: u16 = 0x4;
 
 // nl80211 commands (finding 92 + <linux/nl80211.h>)
+const NL80211_CMD_SET_CHANNEL: u8 = 65;
 const NL80211_CMD_NEW_INTERFACE: u8 = 7;
 const NL80211_CMD_DEL_INTERFACE: u8 = 8;
 const NL80211_CMD_VENDOR: u8 = 0x67;
+
+// Standard channel-set attributes (for live retuning, distinct from the vendor SET_FREQUENCY
+// used at bring-up). `<linux/nl80211.h>`.
+const NL80211_ATTR_WIPHY_FREQ: u16 = 38;
+const NL80211_ATTR_CHANNEL_WIDTH: u16 = 159;
+const NL80211_CHAN_WIDTH_20_NOHT: u32 = 0;
 
 // nl80211 attributes
 const NL80211_ATTR_WIPHY: u16 = 1;
@@ -618,14 +625,23 @@ impl crate::Radio for Wonder {
     }
 
     fn set_channel(&mut self, channel: u8) -> Result<()> {
+        // Live retuning uses the STANDARD nl80211 channel-set, NOT the vendor SET_FREQUENCY.
+        // The vendor command is a bring-up-cache primitive: wonder.ko accepts it only while the
+        // HW is stopped and applies it on .start(); re-issuing it on a running monitor is
+        // rejected with EOPNOTSUPP (measured — see finding on live hopping). wonder.ko is a
+        // mac80211 driver, so NL80211_CMD_SET_CHANNEL on the up monitor retunes it live, which
+        // is exactly what `iw dev wonder0 set freq` does and what channel-following needs.
         let family = self.nl80211_family()?;
         let ifindex = self.ifindex()?;
         let freq = channel_to_mhz(channel)?;
-        let sf = vendor_data(|m| {
-            m.attr_u32(1, freq);
-            m.attr_u16(2, 2); // 80 MHz, as libmosey uses on the social channels
-        });
-        self.vendor(family, ifindex, WVEN_SET_FREQUENCY, &sf, "SET_FREQUENCY")
+        let sock = self.genl.as_mut().unwrap();
+        let mut m = NlMsg::genl(family, NLM_F_REQUEST, 0, NL80211_CMD_SET_CHANNEL, 1);
+        m.attr_u32(NL80211_ATTR_IFINDEX, ifindex);
+        m.attr_u32(NL80211_ATTR_WIPHY_FREQ, freq);
+        // 20 MHz no-HT is valid on every AWDL social channel in both bands and is what the
+        // monitor hop needs; the per-frame TX rate/width is a separate SET_FIXED_TX_RATE.
+        m.attr_u32(NL80211_ATTR_CHANNEL_WIDTH, NL80211_CHAN_WIDTH_20_NOHT);
+        sock.send_acked(m, "SET_CHANNEL")
     }
 
     fn tsf(&self) -> Result<crate::Tsf> {
