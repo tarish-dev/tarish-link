@@ -6086,6 +6086,63 @@ channel, `set_channel`. The instrumentation (`hopprobe`, per-channel occupancy, 
 decode via `awdl tlv <pcap> 18`) is the controlled harness finding 98 asked for — no iPhone
 visibility roulette.
 
+> **Corrected by finding 100 — read that next.** The switch-latency number here is real but
+> it measures the wrong thing: the standard `SET_CHANNEL` acks in ~0.6 ms because the driver
+> accepts it, but it does **not** retune wonder's RF. Live per-slot channel-following is not
+> possible through this primitive. The feasibility conclusion above is withdrawn.
+
+## 100. ★★★ `SET_CHANNEL` does not retune wonder's RF — the hop is a firmware schedule, not a live tune
+
+Finding 99 concluded software channel-following was viable because `SET_CHANNEL` acked in
+~0.6 ms. **That was wrong, and the channel-following engine built on it does not move the
+radio.** The engine is correct in logic — it retunes on the right slots, transmits on what it
+believes is the right channel (`tx by channel: {6: 50, 149: 46}`) — but the frames never reach
+149. Proven three ways, on blazer against a live iPhone cluster with the Pi's ALFA as an
+independent ch149 witness:
+
+1. **A fixed beacon brought up ON ch149 radiates on 149** — the witness catches our MAC
+   (`96:f9:8b:2f:d1:3a`), 21 frames in 12 s. So wonder CAN transmit on 149.
+2. **A hopping beacon that `SET_CHANNEL`s to 149 does not** — the same witness catches ~0 of
+   our frames on 149, though the daemon's own counters say it sent 46 there.
+3. **RX is the clincher.** After `SET_CHANNEL(149)`, wonder receives **0 frames on 149** over
+   ten 400 ms dwells, while the Pi confirms the cluster is pouring out **36 Action frames in
+   4 s** on that exact channel. The RF is still on ch6 (the bring-up channel); only ch6 frames
+   arrive. `iw dev wonder0 info` reports 149 the whole time — so mac80211's channel state is a
+   cache the driver updates on the ack, decoupled from the Broadcom RF.
+
+**How stock hops, then.** `mosey_server` keeps `wonder0` reporting ch6 in `iw info` the whole
+time it runs, yet stock AirDrop works and the cluster demonstrably uses 149. A steady-state
+`strace` of `mosey_server` shows **no** periodic channel netlink at all. So the hop is not a
+sequence of live tunes: it is a **TSF-anchored channel schedule programmed once at bring-up**
+that the Broadcom firmware executes autonomously, invisible to mac80211 — the vendor
+channel-schedule command. Our `bring_up` sends `SET_REG`/`SET_FREQUENCY`/`SET_FILTER`/
+`SET_FIXED_TX_RATE`/`0x08` but **not** a channel-schedule, which is exactly why we sit on one
+channel while stock hops.
+
+This also re-reads finding 99's occupancy result: the "cluster is only on ch6" observation was
+partly an artefact — we could not RX 149 because our RF never went there, not only because the
+cluster favoured ch6.
+
+**Where this leaves channel-following.** Live `SET_CHANNEL` is a dead end on wonder. The
+options, in order of promise:
+
+- **Program the vendor channel-schedule at bring-up** (the stock mechanism). Requires
+  recovering that command's subcommand id and payload — the slot→channel sequence plus the TSF
+  anchor — from a full libmosey bring-up capture (extend finding 92's `moseyprobe`+`strace`
+  trace past `SET_FREQUENCY`). Finding 88's note that the schedule vendor call is a "stub"
+  needs re-testing against this evidence: something programs the firmware to hop.
+- **Down / vendor-`SET_FREQUENCY` / up per slot** — the only way we know to actually move the
+  RF today. Almost certainly too slow for a 65 ms slot and it renumbers the interface each time
+  (finding 35), but its real cost is unmeasured.
+- **Re-examine the vendor `SET_FREQUENCY` EOPNOTSUPP** — it worked for the first one or two
+  calls after bring-up then refused; understanding that transition may reveal a supported live
+  path.
+
+The engine code (per-slot retune, OpClass channel map, `next_master_window`) stays — it is the
+consumer of whatever retune primitive actually works, and only the one `radio.set_channel`
+call at the bottom is proven inert. `follow_channels` in the shim is therefore currently a
+no-op, not a fix.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

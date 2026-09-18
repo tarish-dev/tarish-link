@@ -195,6 +195,9 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     let mut current_channel = cfg.channel;
     let mut hops = 0u64;
     let mut hop_fail = 0u64;
+    // Diagnostic: how many beacons went out on each channel, and the slots we transmitted in.
+    let mut tx_by_channel: std::collections::BTreeMap<u8, u64> = std::collections::BTreeMap::new();
+    let mut tx_by_slot: std::collections::BTreeMap<usize, u64> = std::collections::BTreeMap::new();
 
     while !stop.load(Ordering::Relaxed) {
         if let Some(dl) = deadline {
@@ -365,6 +368,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 } else {
                     sent_psf += 1
                 }
+                *tx_by_channel.entry(current_channel).or_default() += 1;
+                if let Some(sl) = cluster.clock.slot_at(now_us) {
+                    *tx_by_slot.entry(sl).or_default() += 1;
+                }
             }
             Err(e) => {
                 failed += 1;
@@ -393,6 +400,11 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         std::thread::sleep(Duration::from_micros(
             b.psf_interval_us() / u64::from(cfg.per_window.max(1)),
         ));
+    }
+
+    if cfg.follow_channels {
+        log::info!("tx by channel: {tx_by_channel:?}");
+        log::info!("tx by slot: {tx_by_slot:?} (master slots {:?})", cluster.master_slots);
     }
 
     Ok(Stats {
