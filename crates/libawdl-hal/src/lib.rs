@@ -57,6 +57,13 @@ pub mod nl80211;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod rawsock;
 
+/// Google's `wonder.ko` driven directly over netlink — no `libmosey`, no `iw`. Genuinely
+/// Linux/Android-only: it is raw `AF_NETLINK` and the Pixel's vendor commands. This is the
+/// backend that replaces `libmosey` at the radio layer; the bring-up sequence it reproduces
+/// was captured and decoded in `docs/FINDINGS.md` (findings 91–92).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod wonder;
+
 /// The `awdl0` netdev. Linux-only: this is `/dev/net/tun` and a `TUNSETIFF` ioctl, and
 /// there is no portable equivalent worth pretending about.
 #[cfg(any(target_os = "linux", target_os = "android"))]

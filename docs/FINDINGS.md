@@ -5605,6 +5605,76 @@ the vendor commands, confirming the ordering: configure (queues), then UP (appli
   nested data), the DEL/NEW monitor dance, and one `RTM_SETLINK` UP over rtnetlink. That is the
   next piece of code, and it is fully specified above.
 
+## 93. ★★★ Standalone bring-up works — libawdl-hal drives wonder's RF with no libmosey
+
+Implemented the finding-92 spec as `libawdl-hal::wonder` (a real generic-netlink backend, no
+`iw`, no `libmosey`) and brought wonder's radio up **from our own code**, on hardware, with
+nothing else driving it. This is the milestone the whole Android track was aimed at: the HAL
+replaces `libmosey` at the radio layer, proven — not argued.
+
+### The test, and why it is airtight
+
+`mosey_server` (GMS) was running and the RF was already up, which would make "inject on 149
+and see frames" prove nothing — the frames could ride the existing bring-up. So the test used
+a **discriminator channel**: `awdl-inject wonder-up wonder0 44 20`. Channel 44 = 5220 MHz, and
+nothing else on the device sets it — GMS/libmosey use the AWDL social channels (6/44/149) only
+as libmosey configures them, and it was not running a session. No `moseyprobe` in the process
+list. So a bring-up to 5220 is unambiguously ours.
+
+Result:
+
+```
+wonder-up: RF up on wonder0 ch44 (standalone, no libmosey)
+sent 20, failed 0
+tx_packets before: 0    tx_packets after: 20
+```
+
+and `wonder.ko`'s own kernel log, our sequence end to end:
+
+```
+wonder_flush() / HW stopped               ← our DEL_INTERFACE tearing down the old wonder0
+Setting regulatory country code to: QA    ← our SET_REG
+SET_FREQUENCY: freq=5220 MHz, bandwidth=2  ← our SET_FREQUENCY — the 5220 fingerprint
+  (cached: "wondertap is not active")
+Configuring filter type: 0 / BSSID 00:..:73  ← our SET_FILTER (nested attr decoded correctly)
+Set fixed TX rate: preamble=2 bw=2 gi=2 nss=2 mcs=3  ← our SET_FIXED_TX_RATE
+HW started
+Wondertap Vendor Init: Channel Freq=5220, Bw=2 ...  ← cache flushed by our RTM_SETLINK UP
+Vendor init successful. State set to UP.
+wonder_tx_setup(): min_mtu 256            ← TX path armed
+```
+
+The `Freq=5220` in the Vendor Init block is the proof: our netlink `SET_FREQUENCY` reached the
+firmware, and the interface UP we sent triggered the flush. Then 20 frames transmitted, TX
+counter `0 -> 20`. Cleaner than finding 90, where we injected on libmosey's pre-existing
+`wonder0` (TX started at 662): here the interface was **freshly created by us**, so the count
+started at 0 and the delta is unambiguous.
+
+### What was wrong on the first attempt, and the lesson
+
+First run failed with `unparseable phy name "wonder"`. `wonder.ko` names its phy `wonder`,
+not `phyN`, so deriving the wiphy index by parsing a number out of the name is wrong on
+exactly this driver. The numeric index nl80211 needs is a separate sysfs file,
+`/sys/class/ieee80211/wonder/index` (= 0). The name and the index are different things; the
+symlink gives one, that file gives the other. A backend written against `mt76` (`phy0`,
+`phy1`) would carry the bug silently until it met a vendor phy with a real name.
+
+### What this establishes
+
+- **Established:** `libawdl-hal::wonder` performs the complete RF bring-up — DEL/NEW monitor,
+  the four OUI-`0x001a11` vendor commands with correct (including nested) attribute encoding,
+  and the rtnetlink UP trigger — and then transmits AWDL frames that air. On the Pixel, with
+  no Google userspace involved in the radio path. The seam the whole `libawdl-hal` design bet
+  on is real: everything above it is ours and portable, and the vendor layer is now driven by
+  our code, not Google's.
+- **Not yet:** this is bring-up and TX, not a held AWDL session doing election/sync with a
+  real Apple peer. That is the protocol engine's job (libawdl), now that it has a radio to run
+  on. Also untested: coexistence courtesy — our DEL_INTERFACE tears down the `wonder0` GMS may
+  hold, so a standalone libawdl and GMS AirDrop cannot run at once; that is expected (one
+  radio) and not a defect.
+- subcmd `0x08` (finding 92's unidentified empty command) was replicated and the bring-up
+  succeeds with it; it is still not decoded, but it is not in the way.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

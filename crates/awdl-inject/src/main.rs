@@ -11,17 +11,47 @@
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+
+    // `wonder-up` as the first token means: bring the wonder radio up ourselves — no
+    // libmosey, no moseyprobe — using the captured bring-up sequence (findings 91–92),
+    // then inject. This is the standalone-backend test. Without it we behave as before and
+    // assume the caller (iw/moseyprobe) already brought the interface up.
+    let bring_up_wonder = args.get(1).map(|s| s == "wonder-up").unwrap_or(false);
+    if bring_up_wonder {
+        args.remove(1);
+    }
+
     if args.len() < 3 {
-        eprintln!("usage: awdl-inject <iface> <channel> [count] [psf-per-mif]");
+        eprintln!("usage: awdl-inject [wonder-up] <iface> <channel> [count] [psf-per-mif]");
         eprintln!("  <iface> must be an UP monitor interface (mon0 on a Pi; a wonder monitor");
         eprintln!("  during a live session on a Pixel). count defaults 100, psf-per-mif 2.");
+        eprintln!("  wonder-up: on a Pixel, bring wonder's RF up ourselves before injecting.");
         std::process::exit(2);
     }
     let iface = &args[1];
     let channel: u8 = args[2].parse().expect("channel must be a number");
     let count: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
     let psf_per_mif: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(2);
+
+    if bring_up_wonder {
+        // libmosey's captured bring-up rate: VHT, 80 MHz, 2 streams, MCS 3 (finding 92).
+        let params = libawdl_hal::TxParams { mcs: 3, nss: 2, bandwidth: 2, short_gi: false };
+        let mut w = match libawdl_hal::wonder::Wonder::new(iface) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("wonder init on {iface}: {e:?}");
+                std::process::exit(1);
+            }
+        };
+        match w.bring_up(channel, params, *b"QA") {
+            Ok(()) => eprintln!("wonder-up: RF up on {iface} ch{channel} (standalone, no libmosey)"),
+            Err(e) => {
+                eprintln!("wonder-up: bring-up failed: {e:?}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Our AWDL address is the interface's own MAC when we can read it, else a stable
     // locally-administered default. Peers derive our IPv6 from whatever we advertise, so a

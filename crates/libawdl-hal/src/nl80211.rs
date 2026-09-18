@@ -90,7 +90,7 @@ pub struct Nl80211 {
 /// protocol crate and must not depend upward. It is a dozen lines and the alternative is
 /// a dependency cycle.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn libawdl_radiotap(b: &[u8]) -> Option<(Option<u64>, Option<u16>, Option<i8>)> {
+pub(crate) fn libawdl_radiotap(b: &[u8]) -> Option<(Option<u64>, Option<u16>, Option<i8>)> {
     if b.len() < 8 || b[0] != 0 {
         return None;
     }
