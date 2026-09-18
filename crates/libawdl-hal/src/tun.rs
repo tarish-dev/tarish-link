@@ -56,11 +56,25 @@
 use crate::{Error, Result};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+/// A **TAP**, not a TUN — an Ethernet interface, on purpose. A TUN carries bare IP but has no
+/// link-layer address (`ARPHRD_NONE`), and `tarishsharingd` derives its AirDrop instance name
+/// from the interface's MAC; on a MAC-less TUN that came out `000000000000`, which Apple will
+/// not display (finding 98). A TAP has a settable MAC, so we can give it the AWDL address, the
+/// instance name is real, and the kernel's own EUI-64 link-local matches the derived one. The
+/// cost is a 14-byte Ethernet header on every frame, which `libawdl-session` strips inbound and
+/// prepends outbound.
+#[allow(dead_code)]
 const IFF_TUN: libc::c_short = 0x0001;
+const IFF_TAP: libc::c_short = 0x0002;
 /// No packet-information prefix. Without this every read is preceded by four bytes of
-/// flags and protocol, and the IPv6 version nibble lands in the wrong place — which
-/// presents as "the peer sent us garbage" rather than as a configuration mistake.
+/// flags and protocol.
 const IFF_NO_PI: libc::c_short = 0x1000;
+
+/// `SIOCSIFHWADDR` — set the link-layer address. In `tarishd`'s allowed `udp_socket` ioctl
+/// xperms (0x8924), so setting the TAP's MAC stays inside its SELinux policy.
+const SIOCSIFHWADDR: IoctlReq = 0x8924;
+/// `ARPHRD_ETHER`, the `sa_family` an Ethernet hardware address carries.
+const ARPHRD_ETHER: u16 = 1;
 
 /// The type `libc::ioctl` takes for its request argument: `c_ulong` on glibc, but `c_int` on
 /// Android's bionic. Same numeric values (all fit in i32); only the declared type differs.
@@ -79,6 +93,16 @@ struct IfReq {
     // The real `ifreq` is a union large enough for a sockaddr; only the flags are read for
     // TUNSETIFF, but the kernel copies the whole thing, so it has to be the full size.
     pad: [u8; 22],
+}
+
+/// `ifreq` shaped for `SIOCSIFHWADDR`: the union holds a `sockaddr` (family + 14 bytes), of
+/// which the first six after the family are the MAC.
+#[repr(C)]
+struct IfReqHw {
+    name: [libc::c_char; libc::IF_NAMESIZE],
+    sa_family: u16,
+    mac: [u8; 6],
+    pad: [u8; 8],
 }
 
 pub struct Tun {
@@ -114,7 +138,7 @@ impl Tun {
 
         let mut req = IfReq {
             name: [0; libc::IF_NAMESIZE],
-            flags: IFF_TUN | IFF_NO_PI,
+            flags: IFF_TAP | IFF_NO_PI,
             pad: [0; 22],
         };
         for (dst, b) in req.name.iter_mut().zip(name.as_bytes()) {
@@ -280,6 +304,25 @@ impl Tun {
             // SAFETY: `s` is the descriptor opened above and is not used afterwards.
             unsafe { libc::close(s) };
         };
+
+        // Give the TAP the AWDL MAC, while it is still down. This is what makes the interface
+        // carry a real hardware address: the daemon's AirDrop instance name derives from it,
+        // and the kernel's EUI-64 link-local then matches the derived one.
+        let mut hw = IfReqHw {
+            name: [0; libc::IF_NAMESIZE],
+            sa_family: ARPHRD_ETHER,
+            mac,
+            pad: [0; 8],
+        };
+        for (dst, b) in hw.name.iter_mut().zip(self.name.as_bytes()) {
+            *dst = *b as libc::c_char;
+        }
+        // SAFETY: correctly shaped ifreq for SIOCSIFHWADDR, outlives the call.
+        if unsafe { libc::ioctl(sock, SIOCSIFHWADDR, &mut hw as *mut IfReqHw) } < 0 {
+            let e = std::io::Error::last_os_error();
+            close(sock);
+            return Err(Error::Radio(format!("SIOCSIFHWADDR {} {mac:02x?}: {e}", self.name)));
+        }
 
         // IFF_UP, read-modify-write. Setting the flags word wholesale would clear
         // MULTICAST, which a link carrying mDNS to ff02::fb cannot do without.

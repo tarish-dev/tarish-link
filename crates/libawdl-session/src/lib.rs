@@ -455,7 +455,13 @@ fn enqueue_from_tun(
             Ok(n) => n,
             Err(_) => return,
         };
-        let pkt = &buf[..n];
+        // The interface is a TAP, so this is an Ethernet frame: strip the 14-byte header and
+        // encapsulate only IPv6 (ethertype 0x86dd). ARP/IPv4 and runts are dropped.
+        let frame_bytes = &buf[..n];
+        if frame_bytes.len() < 14 || frame_bytes[12] != 0x86 || frame_bytes[13] != 0xdd {
+            continue;
+        }
+        let pkt = &frame_bytes[14..];
         let Some(dst) = dst_mac_for_ipv6(pkt) else {
             *unroutable += 1;
             continue;
@@ -489,7 +495,21 @@ fn deliver_data_frame(
     if d.src == our_mac || (d.dst != our_mac && !is_ipv6_multicast(d.dst)) {
         return;
     }
-    if tun.write(d.payload).is_ok() {
+    // The interface is a TAP, so the kernel expects an Ethernet frame. Prepend a 14-byte
+    // header: destination is our MAC for unicast, or the 33:33-mapped multicast MAC for a
+    // multicast IPv6 destination (mDNS ff02::fb), so the kernel actually delivers it.
+    let ip = d.payload;
+    let eth_dst: [u8; 6] = if ip.len() >= 40 && ip[24] == 0xff {
+        [0x33, 0x33, ip[36], ip[37], ip[38], ip[39]]
+    } else {
+        our_mac
+    };
+    let mut frame = Vec::with_capacity(14 + ip.len());
+    frame.extend_from_slice(&eth_dst);
+    frame.extend_from_slice(&d.src);
+    frame.extend_from_slice(&[0x86, 0xdd]);
+    frame.extend_from_slice(ip);
+    if tun.write(&frame).is_ok() {
         *delivered += 1;
     }
 }

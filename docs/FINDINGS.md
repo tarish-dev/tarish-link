@@ -5998,16 +5998,32 @@ auto-address becomes exactly the derived link-local, removing the `addr_gen_mode
 manual-address steps entirely. The cost is that a TAP delivers Ethernet frames, so the data
 path must strip a 14-byte Ethernet header inbound and prepend one outbound.
 
-### Where this leaves the next work — now two concrete items
+### Update: (1) the TAP fix is done — and it proved (2) is the real wall
 
-1. **Data interface → TAP with the AWDL MAC**, so the AirDrop instance is real and we can be
-   displayed at all. Tractable, no rebuild, addresses visibility directly.
-2. **Follow the master's channel sequence + tighten sync**, so the mDNS answer and the transfer
-   TCP actually reach the hopping iPhone. The larger engine work, and what a *completed* transfer
-   needs.
+The data interface is now a **TAP with the AWDL MAC** (`libawdl-hal::tun`), set via
+`SIOCSIFHWADDR` (in `tarishd`'s allowed ioctl xperms), with the 14-byte Ethernet header
+stripped/prepended in `libawdl-session`. Verified end to end on the daemon: `mosey0` came up as
+`link/ether 96:f9:8b:2f:d1:3a` with the derived address, and `sharingd` advertised the **real**
+instance `96f98b2fd13a._airdrop._tcp.local` instead of `000000000000`. mDNS still flows over the
+TAP both ways — we receive the iPhone's `_airdrop` queries and answer them.
 
-"The daemon runs on our AWDL and processes Apple's discovery" is proven. A file transferring
-over it needs (1) then (2).
+**But the iPhone still does not display the Pixel.** So the all-zero instance was a genuine bug
+and is fixed, yet it was not what kept us invisible. We *receive* the iPhone's queries but our
+*answers* do not get back to it reliably: our transmit lands only in our advertised windows on
+our one channel, and the hopping iPhone is not listening on ch6 at those instants often enough
+for an answer to arrive. Delivery, not the instance name, is the wall.
+
+So the remaining work is now a single item, and unambiguous:
+
+- **Follow the master's channel sequence and tighten sync**, so our frames (the mDNS answer, and
+  later the transfer TCP) land in windows the peer actually attends. Everything else — the shim,
+  the daemon integration, the data interface, the instance name, the SELinux fit — is done and
+  proven. This one engine change is what stands between "the daemon runs on our AWDL and Apple's
+  discovery flows through it" and "Apple sees the Pixel and a file crosses".
+
+"The daemon runs on our AWDL and processes Apple's discovery" is proven. Visibility and transfer
+both wait on channel-following + sync — the same conclusion as finding 96, now with every other
+layer eliminated as a suspect.
 
 ## Open, not yet investigated
 
