@@ -120,11 +120,21 @@ pub struct ClusterClock {
     offsets: Vec<u64>,
     /// The presence mode the cluster advertises; sets the slot and cycle lengths.
     presence_mode: u8,
+    /// Anchors that landed far from the current estimate, held pending confirmation. One
+    /// off-phase sighting is a glitch and must not become the phase; several agreeing in a row
+    /// are a real re-anchor and are then adopted. See [`observe`](Self::observe).
+    pending: Vec<u64>,
+}
+
+/// Shortest distance between two phases on a ring of length `cycle`.
+fn circular_dist(a: u64, b: u64, cycle: u64) -> u64 {
+    let d = (a + cycle - b % cycle) % cycle;
+    d.min(cycle - d)
 }
 
 impl ClusterClock {
     pub fn new() -> ClusterClock {
-        ClusterClock { offsets: Vec::new(), presence_mode: DEFAULT_PRESENCE_MODE }
+        ClusterClock { offsets: Vec::new(), presence_mode: DEFAULT_PRESENCE_MODE, pending: Vec::new() }
     }
 
     /// One channel-sequence slot, microseconds.
@@ -153,9 +163,41 @@ impl ClusterClock {
         if s.presence_mode.max(1) != self.presence_mode {
             self.presence_mode = s.presence_mode.max(1);
             self.offsets.clear();
+            self.pending.clear();
         }
         let cycle = self.cycle();
-        self.offsets.push(s.cycle_origin_us() % cycle);
+        let off = s.cycle_origin_us() % cycle;
+
+        // Outlier rejection. A frame stamped late (a socket backlog) or carrying an odd
+        // counter lands half a cycle off and, taken as the newest anchor, throws the phase
+        // there — the 500 ms excursions seen on hardware. So an anchor more than half a slot
+        // from the current estimate is not accepted immediately: it goes to `pending`, and is
+        // adopted only if several in a row agree, which is a real re-anchor rather than a
+        // glitch. One-off outliers are dropped.
+        if let Some(cur) = self.offsets.last().copied() {
+            let tol = self.slot_us() / 2;
+            if circular_dist(off, cur, cycle) > tol {
+                let confirmed = self
+                    .pending
+                    .last()
+                    .is_some_and(|&p| circular_dist(off, p, cycle) <= tol);
+                self.pending.push(off);
+                if confirmed && self.pending.len() >= 3 {
+                    // A sustained shift: the cluster really re-anchored. Follow it.
+                    self.offsets.clear();
+                    self.offsets.push(off);
+                    self.pending.clear();
+                } else if !confirmed {
+                    // A fresh outlier location; start the confirmation streak over.
+                    self.pending.clear();
+                    self.pending.push(off);
+                }
+                return;
+            }
+            self.pending.clear();
+        }
+
+        self.offsets.push(off);
         if self.offsets.len() > KEEP {
             let excess = self.offsets.len() - KEEP;
             self.offsets.drain(..excess);
