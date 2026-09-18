@@ -12,4 +12,11 @@ path = "src/main.rs"
 [dependencies]
 libawdl = { path = "../libawdl" }
 libawdl-hal = { path = "../libawdl-hal" }
-pcap = "2"
+# Optional so the live-radio subcommands (beacon/tun/datapath) can cross-compile for
+# Android, where libpcap is not in the NDK sysroot (`-lpcap` fails to link). The
+# capture-file analysis subcommands need it; build with --no-default-features for the phone.
+pcap = { version = "2", optional = true }
+
+[features]
+default = ["capture"]
+capture = ["dep:pcap"]

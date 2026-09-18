@@ -10,6 +10,14 @@
 //!
 //! `read` exists so every finding is reproducible without the radio. A capture is
 //! evidence; a live run is an anecdote.
+//!
+//! The capture-file subcommands need `libpcap`, which is not in the Android NDK sysroot, so
+//! they sit behind the `capture` feature (on by default). Build with `--no-default-features`
+//! to get a phone binary with just the live-radio subcommands (`beacon`, `tun`, `datapath`).
+
+// Without the capture feature, the shared parser helpers and their imports are used only by
+// the capture-file subcommands, so they are legitimately unused on the phone build.
+#![cfg_attr(not(feature = "capture"), allow(dead_code, unused_imports))]
 
 use std::collections::BTreeMap;
 
@@ -202,6 +210,7 @@ fn print_frame(n: u64, rt: &Radiotap, d: &Dot11, af: &ActionFrame) {
 /// election behaviour gets made from this view or not at all.
 ///
 /// `M` = claiming mastership (distance 0), `f` = following someone, `.` = silent.
+#[cfg(feature = "capture")]
 fn timeline<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, bucket_s: i64) {
     let mut first_ts: Option<i64> = None;
     // sender -> bucket -> (claims, follows)
@@ -253,6 +262,7 @@ fn timeline<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, bucket_s: i6
     println!("\n* = both states within one bucket (a transition)");
 }
 
+#[cfg(feature = "capture")]
 fn run<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, stats_only: bool) {
     let mut total: u64 = 0;
     let mut awdl_n: u64 = 0;
@@ -586,6 +596,7 @@ fn main() {
         usage();
     }
     match args[1].as_str() {
+        #[cfg(feature = "capture")]
         "live" => {
             // Radiotap is not optional: without it there is no frequency, no signal and
             // no TSFT, and TSFT is the anchor for every timing question worth asking.
@@ -598,14 +609,17 @@ fn main() {
                 .expect("activate capture — is the interface in monitor mode, and are you root?");
             run(cap, false);
         }
+        #[cfg(feature = "capture")]
         "read" | "stats" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             run(cap, args[1] == "stats");
         }
+        #[cfg(feature = "capture")]
         "profile" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             profile(cap);
         }
+        #[cfg(feature = "capture")]
         "timeline" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             let bucket = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
@@ -649,28 +663,36 @@ fn main() {
                 args.iter().position(|a| a == "--metric-floor")
                     .and_then(|i| args.get(i + 1))
                     .and_then(|v| v.parse::<u64>().ok()),
+                args.iter().any(|a| a == "--wonder"),
             );
         }
+        #[cfg(feature = "capture")]
         "follow" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             follow(cap);
         }
+        #[cfg(feature = "capture")]
         "phase" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             phase(cap);
         }
+        #[cfg(feature = "capture")]
         "coverage" => {
             coverage(&args[2..]);
         }
+        #[cfg(feature = "capture")]
         "bytemap" => {
             bytemap(&args[2..]);
         }
+        #[cfg(feature = "capture")]
         "master-diff" => {
             master_diff(&args[2..]);
         }
+        #[cfg(feature = "capture")]
         "topology" => {
             topology(&args[2..]);
         }
+        #[cfg(feature = "capture")]
         "correlate" => {
             correlate(&args[2..]);
         }
@@ -680,6 +702,7 @@ fn main() {
         "datapath" => {
             datapath(&args[2..]);
         }
+        #[cfg(feature = "capture")]
         "tlv" => {
             let cap = pcap::Capture::from_file(&args[2]).expect("open capture file");
             let Some(tag) = args.get(3).and_then(|s| s.parse::<u8>().ok()) else { usage() };
@@ -705,6 +728,7 @@ fn main() {
 /// moment another capture is taken; this regenerates it.
 ///
 /// Run it over captures from each implementation and compare the output.
+#[cfg(feature = "capture")]
 fn profile<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
     use std::collections::BTreeSet;
 
@@ -845,6 +869,7 @@ fn profile<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
 /// The count is printed so a one-off can be told from the steady state, and the first
 /// sighting is what gets dumped — a value seen once in 3000 frames is more likely a
 /// transient than a specimen worth building against.
+#[cfg(feature = "capture")]
 fn dump_tlv<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>, tag: u8, from: Option<&str>, window: Option<(u64, u64)>) {
     use std::collections::BTreeMap;
 
@@ -967,6 +992,7 @@ impl Floor {
     }
 }
 
+#[cfg(feature = "capture")]
 fn coverage(args: &[String]) {
     use libawdl::coverage::{is_decoded, of_tlv, Coverage};
     use std::collections::BTreeMap;
@@ -1235,23 +1261,59 @@ fn check_baseline(path: &str, floors: &std::collections::BTreeMap<u8, Floor>) ->
 /// advertise a metric and an Apple device must either follow us or beat us, and either way
 /// **its own frames change**. Capture alongside and look at who it names as master.
 #[allow(clippy::too_many_arguments)]
-fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>, metric_floor: Option<u64>) {
-    use libawdl::beacon::Beacon;
-    use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
-
-    let mut radio = match Nl80211::new(managed, monitor) {
-        Ok(r) => r,
+/// Open Google's `wonder.ko` through our own netlink backend and bring its RF up (findings
+/// 91–93). Returned as a trait object so the beacon loop is identical whichever radio it runs
+/// on. `managed` has no analogue here — wonder has no separate managed vif to hold down.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_wonder(monitor: &str, channel: u8) -> Box<dyn libawdl_hal::Radio> {
+    use libawdl_hal::TxParams;
+    let mut w = match libawdl_hal::wonder::Wonder::new(monitor) {
+        Ok(w) => w,
         Err(e) => {
-            eprintln!("cannot reach the radio: {e:?}");
+            eprintln!("cannot reach wonder: {e:?}");
             std::process::exit(1);
         }
     };
-    // Down first, monitor vif second, channel third. Getting this wrong fails as EAGAIN on
-    // every send with nothing in dmesg -- see rawsock's module note.
-    if let Err(e) = radio.bring_up(channel) {
-        eprintln!("bring_up failed: {e:?}");
+    // libmosey's captured bring-up rate: VHT, 80 MHz, 2 streams, MCS 3 (finding 92).
+    let params = TxParams { mcs: 3, nss: 2, bandwidth: 2, short_gi: false };
+    if let Err(e) = w.bring_up(channel, params, *b"QA") {
+        eprintln!("wonder bring_up failed: {e:?}");
         std::process::exit(1);
     }
+    Box::new(w)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn open_wonder(_monitor: &str, _channel: u8) -> Box<dyn libawdl_hal::Radio> {
+    eprintln!("--wonder needs Linux/Android (wonder.ko + netlink)");
+    std::process::exit(1);
+}
+
+fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32, compete: bool, legacy: bool, metric: Option<u32>, per_window: u32, windows: Option<usize>, follow: bool, tenure: Option<u32>, datapath: Option<&str>, garbage: Option<&str>, version: Option<&str>, metric_floor: Option<u64>, wonder: bool) {
+    use libawdl::beacon::Beacon;
+    use libawdl_hal::{nl80211::Nl80211, Radio, TxParams};
+
+    // Either backend, behind the same trait. --wonder drives Google's radio shim with our
+    // own netlink (the Pixel path); the default is the mainline nl80211/monitor backend (the
+    // ALFA-on-a-Pi path). The loop below does not know or care which it got.
+    let mut radio: Box<dyn Radio> = if wonder {
+        open_wonder(monitor, channel)
+    } else {
+        let n = match Nl80211::new(managed, monitor) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("cannot reach the radio: {e:?}");
+                std::process::exit(1);
+            }
+        };
+        // Down first, monitor vif second, channel third. Getting this wrong fails as EAGAIN on
+        // every send with nothing in dmesg -- see rawsock's module note.
+        if let Err(e) = n.bring_up(channel) {
+            eprintln!("bring_up failed: {e:?}");
+            std::process::exit(1);
+        }
+        Box::new(n)
+    };
     let addr = match radio.mac_address() {
         Ok(a) => a,
         Err(e) => {
@@ -1780,6 +1842,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
 /// which is exactly one cycle, so it should land on a single phase for a whole run -- and
 /// whether that phase coincides with a peer's is then a matter of when the process
 /// happened to start.
+#[cfg(feature = "capture")]
 fn phase<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
     use std::collections::BTreeMap;
 
@@ -1885,6 +1948,7 @@ fn phase<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
 ///
 /// Run against a capture to check the estimate converges before trusting it live. The
 /// number that decides whether it is usable is the SPREAD, not the phase.
+#[cfg(feature = "capture")]
 fn follow<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
     use libawdl::election::ElectionParamsV2;
     use libawdl::follow::Cluster;
@@ -2005,6 +2069,7 @@ fn parse_awdl(
 /// and one Pi; a field that identifies something all of them share would look like
 /// padding and is not. The sample size is a floor on confidence, not a proof, and a run
 /// of `.` on a tag seen 66 times means very little next to one seen 37,829 times.
+#[cfg(feature = "capture")]
 fn bytemap(args: &[String]) {
     use std::collections::BTreeMap;
 
@@ -2137,6 +2202,7 @@ fn bytemap(args: &[String]) {
 /// which take a different value in nearly every frame and so are "disjoint" only in the
 /// uninteresting sense. A real master flag sits at one value while master and another while
 /// following.
+#[cfg(feature = "capture")]
 fn master_diff(args: &[String]) {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2300,6 +2366,7 @@ fn master_diff(args: &[String]) {
 /// tree rooted at each distance-0 master. RSSI is the signal WE heard from that node — a
 /// proxy for how far it is from the sniffer, which is what makes varying device distance a
 /// usable experimental knob.
+#[cfg(feature = "capture")]
 fn topology(args: &[String]) {
     use std::collections::BTreeMap;
 
@@ -2450,6 +2517,7 @@ fn topology(args: &[String]) {
 /// frames drift apart for reasons that have nothing to do with whether they are the same
 /// counter, and a match found across frames would need a story about timing. A match
 /// inside one frame does not.
+#[cfg(feature = "capture")]
 fn correlate(files: &[String]) {
     use libawdl::election::ElectionParamsV2;
     use libawdl::state::DataPathState;
