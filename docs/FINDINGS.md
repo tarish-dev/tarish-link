@@ -5978,10 +5978,36 @@ No file has crossed yet. Two symptoms, one cause:
 Both are the single-channel + software-sync limitation of finding 96, now seen through the real
 daemon: multicast discovery gets through often enough to be visible, but a **TCP connection**
 (the transfer) needs sustained same-channel overlap that one fixed channel and ~ms-scale software
-sync do not provide. The identified next work is unchanged and now concrete: **follow the
-master's channel sequence** (be on ch6 for discovery and the peer's data channel when connecting)
-and tighten sync. That is the difference between "the daemon runs on our AWDL and sees Apple" —
-proven here — and "a file transfers over it".
+sync do not provide.
+
+### A second, concrete blocker: the all-zero AirDrop instance (our data interface is a TUN)
+
+A control run settled part of this. Restoring stock libmosey, the Pixel appears on the iPhone
+immediately — so the phone and the iPhone are fine, and the difference was ours. And a specific
+one: stock libmosey advertised `faa7b275c8a7._airdrop._tcp.local`, while our shim advertised
+**`000000000000._airdrop._tcp.local`** — all zeros. `sharingd::instance_name()` derives the
+12-hex AirDrop instance from `/sys/class/net/<iface>/address`, and **our `mosey0` is a TUN,
+which has no MAC** (`ARPHRD_NONE`), so it falls back to the all-zero placeholder — which Apple
+will not display. libmosey's `mosey0` is a real netdev carrying the AWDL MAC, hence a real
+instance.
+
+The fix is clean and needs no daemon rebuild: make the data interface a **TAP** (which has a
+settable MAC — verified: a TUN rejects `SIOCSIFHWADDR`, a TAP accepts it) and set its MAC to the
+AWDL address. Then `sharingd` reads a proper instance, and as a bonus the kernel's own EUI-64
+auto-address becomes exactly the derived link-local, removing the `addr_gen_mode` and
+manual-address steps entirely. The cost is that a TAP delivers Ethernet frames, so the data
+path must strip a 14-byte Ethernet header inbound and prepend one outbound.
+
+### Where this leaves the next work — now two concrete items
+
+1. **Data interface → TAP with the AWDL MAC**, so the AirDrop instance is real and we can be
+   displayed at all. Tractable, no rebuild, addresses visibility directly.
+2. **Follow the master's channel sequence + tighten sync**, so the mDNS answer and the transfer
+   TCP actually reach the hopping iPhone. The larger engine work, and what a *completed* transfer
+   needs.
+
+"The daemon runs on our AWDL and processes Apple's discovery" is proven. A file transferring
+over it needs (1) then (2).
 
 ## Open, not yet investigated
 
