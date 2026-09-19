@@ -6652,6 +6652,37 @@ fixed. This is a prod fix (prod hit the churn on libmosey too).
 
 `tarish-daemon` branch `httpd-concurrent-accept`: 82d94cc + 50c86d1 (handoff) + the E0382 fix.
 
+## 112. ★★★ The "long stall before it starts" is mDNS-responder gating, not the radio: we advertise XOR browse, and advertising lapses
+
+Chasing the startup stall (felt on both send and receive) with `mosey0` + device logs:
+
+- On a receive attempt the iPhone sent **106 `_airdrop._tcp.local` PTR queries and we answered 0.**
+- On air we were sending **queries of our own (`PTR (QM)?`)** — i.e. *browsing*, not *responding*.
+- `sharingd/src/mdns.rs:364` gates the responder: **`if self.advertising { answer() }`**. When
+  `advertising` is false we log the query (`rx`) and stay silent.
+
+`advertising` is driven by `setDiscoverable` (main.rs:1127), which the app calls from the
+**Receive screen**; a **duration timer auto-reverts it to false** (main.rs:19-26). The daemon
+therefore **advertises XOR browses**, tied to the app's Send/Receive mode — never both at once,
+unlike a real AirDrop device which advertises *and* browses continuously. So a peer can only
+discover us when the app is in Receive mode *and* inside the discoverable window; otherwise its
+queries go unanswered → the long stall until the mode/renew re-asserts. (When we do answer, the
+reply is injected multicast with no ARQ, so the peer may miss a few and re-query — a smaller,
+secondary stall.)
+
+**This is above the transport** (mdns.rs is identical across trees; the newly built binary did not
+regress it), which fits prod hitting discovery issues on libmosey too.
+
+**Fix options (a `tarish-daemon`/app change, needs a build):**
+1. **Advertise continuously while the app is foreground**, independent of Send/Receive mode, so a
+   sender can always find us — closest to real AirDrop. (Weigh against the operator's privacy
+   stance of "advertise only on Receive.")
+2. **Advertise and browse concurrently** in Receive-and-Send, so the one screen both finds peers
+   and is findable.
+3. **Close the duration/renew gap** so advertising never lapses while the Receive screen is up.
+4. Secondary: **repeat the mDNS answer** (multicast, cheap) to survive injection loss once
+   advertising is on.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
