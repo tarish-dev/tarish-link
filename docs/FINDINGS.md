@@ -6973,3 +6973,14 @@ adaptation** (`CFG_RATE_ADAPTATION`, protobuf field 6 = 1 in `StartMoseyConfig`)
 
 Everything else (channel, width, bring-up command set) already matches stock; this is the missing
 piece. Bench: mustang = rooted stock (reference), blazer = our stack, both on the same silicon.
+
+> **TESTED — the mcs fix does NOT fix RECEIVE (it's for SEND).** Deployed the `mcs=3` shim to blazer
+> on ch149 and ran an iPhone→blazer RECEIVE: **331 KB/s**, unchanged from the 395 KB/s at mcs=11.
+> Obvious in hindsight: on receive the *iPhone* chooses its TX rate; our `SET_FIXED_TX_RATE` only
+> governs *our* transmissions (send + ACKs). So the mcs fix is a real correctness fix that should
+> help our SEND throughput, but the **RECEIVE 20× is NOT PHY rate** — it is back to the
+> **availability-window duty cycle** (finding 115: we overlap the peer ~28% on ch149; stock ~fully).
+> Both advertise `[149]` / AW 16 TU, so the delta is in the **presence/availability we advertise or
+> how tightly we hold the peer's windows** — protocol-layer libawdl work, the real task-7 target.
+> NEXT: decode + compare the Sync-Parameters presence/availability (extended AW, aw_periods, presence
+> mode) between stock (mustang capture) and ours, and measure per-window overlap; keep the mcs fix.
