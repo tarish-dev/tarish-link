@@ -6586,6 +6586,36 @@ thread-per-connection, shared state is all `Arc`, handlers are `&self`. **Untest
 builds via Soong and the build host was unreachable this session; build and verify against the
 121-reset repro next.
 
+## 110. ★★★ Receive throughput is dominated by the daemon's connection churn, not the radio — libawdl ACK tuning is within the noise
+
+Deep-dive on the "iPhone shows done, our app still receiving in chunks" report, with a device-side
+`mosey0` TCP capture (the definitive view; the on-air 802.11 counts were too coarse and their
+"0 retries" was misleading — a TCP retransmit is a fresh frame without the 802.11 Retry bit).
+
+What the TCP timeline shows on a 4.5 MB receive:
+
+- It **starts fast** — the iPhone bursts, we ACK each, our window grows; sub-ms round trips.
+- Then a segment we **already ACKed is retransmitted** — our injected ACK was lost in the air
+  (no link-layer ARQ on our inject path). Some segments were resent up to 11×. A lost ACK is not a
+  hiccup; it is a full TCP **RTO stall** (8–11 s gaps observed, backing off 1→2→4→8 s).
+- The connection also shows a **SYN/RST storm** — ~95 SYNs, ~33 RSTs — the iPhone opening and
+  resetting many connections. That is the single-threaded httpd accept loop (finding 109): while
+  it churns stale/parallel connections a live transfer goes unserviced for seconds.
+
+**The decisive observation is the variance:** the *same file* took 17.9 s, 30.5 s, 36.2 s, and
+64 s across runs. That 4× spread dwarfs any libawdl-side effect, so ACK tuning cannot be evaluated
+by single samples. A redundant-ACK experiment (inject each ACK 3× to survive loss) could not be
+shown to help and plausibly **hurt** by tripling ACK airtime into the channel's contention; it was
+reverted. `immediate-ACK` (finding 109) is kept — it has a clear mechanism and low airtime.
+
+**Conclusion / where the leverage actually is:** the dominant, and now repeatedly implicated,
+factor is the **single-threaded accept loop** (`tarish-daemon`, fixed on branch
+`httpd-concurrent-accept`, 82d94cc, unbuilt). It explains the "declined first time / works second,"
+the multi-second stalls, and the discovery flakiness prod hits on libmosey too — all above the
+transport. The next real step is to **build that fix on the build host and re-measure**, ideally
+over several runs to see through the variance, before any further libawdl ACK work. Blind
+per-build tuning on a 4×-variance metric is a trap.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

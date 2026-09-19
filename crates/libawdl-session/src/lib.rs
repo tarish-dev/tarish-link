@@ -155,6 +155,11 @@ const OUTBOUND_MAX: usize = 512;
 /// frame is ~0.25 ms on air, so 24 frames is ~6 ms — comfortably inside a 16 TU (~16.4 ms)
 /// availability window, without overrunning into the next slot.
 const DRAIN_PER_WINDOW: usize = 24;
+/// How many times to transmit each ACK on the immediate-ACK path. Our inject path has no
+/// link-layer ARQ, and a lost ACK is a full TCP RTO stall (seconds), not a hiccup — while an ACK
+/// is ~40 bytes. Sending it 3× (same seq, Retry bit; the peer de-duplicates) makes a ~p loss ~p³
+/// for negligible airtime. Finding 110.
+const ACK_REPEAT: u32 = 3;
 
 /// Run the session on `radio` (already brought up) until `stop` is set or `cfg.duration`
 /// elapses. Returns what it did.
@@ -413,6 +418,14 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 Ok(()) => dp_sent += 1,
                                 Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
                             }
+                            // NOTE: redundant ACK injection (each ACK N×) was tried here to survive
+                            // ACK loss without the RTO stall, but on a shared channel it added
+                            // airtime/contention and the run-to-run variance (17-64 s for the same
+                            // file) dwarfed any effect — it could not be shown to help. The
+                            // dominant factor is the single-threaded httpd accept loop churning
+                            // connections (SYN/RST storm), fixed in tarish-daemon, not here.
+                            // Finding 110. ACK_REPEAT is kept as a knob for a proper isolated A/B.
+                            let _ = ACK_REPEAT;
                         }
                         if read == 0 {
                             break; // the tun had nothing more to send this instant
