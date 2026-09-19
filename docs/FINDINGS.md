@@ -6272,6 +6272,46 @@ The engine, the pure-stack integration, the follow/counter correctness, the inst
 Apple's `sharingd` accepting a clean-room AWDL peer — is the open problem, consistent with the
 operator's standing note that Apple's protocol was never fully reverse engineered.
 
+## 103. ★★★ The gap is our AWDL transport's timing, not BLE and not the responder — isolated by swap
+
+Follow-up to 102, prompted by "are you sure it isn't the BLE?" Three things were pinned down.
+
+**BLE is real and required, and it works.** `tarish-app`'s own manifest says it: *"BLE
+advertising is the discovery trigger; without it the device is invisible,"* and it advertises
+**only while the app's Receive screen is foreground** (nothing from boot). The beacon is Apple
+mfg-data `0x004C`, message type `0x05`, all-zero contact hashes ("everyone"). Confirmed on air
+from the Pi: an **extended-scan** (`btmgmt find`) saw our beacon —
+`Data[18]: 00…00 01 00…00`, PDU `ADV_SCAN_IND`, resolvable random address — 60 in a 10 s window,
+alongside the iPhones' non-zero ones. A **legacy** `hcitool lescan` missed it, which is why an
+early check looked empty. So the app does advertise the trigger; it just has to be foregrounded
+on Receive, and its 10-min discoverable window / screen-off stops it.
+
+**The responder is `tarishsharingd`, not Google.** Only `dev.tarish.app` is installed — no
+MoseyApp/GMS AirDrop UI. With `mosey_server` running but all Tarish stopped, the Pixel does not
+appear; it appears only with `tarishsharingd` up. So our sharing layer is the real responder.
+
+**The swap isolates the gap to our AWDL transport.** Operator, unprompted and decisive: with
+**stock libmosey** the Pixel appears on both iPhones **instantly, no interaction**; with **our
+shim** it never does — and the *only* thing that changes is stock libmosey ↔ our shim.
+`tarishsharingd` (responder), the app (BLE), the phone, the channel are all constant. So it is
+neither BLE nor the responder: it is the AWDL layer itself.
+
+**Best-supported cause: timing precision.** Our shim's AWDL *frames* match stock byte-for-byte
+(finding 102), but stock libmosey drives wonder in a tight native loop, while our session syncs
+in **software off host timestamps** — spread ~8 ms against a 16 ms availability window, with no
+hardware TSF (`get_mac_tsf` is a stub, finding 88). Apple peers stock's tightly-timed AWDL and
+opens the unicast path to `/Discover` it; it does not peer our loosely-timed one, even though
+the bytes are identical, because our transmit/receive instants do not land tightly enough in the
+cluster's windows for a *unicast* data path. Broadcast PSFs tolerate the jitter (the frames are
+seen on air); the unicast handshake the iPhone needs does not. This is inferred — the iPhone's
+own reason is only visible from the Apple side — but it is the one variable left after BLE, the
+responder, the channel, sync convergence, the counter/follow, and every tag were eliminated.
+
+**Next, if resumed:** either recover a real hardware TSF path on wonder (the vendor `get_mac_tsf`
+is stubbed; is there another route?) or tighten the software timing loop far below the current
+~8 ms — and confirm from an Apple device's own log (`log stream` on a Mac) whether it adds our
+peer and where it stops. Not an on-air-frame problem.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
