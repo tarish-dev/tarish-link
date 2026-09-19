@@ -6777,3 +6777,82 @@ not reliability: the 2.4-GHz-only + AWDL availability-pacing ceiling (finding 10
 1 s cycle. (An earlier note here said "crawls/stalls" — corrected: it does not stall, it completes
 slowly.) Also per-restart MAC rotation forces the peer to re-discover us (a sheet refresh fixes
 it); pinning a stable wondertap0 MAC would remove that friction.
+
+## 114. ★★★ Ghost tiles FIXED — a persisted, MAC-independent AirDrop identity (and a user reset)
+
+The iPhone kept showing **stale "ghost" Pixel tiles** that never connected: tapping one left the
+iPhone at "waiting to accept" and **no SYN reached our :8770**. Cause: the mDNS instance name (and
+the SRV hostname derived from it) was re-derived from the interface MAC on every `Browser`
+construction, and the radio is on-demand — **mosey0 is destroyed and recreated with a fresh random
+MAC every time it is acquired**, not just per reboot. So every Receive-mode entry advertised a
+*new* 12-hex identity; an Apple peer keys its cache on that name, so each session it saw a new
+device and the previous ones lingered (record TTL up to 120 s) pointing at a now-dead link-local
+address. Confirmed on device: three sessions advertised `2ef759c61f61`, `d6ad1539073d`,
+`82aacdc6e6e5` — same phone.
+
+**Fix (tarish-daemon `mdns.rs`):** persist a deliberate random 12-hex identity to
+`/data/misc/tarish/identity` (our own 0700 `tarish_data_file` dir — no new SELinux policy),
+minted once via `getrandom`, read back forever. Apple's own instance names are arbitrary 12-hex
+and need not equal the AWDL MAC, so an invented value interoperates fine while giving the peer a
+constant handle. The AAAA still tracks the live MAC but is re-announced under the *stable* name
+with the cache-flush bit, so the peer replaces the address instead of accumulating a tile. Verified:
+identity `e47297294a56` held across restarts while the MAC churned to `82:aa:cd:c6:e6:e5`.
+
+**`resetIdentity()` (privacy escape hatch):** Apple re-exchanges a chip-signed identity after first
+contact; we can't, so a stable random handle is our only continuity signal. Added
+`ITarishService.resetIdentity()` — mints a fresh id, withdraws the old mDNS instance (goodbye, so
+peers drop it), re-advertises. For a "reset identity" control in settings: trades cross-session
+recognisability for unlinkability. The daemon side is a `reset_identity` flag consumed by the
+browser loop (same shape as `refresh_now`).
+
+**Trap that bit hard (and is general):** I first inserted `resetIdentity()` **mid-interface** in the
+AIDL. AIDL transaction codes are **positional**, so that renumbered every later method — the
+still-running old app called `reportBlePeer` (frequent, BLE scan results) at a code that now mapped
+to `resetIdentity`, and **every scan result minted a new identity** → five ghost tiles sprayed onto
+the iPhone in seconds. **Always append new AIDL methods at the end** (the interface even carries an
+"APPENDED LAST — transaction codes are positional" comment). Moving it to the end fixed it.
+
+## 115. ★★★ AirDrop→iPhone throughput is DUTY-CYCLE bound by single-channel AWDL — stock libmosey is identical on this hardware, and the daemon is not the cap
+
+A 7 MB receive from an iPhone took **~60 s (122 KB/s)** on our stack. Not loss, not the daemon —
+**channel duty cycle.** Measured, on `blazer` (Pixel 10 Pro, wonder.ko), country QA:
+
+**The wall is channel overlap.** We sit on **one** AWDL channel (can't hop live — `SET_CHANNEL` on
+the up monitor → `EOPNOTSUPP`). tarishd's `channels_for()` puts AWDL in the band *opposite* the
+Wi-Fi association to protect it (DBS holds 2.4 + one 5 GHz channel, not two 5 GHz), so with Wi-Fi
+unassociated it defaults to **ch6**. The iPhone splits its 16-slot cycle across **ch6 + ch149**
+(decoded on the wire: peers advertise `[6, 149]`), so we only catch the slots where it is on *our*
+channel: **~17 % on ch6, ~28 % on ch149.**
+
+- ch6: 7.2 MB / 60.7 s = **122 KB/s**, 41.5 s (68 %) in gaps aligned to the ~1.05 s AWDL cycle.
+- ch149 (forced via `persist.tarish.channels=149`): 7.56 MB / 18.7 s = **395 KB/s** (3.2×), gaps
+  shrink to 10–30 ms (slot-level). Discovery on 149 is flakier (the iPhone bootstraps on the ch6
+  social channel) and 149 drops a 5 GHz Wi-Fi association — so **do NOT hardcode it**.
+
+**Three independent proofs the daemon (tarishsharingd) is NOT the bottleneck:**
+1. **In-burst rate 11–22 Mbps** (median 11.6) — when data flows, the daemon sinks it at 1.4–2.7 MB/s;
+   the low average is purely the gaps.
+2. **Receiver TCP window stays wide open** through the gaps (28/3868 ACKs tiny) — the daemon has
+   drained everything and is idle-waiting, not backpressuring. A daemon cap would collapse the window.
+3. **Changing only the channel tripled throughput** with the daemon byte-identical — impossible if
+   the daemon were the cap.
+
+**Stock libmosey is at parity — confirmed by swap AND on the wire.** Swapped in the stock blob
+(`/data/local/tmp/libmosey_stock.so`) under the same tarishd: **138 KB/s** on ch6, same gap shape.
+Decoding the channel-sequence TLV (tag 18) per source MAC: the **local device advertises `[6]`
+(single channel) under BOTH stock and our shim** — even with `channel_hopping=true` forced (via
+`persist.tarish.mosey_config=080128013001`) and both channels offered, stock **still** advertised
+`[6]` and transmitted only on 2437 MHz. Only Apple peers hop `[6, 149]`. So wonder.ko's
+channel-schedule command is effectively a stub for hopping — **libmosey can't drive the hop here
+either**, which is *why* stock is also single-channel.
+
+**Conclusion:** the PHY is fine (11–22 Mbps in-burst); the ceiling is that a single-channel radio
+cannot overlap a dual-channel peer more than ~17–28 %. Matching Apple-to-Apple AirDrop speed needs
+**true multi-channel hopping**, which this silicon/driver does not provide (and stock doesn't get
+either). This is silicon-selection territory (AWDL-RESEARCH-BRIEF), not the daemon or libawdl.
+
+**Still to verify (user's proposed test):** run the **full stock stack on `mustang`** (Google's own
+mosey_server/MoseyApp orchestration, not libmosey-under-tarishd) and watch for on-air frames on
+*both* 2437 and 5745 MHz during a real transfer. If the full stock stack hops, the hop is reachable
+on this hardware and the gap is orchestration; if it too stays single-channel, hardware-bound is
+confirmed.
