@@ -6945,3 +6945,31 @@ sync — measure availability-window overlap with the peer on ch149 and match li
 `vendor/localsepolicy/product/private/tarish*.te` + strip `tarish` from its `*_contexts`, and delete
 the `tarish_aid.txt` line from the device `BoardConfig.mk`. Stock factory image (real Google Android,
 CP2A.260805.005) is cached at `vendor/adevtool/dl/mustang-cp2a.260805.005-factory-*.zip`.
+
+## 118. ★★★ The 20× residual is PHY RATE: stock is rate-adaptive VHT MCS 4–9 @ 80 MHz; our fixed `mcs=11` is INVALID for VHT and falls back low
+
+Captured stock mustang's *own* AWDL frames on ch149 during a transfer (rooted, on-device
+`tcpdump -i wonder0`) and read the radiotap:
+
+- **Channel sequence is `[149]` single-channel — same as ours** (both idle-decoded), so the earlier
+  "multi-channel overlap" theory is NOT the differentiator on ch149.
+- **No aggregation:** stock uses single ~1500 B frames (0 A-MSDU >1600 B), same frame shape as ours.
+- **The difference is the PHY rate.** Stock's *data* frames: **80 MHz, VHT, rate-adaptive MCS 4–9**
+  (MCS 5/6/8/9 dominant → hundreds of Mbps PHY), Action/sync frames at the 12 Mb/s basic rate.
+  Peak **~4.9 MB/s** on-air (~3400 fps). Our forced-ch149 transfer was 395 KB/s (~270 fps) — ~12×
+  fewer frames/s, i.e. each frame takes ~12× the airtime → a low PHY rate.
+
+**Root cause in our code:** `wonder.rs::bring_up`'s `SET_FIXED_TX_RATE` sets **`mcs=11` with VHT
+preamble** on 80 MHz. **VHT MCS is 0–9 — 11 is invalid for VHT** (it's an HT index). An invalid VHT
+rate silently falls back to a low rate — the exact failure CLAUDE.md already records ("VHT everywhere
+is INVALID on 2.4 GHz → 1 Mb/s DSSS"). And we set a *fixed* rate at all, while stock uses **rate
+adaptation** (`CFG_RATE_ADAPTATION`, protobuf field 6 = 1 in `StartMoseyConfig`).
+
+**The fix (task 7, likely the bulk of the 20×):**
+1. Set a **valid VHT rate** on 80 MHz — `mcs ≤ 9` (e.g. 9), not 11.
+2. Better, **enable rate adaptation** like stock so the firmware picks MCS 4–9 per conditions, instead
+   of any single fixed rate.
+3. Then re-measure on ch149 (verify our on-air radiotap now shows VHT MCS 5–9, not a fallback rate).
+
+Everything else (channel, width, bring-up command set) already matches stock; this is the missing
+piece. Bench: mustang = rooted stock (reference), blazer = our stack, both on the same silicon.
