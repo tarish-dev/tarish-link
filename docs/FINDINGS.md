@@ -6856,3 +6856,48 @@ mosey_server/MoseyApp orchestration, not libmosey-under-tarishd) and watch for o
 *both* 2437 and 5745 MHz during a real transfer. If the full stock stack hops, the hop is reachable
 on this hardware and the gap is orchestration; if it too stays single-channel, hardware-bound is
 confirmed.
+
+> **CORRECTED by finding 116 — this conclusion was WRONG.** The "hardware-bound / stock is the
+> same" conclusion above came from stock libmosey run *under our tarishd* (5 FFI calls), which is
+> NOT Google's full orchestration. The proposed mustang test was run and the **full stock Google
+> image is fast on the same silicon** (see 116). The ceiling is our orchestration, not the radio.
+> Keep 115's *measurements* (the ch6/ch149 duty numbers, daemon exoneration, in-burst PHY) — those
+> stand; discard its root-cause verdict.
+
+## 116. ★★★ Full stock Google image on mustang is FAST on the same silicon — the throughput ceiling is OUR orchestration, not the hardware (overturns 115)
+
+The definitive test of 115. Flashed the **stock Google factory image** (`mustang-cp2a.260805.005`,
+CP2A.260805.005 — the real shipping Android, from adevtool's `dl/` cache) onto mustang (Pixel 10
+Pro XL, BCM4390), set Quick Share to Everyone, and transferred to an iPhone: **26 MB in ~3–4 s
+(~7–8 MB/s)** — indistinguishable from a stock Android-to-Android (Oppo) transfer, and ~20–60× our
+pure stack. **Same phone, same chip, same radio, same wonder.ko.**
+
+So 115's "hardware-bound" verdict is **wrong**: the silicon CAN do it under Google's full stack.
+The gap is how we DRIVE the AWDL stack, not the radio. Why 115 mislead: it compared stock
+*libmosey run under our tarishd* (our 5 FFI calls + our config) against our shim — that holds the
+**orchestration** constant (ours) and only swaps the transport blob, so of course they matched.
+Google's full orchestration is `mosey_server`/MoseyApp (GMS), a different and fuller driver of the
+same libmosey than tarishd's five calls.
+
+**On-air witness (blazer `wonder0` monitor) — stock puts the BULK on 5 GHz, confirmed by a clean
+presence/absence test:**
+- **ch149 (5745 MHz)** during the transfer: heavy large-frame (>1000 B) data activity (thousands of
+  frames). Undersampled/polluted (blazer was also running our stack on 149), so not a clean *rate*,
+  but the bulk is clearly there.
+- **ch6 (2437 MHz)** during a second identical transfer: **14 large frames, 0.02 MB total** — i.e.
+  essentially *no* bulk on ch6, only sparse social/sync. This is the decisive signal: absence needs
+  no perfect capture — if the bulk were on ch6 we'd see a burst like our own stack makes (our stack's
+  ch6 transfer was thousands of large frames). We see nothing.
+
+So stock runs **multi-channel AWDL**: ch6 for social/discovery, **ch149 for the bulk**. Our stack
+puts the bulk on whichever single channel we sit on (ch6 by default) → 122 KB/s. Stock's bulk rides
+5 GHz → 7–8 MB/s. Same radio. The hop is real and reachable on this silicon; our orchestration never
+triggers it.
+
+**Next — the real investigation (trace what stock's orchestration does that tarishd doesn't):** the
+`mosey_server`/GMS path drives libmosey with more than our five FFI calls and/or a richer config
+(likely a channel-schedule / high-performance mode that triggers the 5 GHz bulk). Trace it: hook
+libmosey on a rooted device (blazer) under the full orchestration, or `ltrace`/`strace`
+`mosey_server`, and diff the FFI call sequence + `StartMoseyConfig` (and any post-start channel/BW
+calls) against tarishd's. Then make tarishd issue the same calls. This is the "trace libmosey and do
+the same calls" method applied to the orchestration layer, not just the transport blob.
