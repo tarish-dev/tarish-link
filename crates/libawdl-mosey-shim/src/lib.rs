@@ -151,8 +151,13 @@ pub unsafe extern "C" fn mosey_start_5(
             return std::ptr::null_mut();
         }
     };
-    // libmosey's captured bring-up rate; 20 MHz on the 2.4 GHz social channel.
-    let params = TxParams { mcs: 11, nss: 2, bandwidth: if channel < 36 { 0 } else { 2 }, short_gi: false }; // HT MCS 11, matching stock libmosey
+    // Bring-up TX rate, band-aware. VHT MCS is 0..=9 — the old uniform mcs=11 is INVALID on the
+    // 5 GHz VHT channels (it is an HT index), and an invalid VHT rate silently falls back to a low
+    // rate, which is finding 118's ~20x throughput hole vs stock on ch149. Stock's *traced* bring-up
+    // rate on ch149 is mcs=3 (VHT), and its data then rate-adapts up to MCS 9; on 2.4 GHz HT, 11 is
+    // a valid HT index. So: HT(2.4) -> 11, VHT(5) -> 3 to match stock and let the firmware adapt.
+    let mcs = if channel < 36 { 11 } else { 3 };
+    let params = TxParams { mcs, nss: 2, bandwidth: if channel < 36 { 0 } else { 2 }, short_gi: false };
     if let Err(e) = radio.bring_up(channel, params, cc) {
         log::error!("mosey shim: wonder bring-up failed: {e:?}");
         return std::ptr::null_mut();
