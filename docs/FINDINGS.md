@@ -6771,7 +6771,9 @@ redundancy is nearly free and kills the RTO stall.
 **11.8 s → 0.99 s**. The remaining `/Discover`→`/Ask` gap is the human tapping/picking the file,
 not a stall.
 
-**Still open (bulk data phase, not setup):** a 7 MB `/Upload` starts fast then crawls/stalls — the
-2.4-GHz-only + AWDL availability-pacing throughput ceiling (finding 108). And per-restart MAC
-rotation forces the peer to re-discover us (a sheet refresh fixes it); pinning a stable wondertap0
-MAC would remove that friction.
+**Still open (bulk data phase, not setup):** with setup fixed, a 7.48 MB `/Upload` **completes
+reliably** (extracted intact) but **slowly — ~84 s, ~89 KB/s**. The remaining gap is bulk *speed*,
+not reliability: the 2.4-GHz-only + AWDL availability-pacing ceiling (finding 108), ~one burst per
+1 s cycle. (An earlier note here said "crawls/stalls" — corrected: it does not stall, it completes
+slowly.) Also per-restart MAC rotation forces the peer to re-discover us (a sheet refresh fixes
+it); pinning a stable wondertap0 MAC would remove that friction.
