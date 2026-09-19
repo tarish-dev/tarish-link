@@ -7017,3 +7017,32 @@ re-examine whether it can be made to work); or (c) using the firmware data inter
 for bulk instead of monitor injection. All three are radio/driver-level, not libawdl-protocol tweaks.
 The mcs fix (118) stays for SEND; the availability advertisement already matches; the frontier is the
 channel-following capability.
+
+## 120. ★★★ THE isolation: tarishd + libmosey @ ch149 is FAST (3.4 MB/s). Prod was slow from the ch6 default, NOT the daemon. Clean-room gap = libawdl vs libmosey at identical everything
+
+The operator's reframe cracked it: prod (tarishd + **real libmosey**) is slow + flaky, while
+mosey_server + the *same* libmosey is fast — so the variable is the daemon, not wonder.ko/hardware.
+Tested it apples-to-apples on blazer (rooted): swapped the **real stock libmosey blob** under tarishd
+and **forced ch149** (mosey_server's channel), same config `[8,1,48,1]` (identical to what MoseyApp
+passes mosey_server — verified in mosey_server's own log; channel_hopping=false, ampdu off, amsdu
+not allowed in BOTH).
+
+**Result: tarishd + libmosey @ ch149 = ~24 MB in a ~7 s burst, peak 4.1 MB/s, ~3.4 MB/s sustained —
+BLAZING FAST**, ~10× our libawdl and in mosey_server's league.
+
+So the answer to "why does mosey_server+libmosey work but tarishd+libmosey doesn't": **it DOES —
+on ch149.** tarishd's `channels_for` defaults to **ch6** (Wi-Fi-5GHz coexistence protection), and
+**libmosey on ch6 is ~138 KB/s vs ch149 ~3.4 MB/s**. mosey_server runs ch149. **Prod's slowness was
+the channel default, not the daemon.** tarishd is fine. This corrects findings 115–119's drift toward
+"hardware / firmware channel-following / protocol wall" — none of that; it was the channel.
+
+**Two separate, now-clean results:**
+1. **PROD FIX (big, easy):** default tarishd to **ch149** (not ch6). ~138 KB/s → ~3.4 MB/s for the
+   real-libmosey prod build. Caveat: 5 GHz Wi-Fi coexistence (DBS can't hold two 5 GHz channels) —
+   stock tolerates it; gate it on the STA band (`channels_for` already has the machinery).
+2. **CLEAN-ROOM libawdl gap (the real remaining work):** at the SAME ch149, same daemon (tarishd),
+   same radio — **libmosey = 3.4 MB/s, our libawdl shim = 395 KB/s (~9× slower).** Every other
+   variable is now held constant, so the gap is unambiguously in **our libawdl AWDL implementation**
+   (RX handling / realized presence / sync), and **libmosey-under-tarishd-@149 is the exact reference
+   to diff against** on the same bench (blazer). Advertised Sync-Params already match (119); the gap
+   is in runtime behaviour, measurable frame-by-frame against libmosey on the identical setup.
