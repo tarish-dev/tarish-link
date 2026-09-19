@@ -6652,6 +6652,28 @@ fixed. This is a prod fix (prod hit the churn on libmosey too).
 
 `tarish-daemon` branch `httpd-concurrent-accept`: 82d94cc + 50c86d1 (handoff) + the E0382 fix.
 
+## 112b. Concurrent-accept CONFIRMED + advertising is correct on Receive; open UX items
+
+Follow-ups that partly correct 112:
+- **The concurrent-accept fix is validated on device: TLS handshake failures 121 → 0**, `/Discover`
+  completes cleanly, no reset storm. Discovery/render is stable now.
+- **The advertise-XOR-browse gating is NOT a bug** — operator's point: iPhones also stop
+  advertising when the screen is off / AirDrop reverts, and we mirror that (advertise only while
+  the Receive screen is foreground, `discoverable duration=600s` like iOS "Everyone for 10 min").
+  When on the Receive screen we advertise correctly and **answer the iPhone's queries in ~5 ms**
+  (query→`8/0/0` response pairs on air). My earlier "0 answered" was a capture taken in Send/browse
+  mode — a red herring.
+- The felt "startup stall" was **not cleanly reproduced in a completed transfer** this session
+  (tests were confounded by app mode and incomplete sends, and throughput has ~4× variance). It
+  needs controlled multi-run measurement; the daemon-side churn that was the leading suspect is now
+  fixed (0 TLS failures).
+
+**Open UX / feature items (tarish-app / sender):**
+- **Receive screen needs an obvious "waiting to receive" state** (e.g. a pulsing radar), because
+  the inbox list + device name don't signal that the device is actively listening.
+- **Send no `FileIcon` preview** — iPhone→iPhone shows a thumbnail in the accept prompt; our `/Ask`
+  is a minimal 436-byte body with no `FileIcon`/`SenderRecordData`. Sender-side enhancement.
+
 ## 112. ★★★ The "long stall before it starts" is mDNS-responder gating, not the radio: we advertise XOR browse, and advertising lapses
 
 Chasing the startup stall (felt on both send and receive) with `mosey0` + device logs:
