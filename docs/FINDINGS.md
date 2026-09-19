@@ -7046,3 +7046,11 @@ the channel default, not the daemon.** tarishd is fine. This corrects findings 1
    (RX handling / realized presence / sync), and **libmosey-under-tarishd-@149 is the exact reference
    to diff against** on the same bench (blazer). Advertised Sync-Params already match (119); the gap
    is in runtime behaviour, measurable frame-by-frame against libmosey on the identical setup.
+
+**120 addendum — ch149 fixes DISCOVERY too, not just speed.** On the tarishd + real-libmosey @ ch149
+bench, the operator confirmed discovery is "waaaay more stable" in addition to the 3.4 MB/s speed. So
+BOTH prod symptoms the test team reported (slow transfers AND unstable discovery) share the one root
+cause: the ch6 default in `channels_for`. The prod fix (default ch149) resolves both. Discovery on
+ch149 is stable because that is where the peer actually spends its time / where mosey's social+data
+alignment lands — ch6 discovery was the flaky path. (Our earlier "ch149 flakes discovery" note was
+about OUR libawdl shim on ch149, not libmosey — libmosey@149 discovers fine.)
