@@ -6901,3 +6901,47 @@ libmosey on a rooted device (blazer) under the full orchestration, or `ltrace`/`
 `mosey_server`, and diff the FFI call sequence + `StartMoseyConfig` (and any post-start channel/BW
 calls) against tarishd's. Then make tarishd issue the same calls. This is the "trace libmosey and do
 the same calls" method applied to the orchestration layer, not just the transport blob.
+
+## 117. ★★★ Traced stock mosey on mustang: NO secret vendor command — it just sits on ch149 @ 80 MHz. The residual gap is AWDL protocol-layer, not radio config
+
+Built a rooted **GMS-userdebug** image for mustang (privileged GMS + MoseyApp + mosey_server; a full
+GMS build — remove tarish first or its sepolicy/AID/app wiring breaks it, see 6-step cleanup below)
+and traced the **cold** `mosey_start` (reboot, so the firmware channel state is cleared; the schedule
+persists across `wondertap0` going down, so only a reboot gives a true cold bring-up). Captured the
+kernel's `[wonder]` decode (dmesg is the reliable witness — it logs every vendor command wonder.ko
+receives; the strace side kept detaching / attaching too late).
+
+**Stock's cold bring-up issues exactly the SAME vendor command SET as our `wonder.rs::bring_up`:**
+`SET_REG`(QA) → `SET_FREQUENCY` → `SET_FILTER`(BSSID 00:..:73) → `SET_FIXED_TX_RATE` → `GET_MAC`.
+**There is no hidden channel-schedule / multi-channel / hop command.** The differences are the
+VALUES:
+
+| | stock mosey | our stack (default) |
+|---|---|---|
+| `SET_FREQUENCY` | **5745 MHz (ch149), bandwidth=2 (80 MHz)** | 2437 (ch6), bandwidth=0 (20 MHz) |
+| `SET_FIXED_TX_RATE` | preamble=2, bw=2, gi=2, nss=2, **mcs=3** | mcs=11 (our bring_up) |
+
+So (a) our long-standing bring_up comment claiming "stock uses mcs=11" is **wrong** — stock's
+bring-up rate is **mcs=3**; and (b) stock simply parks on **ch149 at 80 MHz**, single `SET_FREQUENCY`.
+A transfer just triggers a stop/restart of the same (`wonder_flush → HW stopped → SET_FREQUENCY 5745
+bw=2 → new MAC → UP`), the on-demand radio cycle — still no schedule command.
+
+**The catch, and the real open question:** when we *forced* our stack to ch149 (also bw=2, 80 MHz,
+finding 115) we got **395 KB/s**, vs stock's **7–8 MB/s at the identical radio config**. Same channel,
+same width — 20× apart. So the residual gap is **NOT the vendor commands / radio setup**; it is the
+**AWDL protocol layer** — sync precision and, most likely, availability-window overlap with the peer.
+libmosey keeps itself in the peer's 5 GHz windows far better than our libawdl does. That is the next
+thing to close (not another vendor command to copy).
+
+**Concrete next steps for our stack:** (1) default to **ch149 @ 80 MHz** like stock instead of ch6
+(revisit tarishd `channels_for`, and how stock stays discoverable + coexists on 5 GHz); (2) fix the
+bring_up TX rate to **mcs=3**; (3) then attack the residual duty-cycle/availability gap in libawdl's
+sync — measure availability-window overlap with the peer on ch149 and match libmosey's.
+
+**GMS-build cleanup gotcha (for repeating this):** a full GMS image build with tarish present fails —
+`tarishctl.te:15` m4 quote error in product_sepolicy (finding/task), then `vendor/tarishapp`'s
+`dev.tarish-java` dep, then the `TARGET_FS_CONFIG_GEN += vendor/tarish/config/tarish_aid.txt` line in
+`BoardConfig.mk`. Remove tarish fully: `gos-tarish.sh --remove`, `gos-tarishapp.sh --remove`, delete
+`vendor/localsepolicy/product/private/tarish*.te` + strip `tarish` from its `*_contexts`, and delete
+the `tarish_aid.txt` line from the device `BoardConfig.mk`. Stock factory image (real Google Android,
+CP2A.260805.005) is cached at `vendor/adevtool/dl/mustang-cp2a.260805.005-factory-*.zip`.
