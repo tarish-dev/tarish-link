@@ -6498,6 +6498,54 @@ landing our transmits in the peer's window. Concrete next directions, untried:
 tighter. This is a genuine research frontier, not a one-line fix — parity with stock's send needs
 stock's timing, and stock spent Google-years on it.
 
+## 108. ★★★ Clock rebuilt to 33 µs (TSF arrival + phy-precise, counter-aligned) — but fresh-peer discovery, not sync, is the stock-parity wall
+
+The mini discovering us "reliably" turned out to be an iOS **cache**: after rebooting the mini,
+libmosey is found instantly and our stack is slow-to-never. So sync precision was necessary but
+not sufficient. Three sub-findings, in order.
+
+**(a) Anchor the clock on the radiotap TSF, not the host clock.** `RxFrame.tsf` carries wonder0's
+hardware receive time; the session now uses it as `now` for the cluster clock (and keeps a
+TSF↔host map so transmit deltas stay sleepable on the host clock). This alone stopped the estimate
+oscillating (`spread` swinging 0↔13 ms with constant `DROPPED (estimate degraded)`) and held it
+adopted — the difference between blinking presence and continuous presence. It is what made the
+mini discover us at all (from its cache).
+
+**(b) The precise phase is in `phy_tx_time`, but it is not window-aligned.** The AWDL fixed
+header's `phy_tx_time` is the sender's TSF at transmit, in **microseconds** (proven: `rx.tsf -
+(phy_tx_time % cycle)` is stable to ~50 µs; the TU interpretation is random). But its absolute
+value sits a **~530 ms** offset from the `aw_counter`/`aw_remaining` phase — and the counter phase
+is the one aligned to the master's awake window (a peer syncs to it). Using `phy` raw made every
+frame land precisely *outside* the window and **broke discovery on both iPhones** — a precise
+wrong phase is worse than a noisy right one.
+
+**(c) Hybrid clock: phy precision, counter alignment.** `ClusterClock` now stores the precise phy
+origins (spread/precision read from them) and a median of `counter_origin - phy_origin` per frame;
+`phase_us` returns `phy_phase + median_offset`. The per-frame offset is noisy (~10 ms, the
+counter's TU quantisation) but constant in the mean, so the median recovers alignment to sub-ms
+while precision stays at the phy level. Measured on device: **spread 33 µs, DROPPED 0.**
+`Sighting::cycle_origin_phy`, `Cluster::observe_at`, and `ClusterClock::align_samples` implement
+it; `observe` (4-arg) stays as the counter-only fallback for tests/replay.
+
+**The wall is discovery, not sync.** Even at 33 µs, a freshly-rebooted iPhone is slow-to-never to
+find us while libmosey is instant. Cause: stock drives the **firmware's** AWDL discovery — PSFs
+emitted so a scanning, not-yet-synced peer catches them on the social channel at the peer's own
+cadence. Our injection times presence to the *current master's* windows; a fresh peer is not in
+that cluster yet, so our windows and its scan rarely coincide. Matching stock needs real AWDL
+*discovery* behaviour (be findable by any scanning peer), not just tighter *sync*.
+
+**Stability punch-list to reach stock parity (all in the app/daemon, not the radio):**
+
+1. **Fresh-peer discovery presence** — the item above; the biggest gap.
+2. **TLS acceptor failure loop** — `tarishsharingd` logged **121** `TLS handshake … Connection
+   reset by peer (os error 104): Invalid certificate verification context`, one iPhone retrying on
+   incrementing ports. This *is* the "works sometimes / flickers": a file lands only when a
+   handshake happens to succeed. A `tarish-daemon` bug, untouched by this work.
+3. **Accept-loop clog** — `ss` showed Recv-Q piling up on the listener; one slow/dead peer starves
+   other receives.
+4. **BLE address-rotation flicker** — the app's BLE RPA cycles, so iOS re-adds us as "new"
+   (cosmetic; affects stock equally).
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

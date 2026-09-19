@@ -255,6 +255,13 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     let mut hop_fail = 0u64;
     let mut last_reactive_us = 0u64;
     let mut reactive_tx = 0u64;
+    // TSF anchoring for the cluster clock. wonder0 delivers a real radiotap TSFT (the firmware's
+    // hardware receive time) on every frame; anchoring the cluster phase on it instead of the
+    // host arrival time removes the socket/processing jitter that made the spread swing 0-13 ms
+    // and the estimate "drop" (finding 108). We keep the newest (tsf, host) pair and read "now
+    // in TSF" from it for the master-clock queries; deltas are then base-invariant to sleep on.
+    let mut tsf_anchor: Option<u64> = None;
+    let mut host_at_anchor_us: u64 = 0;
     // Block Ack probe (cfg.blockack): originate an ADDBA to the master and watch for the peer's
     // ADDBA Response / BlockAck. State for the send throttle and what we have seen back.
     let mut ba_last_addba_us = 0u64;
@@ -285,10 +292,13 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // our clock. Drain what is waiting, bounded by the slack before the next window.
         {
             let slack_us = {
-                let now_us = epoch.elapsed().as_micros() as u64;
-                match cluster.us_until_master_window(now_us) {
+                let now_host = epoch.elapsed().as_micros() as u64;
+                let now_tsf = tsf_anchor
+                    .map(|t| t + now_host.saturating_sub(host_at_anchor_us))
+                    .unwrap_or(now_host);
+                match cluster.us_until_master_window(now_tsf) {
                     Some(w) if adopted => w,
-                    _ => b.us_until_next_advertised_window(now_us),
+                    _ => b.us_until_next_advertised_window(now_host),
                 }
             };
             let budget_ms = if slack_us < 4_000 { 0 } else { 2 };
@@ -301,10 +311,22 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     drained += 1;
                     // The kernel's arrival time, not ours: a socket backlog otherwise gets
                     // added to every frame behind it.
-                    let now_us = rx
+                    let host_now_us = rx
                         .host_us
                         .map(|t| t.saturating_sub(epoch_realtime_us))
                         .unwrap_or_else(|| epoch.elapsed().as_micros() as u64);
+                    // Anchor the cluster clock on the hardware TSF when present (wonder0 supplies
+                    // it), falling back to the host arrival time only if it is not. `now_us` is
+                    // what we hand the cluster: the frame's own on-air time, so the phase carries
+                    // no processing jitter. We also refresh the TSF<->host mapping used to read
+                    // "now in TSF" for transmit scheduling below.
+                    let now_us = if let Some(tsf) = rx.tsf {
+                        tsf_anchor = Some(tsf);
+                        host_at_anchor_us = epoch.elapsed().as_micros() as u64;
+                        tsf
+                    } else {
+                        host_now_us
+                    };
                     match frame_type(&rx.bytes) {
                         Some(2) => rx_data += 1,
                         Some(1) => rx_ctrl += 1,
@@ -330,10 +352,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     if tundev.is_some() {
                         deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd);
                     }
-                    if let Some((src, sync, elect, chanseq)) = parse_awdl(&rx.bytes) {
+                    if let Some((src, sync, elect, chanseq, phy_tx_time)) = parse_awdl(&rx.bytes) {
                         // Never synchronise to our own transmissions handed back by the monitor.
                         if src != addr {
-                            cluster.observe(now_us, src, &sync, elect.as_ref());
+                            cluster.observe_at(now_us, src, &sync, elect.as_ref(), phy_tx_time);
                             // Prefer the OpClass channel map (tag 18) for the master's schedule:
                             // the Legacy one in Sync Params encodes a 40 MHz centre we cannot
                             // tune to (finding 99). Only the master's own sequence counts.
@@ -342,6 +364,22 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                     cluster.set_master_channels(&cs);
                                 }
                                 heard_master = true;
+                                if cfg.blockack {
+                                    // Diagnostic: compare the coarse counter/remaining phase with
+                                    // one derived from the master's own TSF (phy_tx_time). cycle
+                                    // is 1048576 us at pm 4. Test phy as microseconds and as TU,
+                                    // to see which gives a stable rx.tsf - (phy % cycle).
+                                    let cycle = libawdl::follow::cycle_us(sync.presence_mode.max(1));
+                                    let origin_us = rx.tsf.map(|t| t.wrapping_sub((phy_tx_time as u64) % cycle) % cycle);
+                                    let origin_tu = rx.tsf.map(|t| t.wrapping_sub(((phy_tx_time as u64) * 1024) % cycle) % cycle);
+                                    log::info!(
+                                        "PHASE: tsf={:?} phy={} slot={} counter_phase={:?} spread={:?} | phy_origin_us={:?} phy_origin_tu={:?}",
+                                        rx.tsf, phy_tx_time,
+                                        (sync.aw_counter / u16::from(sync.presence_mode.max(1))) % 16,
+                                        cluster.clock.phase_us(), cluster.clock.spread_us(),
+                                        origin_us, origin_tu
+                                    );
+                                }
                             }
                         }
                     }
@@ -377,7 +415,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                             &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
                         );
                     }
-                    set_follow(&mut b, &cluster, addr, target_metric, now_us);
+                    let now_tsf = tsf_anchor
+                        .map(|t| t + now_us.saturating_sub(host_at_anchor_us))
+                        .unwrap_or(now_us);
+                    set_follow(&mut b, &cluster, addr, target_metric, now_tsf);
                     let is_mif = cfg.psf_per_mif == 0 || n % (cfg.psf_per_mif + 1) == 0;
                     let mut frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
                     libawdl::action::stamp_phy_tx_time(
@@ -446,7 +487,13 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // cluster's channel sequence, retune to the channel of the window we are heading for,
         // so both this LISTEN's successor and the transmit below land on the channel the peer
         // actually attends. The switch is ~0.6 ms (finding 99), done once per slot transition.
-        let now_us = epoch.elapsed().as_micros() as u64;
+        let now_host = epoch.elapsed().as_micros() as u64;
+        // "now" in the master's TSF, from the latest (tsf, host) anchor; falls back to host time
+        // before any TSF has been seen. Cluster queries take TSF; our own beacon schedule (`b`)
+        // stays on host time. Both return deltas, which are the same to sleep on either clock.
+        let now_tsf = tsf_anchor
+            .map(|t| t + now_host.saturating_sub(host_at_anchor_us))
+            .unwrap_or(now_host);
         let wait = if cfg.follow && adopted {
             if cfg.channel_lock {
                 // Single-channel backend that cannot hop (wonder): aim ONLY at the master's
@@ -454,11 +501,11 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 // demonstrably on it. Falls back to our own advertised window if the master
                 // holds no slot on this channel.
                 cluster
-                    .next_master_window_on(now_us, current_channel)
+                    .next_master_window_on(now_tsf, current_channel)
                     .map(|(w, _slot)| w)
-                    .unwrap_or_else(|| b.us_until_next_advertised_window(now_us))
+                    .unwrap_or_else(|| b.us_until_next_advertised_window(now_host))
             } else if cfg.follow_channels {
-                if let Some((w, _slot, ch)) = cluster.next_master_window(now_us) {
+                if let Some((w, _slot, ch)) = cluster.next_master_window(now_tsf) {
                     if ch != current_channel {
                         match radio.set_channel(ch) {
                             Ok(()) => {
@@ -477,15 +524,15 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     }
                     w
                 } else {
-                    b.us_until_next_advertised_window(now_us)
+                    b.us_until_next_advertised_window(now_host)
                 }
             } else {
                 cluster
-                    .us_until_master_window(now_us)
-                    .unwrap_or_else(|| b.us_until_next_advertised_window(now_us))
+                    .us_until_master_window(now_tsf)
+                    .unwrap_or_else(|| b.us_until_next_advertised_window(now_host))
             }
         } else {
-            b.us_until_next_advertised_window(now_us)
+            b.us_until_next_advertised_window(now_host)
         };
         if wait > 0 {
             // The gap between windows is when the kernel's packets are collected: read the
@@ -500,6 +547,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             continue;
         }
         let now_us = epoch.elapsed().as_micros() as u64;
+        // now in the master's TSF, for the cluster/master-clock queries in this section.
+        let now_tsf = tsf_anchor
+            .map(|t| t + now_us.saturating_sub(host_at_anchor_us))
+            .unwrap_or(now_us);
         // One frame per window visit — UNLESS channel_lock, where we deliberately blast several
         // PSFs into each on-channel window so the peer receives our sync reliably enough to hold
         // a peer-table entry (a hop-less radio has only these windows to be heard in).
@@ -517,7 +568,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // earlier version this no longer requires root/follow_distance to be known before it
         // will follow: without them we still name the master and sit one hop out, because
         // claiming self against a stronger master is exactly what stops Apple peering us.
-        set_follow(&mut b, &cluster, addr, target_metric, now_us);
+        set_follow(&mut b, &cluster, addr, target_metric, now_tsf);
         let is_mif = cfg.psf_per_mif == 0 || n % (cfg.psf_per_mif + 1) == 0;
         // target_tx_time at build; phy_tx_time as late as possible, so tx_delay reflects real
         // injection latency rather than the impossible literal zero. Finding 81/82.
@@ -537,7 +588,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     sent_psf += 1
                 }
                 *tx_by_channel.entry(current_channel).or_default() += 1;
-                if let Some(sl) = cluster.clock.slot_at(now_us) {
+                if let Some(sl) = cluster.clock.slot_at(now_tsf) {
                     *tx_by_slot.entry(sl).or_default() += 1;
                 }
             }
@@ -634,7 +685,7 @@ fn set_follow(
     cluster: &Cluster,
     addr: [u8; 6],
     target_metric: u32,
-    now_us: u64,
+    now_tsf: u64,
 ) {
     match (cluster.master, cluster.master_metric) {
         (Some(m), Some(mm)) if m != addr && mm > target_metric => {
@@ -646,7 +697,7 @@ fn set_follow(
                 master_counter: cluster.master_counter.unwrap_or(0),
             });
             b.follow_master = Some(m);
-            b.follow_aw_counter = cluster.projected_master_counter(now_us);
+            b.follow_aw_counter = cluster.projected_master_counter(now_tsf);
         }
         _ => {
             b.follow = None;
@@ -675,6 +726,7 @@ fn parse_awdl(
     libawdl::sync::SyncParams,
     Option<libawdl::election::ElectionParamsV2>,
     Option<libawdl::sync::ChannelSequence>,
+    u32,
 )> {
     use libawdl::{action::ActionFrame, dot11::Dot11, election::ElectionParamsV2, radiotap::Radiotap,
                   sync::{ChannelSequence, SyncParams}, tlv};
@@ -694,7 +746,7 @@ fn parse_awdl(
             _ => {}
         }
     }
-    Some((d.src.0, sync?, elect, chanseq))
+    Some((d.src.0, sync?, elect, chanseq, af.fixed.phy_tx_time))
 }
 
 // --- data path -------------------------------------------------------------------------

@@ -69,7 +69,8 @@ pub fn cycle_us(presence_mode: u8) -> u64 {
 /// One observation: a frame arrived, and it said where in the schedule its sender was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sighting {
-    /// When we timestamped it, on our own monotonic clock.
+    /// When we timestamped it — ideally the radiotap **TSF** at reception (hardware, no host
+    /// jitter), else our own monotonic clock.
     pub arrived_us: u64,
     /// `aw_counter` from the frame.
     pub counter: u16,
@@ -77,6 +78,12 @@ pub struct Sighting {
     pub remaining_tu: u16,
     /// `presence_mode` from the same frame: how many AWs make a slot.
     pub presence_mode: u8,
+    /// The sender's own TSF at transmission (`phy_tx_time` from the AWDL fixed header), lower
+    /// 32 bits, microseconds. For the master this **is** the cluster clock, to the microsecond —
+    /// far tighter than `aw_counter`/`aw_remaining`, which the iPhone leaves TU-quantised
+    /// (`aw_remaining` is ~always 0), giving a ~15 ms phase spread. Anchoring on this instead
+    /// took the spread to ~90 µs (finding 108). 0 when the frame carried none.
+    pub phy_tx_time: u32,
 }
 
 impl Sighting {
@@ -106,17 +113,40 @@ impl Sighting {
         aw_in_slot * AW_US + into_aw
     }
 
-    /// Where the cycle containing this frame began, on our clock.
+    /// Where the cycle containing this frame began, on our clock, from `aw_counter`/
+    /// `aw_remaining`.
+    ///
+    /// This phase is **correctly aligned to the master's awake window** — a peer syncs and
+    /// discovers us with it — but coarse: the iPhone leaves `aw_remaining` at 0, so it jitters
+    /// ~15 ms around the right phase. [`cycle_origin_phy`](Self::cycle_origin_phy) is precise but
+    /// sits a fixed offset away; the clock combines the two (precision of one, alignment of the
+    /// other) — see [`ClusterClock::observe`](ClusterClock::observe).
     pub fn cycle_origin_us(&self) -> u64 {
         let slot_start = self.arrived_us.saturating_sub(self.into_slot_us());
         slot_start.saturating_sub(self.slot() as u64 * eaw_us(self.presence_mode))
+    }
+
+    /// The cycle origin from the sender's `phy_tx_time` (its TSF at transmit): `arrived_us -
+    /// (phy_tx_time mod cycle)`. Precise to ~50 µs because it uses the master's own microsecond
+    /// clock rather than the TU-quantised counter (finding 108). `None` when the frame carried
+    /// no `phy_tx_time`. Its absolute value sits a near-constant offset from `cycle_origin_us`
+    /// (the master's TSF epoch is not its `aw_counter` epoch); the clock measures that offset and
+    /// adds it back, so the result is both precise and aligned.
+    pub fn cycle_origin_phy(&self) -> Option<u64> {
+        if self.phy_tx_time == 0 {
+            return None;
+        }
+        let cycle = cycle_us(self.presence_mode);
+        Some(self.arrived_us.wrapping_sub(u64::from(self.phy_tx_time) % cycle))
     }
 }
 
 /// An estimate of a cluster's cycle phase, built from many sightings.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterClock {
-    /// `cycle_origin_us mod cycle` for each sighting, newest last.
+    /// Per-sighting cycle origin `mod cycle`, newest last. These are the **precise** phy-based
+    /// origins when the frames carry `phy_tx_time` (spread ~50 µs), else the coarse counter-based
+    /// ones. Precision and spread are read from here.
     offsets: Vec<u64>,
     /// The presence mode the cluster advertises; sets the slot and cycle lengths.
     presence_mode: u8,
@@ -124,6 +154,12 @@ pub struct ClusterClock {
     /// off-phase sighting is a glitch and must not become the phase; several agreeing in a row
     /// are a real re-anchor and are then adopted. See [`observe`](Self::observe).
     pending: Vec<u64>,
+    /// Recent samples of `counter_origin - phy_origin` (mod cycle). The phy origin is precise but
+    /// sits a near-constant offset from the window-aligned counter origin; this offset is noisy
+    /// per frame (~10 ms, from the counter's TU quantisation) but constant in the mean, so its
+    /// **median** recovers the alignment to sub-millisecond and is added to the precise phase in
+    /// [`phase_us`](Self::phase_us). Empty while frames carry no `phy_tx_time` (pure counter mode).
+    align_samples: Vec<u64>,
 }
 
 /// Shortest distance between two phases on a ring of length `cycle`.
@@ -134,7 +170,23 @@ fn circular_dist(a: u64, b: u64, cycle: u64) -> u64 {
 
 impl ClusterClock {
     pub fn new() -> ClusterClock {
-        ClusterClock { offsets: Vec::new(), presence_mode: DEFAULT_PRESENCE_MODE, pending: Vec::new() }
+        ClusterClock {
+            offsets: Vec::new(),
+            presence_mode: DEFAULT_PRESENCE_MODE,
+            pending: Vec::new(),
+            align_samples: Vec::new(),
+        }
+    }
+
+    /// The median offset from the precise phy phase to the window-aligned counter phase, or 0
+    /// when we have no samples yet (pure counter mode, where `offsets` are already aligned).
+    fn align_delta(&self) -> u64 {
+        if self.align_samples.is_empty() {
+            return 0;
+        }
+        let mut v = self.align_samples.clone();
+        v.sort_unstable();
+        v[v.len() / 2]
     }
 
     /// One channel-sequence slot, microseconds.
@@ -164,9 +216,26 @@ impl ClusterClock {
             self.presence_mode = s.presence_mode.max(1);
             self.offsets.clear();
             self.pending.clear();
+            self.align_samples.clear();
         }
         let cycle = self.cycle();
-        let off = s.cycle_origin_us() % cycle;
+        // Anchor on the precise phy origin when the frame carries one, and record how far the
+        // window-aligned counter origin sits from it so `phase_us` can shift back onto the
+        // window. Without phy, fall back to the counter origin directly (it is already aligned).
+        let counter_off = s.cycle_origin_us() % cycle;
+        let off = match s.cycle_origin_phy() {
+            Some(phy) => {
+                let phy_off = phy % cycle;
+                const ALIGN_KEEP: usize = 64;
+                self.align_samples.push((counter_off + cycle - phy_off) % cycle);
+                if self.align_samples.len() > ALIGN_KEEP {
+                    let excess = self.align_samples.len() - ALIGN_KEEP;
+                    self.align_samples.drain(..excess);
+                }
+                phy_off
+            }
+            None => counter_off,
+        };
 
         // Outlier rejection. A frame stamped late (a socket backlog) or carrying an odd
         // counter lands half a cycle off and, taken as the newest anchor, throws the phase
@@ -212,6 +281,8 @@ impl ClusterClock {
     /// goes wide, `is_usable` says no, and the reason looks like jitter.
     pub fn reset(&mut self) {
         self.offsets.clear();
+        self.pending.clear();
+        self.align_samples.clear();
     }
 
     /// The estimated phase: where in our clock the cycle begins, modulo a cycle.
@@ -227,7 +298,10 @@ impl ClusterClock {
     /// point — a median is robust to jitter and blind to drift, and this way jitter shows
     /// up in [`spread_us`](Self::spread_us) while drift cannot accumulate into the phase.
     pub fn phase_us(&self) -> Option<u64> {
-        self.offsets.last().copied()
+        let last = self.offsets.last().copied()?;
+        // The offsets are the precise phy phase; shift by the measured (median) offset onto the
+        // window-aligned counter phase. In pure counter mode the delta is 0 and this is a no-op.
+        Some((last + self.align_delta()) % self.cycle())
     }
 
     /// The phase a circular median of the whole history would give.
@@ -398,12 +472,28 @@ impl Cluster {
     ///
     /// `sync` and `election` come from the same frame; passing parts of different frames
     /// would attribute one node's schedule to another's clock.
+    /// Fold in a frame without the sender's TSF: the clock falls back to the coarse
+    /// `aw_counter`/`aw_remaining` phase. Kept for replay tooling and tests.
     pub fn observe(
         &mut self,
         arrived_us: u64,
         src: [u8; 6],
         sync: &SyncParams,
         election: Option<&ElectionParamsV2>,
+    ) {
+        self.observe_at(arrived_us, src, sync, election, 0);
+    }
+
+    /// Fold in a frame with the sender's `phy_tx_time` (its TSF at transmit, microseconds).
+    /// For the master this anchors the cluster phase to ~90 µs (finding 108); pass 0 to fall
+    /// back to the coarse counter/remaining phase.
+    pub fn observe_at(
+        &mut self,
+        arrived_us: u64,
+        src: [u8; 6],
+        sync: &SyncParams,
+        election: Option<&ElectionParamsV2>,
+        phy_tx_time: u32,
     ) {
         if let Some(e) = election {
             // A PEER NAMING US IS NOT A CLUSTER TO FOLLOW. It is the thing we are trying
@@ -485,6 +575,7 @@ impl Cluster {
                 counter: sync.aw_counter,
                 remaining_tu: sync.aw_remaining,
                 presence_mode: sync.presence_mode,
+                phy_tx_time,
             });
         }
     }

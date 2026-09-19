@@ -1727,7 +1727,7 @@ fn follow<T: pcap::Activated + ?Sized>(mut cap: pcap::Capture<T>) {
             }
         }
         let Some(sync) = sync else { continue };
-        cl.observe(t - t0, dot11.src.0, &sync, elect.as_ref());
+        cl.observe_at(t - t0, dot11.src.0, &sync, elect.as_ref(), af.fixed.phy_tx_time);
     }
 
     println!("{frames} AWDL frames");

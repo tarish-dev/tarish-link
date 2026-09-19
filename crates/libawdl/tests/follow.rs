@@ -12,7 +12,7 @@ const CYCLE: u64 = 16 * SLOT_US;
 fn a_single_frame_places_the_window_boundary() {
     // "6 TU left in window 4" arriving at t=1_000_000.
     // aw_counter 4 is the first window of slot 1, with 6 TU left in that window.
-    let s = Sighting { arrived_us: 1_000_000, counter: 4, remaining_tu: 6, presence_mode: PM };
+    let s = Sighting { arrived_us: 1_000_000, counter: 4, remaining_tu: 6, presence_mode: PM, phy_tx_time: 0 };
     assert_eq!(s.slot(), 1);
     assert_eq!(s.window_end_us(), 1_000_000 + 6 * 1024);
     // We are (16 - 6) TU into the slot's first window, and the slot is slot 1.
@@ -32,7 +32,7 @@ fn consistent_sightings_converge_to_one_phase() {
             arrived_us: phase + k * SLOT_US,
             counter: (k * 4) as u16,
             remaining_tu: 16,
-            presence_mode: PM,
+            presence_mode: PM, phy_tx_time: 0,
         });
     }
     assert_eq!(c.observations(), 10);
@@ -52,7 +52,7 @@ fn a_phase_near_zero_does_not_average_to_the_far_side() {
     // Observations scattered by +-2000us around a true phase of 0.
     for off in [0u64, 1500, CYCLE - 1200, 800, CYCLE - 400] {
         // A frame at the very start of slot 0 of a cycle beginning at `off`.
-        c.observe(Sighting { arrived_us: off, counter: 0, remaining_tu: 16, presence_mode: PM });
+        c.observe(Sighting { arrived_us: off, counter: 0, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 });
     }
     let phase = c.phase_us().expect("a phase");
     // Must be near zero, i.e. within a few ms of either end of the ring.
@@ -68,14 +68,14 @@ fn a_smeared_estimate_reports_itself_unusable() {
     let mut c = ClusterClock::new();
     // Sightings scattered across most of the cycle: no real phase at all.
     for k in 0..8u64 {
-        c.observe(Sighting { arrived_us: k * 124_000, counter: 0, remaining_tu: 4, presence_mode: PM });
+        c.observe(Sighting { arrived_us: k * 124_000, counter: 0, remaining_tu: 4, presence_mode: PM, phy_tx_time: 0 });
     }
     assert!(!c.is_usable(), "a spread near a whole cycle is not a phase");
     assert!(c.spread_us().unwrap() > SLOT_US / 2);
 
     // And too few observations is also unusable, however tight.
     let mut thin = ClusterClock::new();
-    thin.observe(Sighting { arrived_us: 1000, counter: 0, remaining_tu: 4, presence_mode: PM });
+    thin.observe(Sighting { arrived_us: 1000, counter: 0, remaining_tu: 4, presence_mode: PM, phy_tx_time: 0 });
     assert!(!thin.is_usable());
 }
 
@@ -89,7 +89,7 @@ fn waiting_for_a_slot_lands_in_it() {
             arrived_us: phase + k * CYCLE,
             counter: 0,
             remaining_tu: 16,
-            presence_mode: PM,
+            presence_mode: PM, phy_tx_time: 0,
         });
     }
     assert!(c.is_usable());
@@ -175,15 +175,15 @@ fn a_slot_is_four_availability_windows() {
 
     // aw_counter 0..3 are all slot 0; 4..7 are slot 1.
     for c in 0..4u16 {
-        assert_eq!(Sighting { arrived_us: 0, counter: c, remaining_tu: 16, presence_mode: PM }.slot(), 0);
+        assert_eq!(Sighting { arrived_us: 0, counter: c, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 }.slot(), 0);
     }
     for c in 4..8u16 {
-        assert_eq!(Sighting { arrived_us: 0, counter: c, remaining_tu: 16, presence_mode: PM }.slot(), 1);
+        assert_eq!(Sighting { arrived_us: 0, counter: c, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 }.slot(), 1);
     }
     // And slot 8 -- channel 6 in Apple's schedule -- is counters 32..35.
-    assert_eq!(Sighting { arrived_us: 0, counter: 32, remaining_tu: 16, presence_mode: PM }.slot(), 8);
-    assert_eq!(Sighting { arrived_us: 0, counter: 35, remaining_tu: 16, presence_mode: PM }.slot(), 8);
-    assert_eq!(Sighting { arrived_us: 0, counter: 36, remaining_tu: 16, presence_mode: PM }.slot(), 9);
+    assert_eq!(Sighting { arrived_us: 0, counter: 32, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 }.slot(), 8);
+    assert_eq!(Sighting { arrived_us: 0, counter: 35, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 }.slot(), 8);
+    assert_eq!(Sighting { arrived_us: 0, counter: 36, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 }.slot(), 9);
 }
 
 /// Position within a slot needs the window index as well as aw_remaining.
@@ -191,15 +191,15 @@ fn a_slot_is_four_availability_windows() {
 fn position_in_a_slot_spans_all_four_windows() {
     let aw = 16 * 1024u64;
     // Start of the slot's first window: a full 16 TU remaining, zero windows in.
-    let a = Sighting { arrived_us: 0, counter: 8, remaining_tu: 16, presence_mode: PM };
+    let a = Sighting { arrived_us: 0, counter: 8, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 };
     assert_eq!(a.slot(), 2);
     assert_eq!(a.into_slot_us(), 0);
     // Third window of the same slot, half way through it.
-    let b = Sighting { arrived_us: 0, counter: 10, remaining_tu: 8, presence_mode: PM };
+    let b = Sighting { arrived_us: 0, counter: 10, remaining_tu: 8, presence_mode: PM, phy_tx_time: 0 };
     assert_eq!(b.slot(), 2, "still slot 2");
     assert_eq!(b.into_slot_us(), 2 * aw + aw / 2);
     // Last window, nearly over: close to a full slot in.
-    let c = Sighting { arrived_us: 0, counter: 11, remaining_tu: 1, presence_mode: PM };
+    let c = Sighting { arrived_us: 0, counter: 11, remaining_tu: 1, presence_mode: PM, phy_tx_time: 0 };
     assert_eq!(c.into_slot_us(), 3 * aw + aw - 1024);
 }
 
@@ -219,7 +219,7 @@ fn the_phase_follows_a_drifting_cluster() {
             arrived_us: k * CYCLE + k * drift,
             counter: 0,
             remaining_tu: 16,
-            presence_mode: PM,
+            presence_mode: PM, phy_tx_time: 0,
         });
     }
     let phase = c.phase_us().expect("a phase");
@@ -244,7 +244,7 @@ fn jitter_wider_than_a_slot_is_still_rejected() {
     for k in 0..12u64 {
         // Alternating far apart: not drift, noise.
         let jump = if k % 2 == 0 { 0 } else { SLOT_US * 3 };
-        c.observe(Sighting { arrived_us: jump, counter: 0, remaining_tu: 16, presence_mode: PM });
+        c.observe(Sighting { arrived_us: jump, counter: 0, remaining_tu: 16, presence_mode: PM, phy_tx_time: 0 });
     }
     assert!(!c.is_usable(), "spread {:?} should be rejected", c.spread_us());
 }
