@@ -6616,6 +6616,42 @@ transport. The next real step is to **build that fix on the build host and re-me
 over several runs to see through the variance, before any further libawdl ACK work. Blind
 per-build tuning on a 4×-variance metric is a trap.
 
+## 111. ★★★ Concurrent-accept built & deployed — churn and in-transfer stalls drop; remaining gaps are startup latency, no FileIcon preview, and 2.4-GHz-only
+
+Built `tarishsharingd` from `httpd-concurrent-accept` on the build host (`m tarishsharingd`,
+blazer; one E0382 fix — the spawn-failure fallback used `stream` after it was moved into the
+closure, now it just drops the connection) and deployed the binary to `/system_ext/bin`.
+
+**Measured improvement (same 4.5 MB receive, our stack):**
+
+| within the transfer | single-threaded accept | concurrent accept |
+|---|---|---|
+| stalls > 0.9 s | 28–43 | **3** |
+| max stall | ~11 s | **0.97 s** |
+| RST (whole session) | ~33 | **8** |
+
+So the catastrophic RTO stalls and the connection-reset storm largely resolve — connections are
+served in parallel instead of piling up. Overall `/Upload` time is still noisy (~36 s this run,
+inside the 4× band), so throughput parity isn't proven from one run, but the *structural* churn is
+fixed. This is a prod fix (prod hit the churn on libmosey too).
+
+**Three remaining gaps, from operator observation + the on-air baseline:**
+
+1. **Startup latency ("long stall before it starts", both directions).** After the fix the
+   in-transfer stalls are gone, so the felt delay is now in the **discovery → connect → /Ask**
+   phase, before data. `/Ask → /Upload` is only ~2 s; the rest is the iPhone resolving and
+   connecting to us. Next place to look.
+2. **No FileIcon preview.** iPhone→iPhone shows a thumbnail of the file in the accept prompt; our
+   `/Ask` is a minimal 436-byte body with no `FileIcon` (and no `SenderRecordData`). A real Apple
+   sender's `/Ask` carries both. A concrete sender-side enhancement — UX, and possibly flow.
+3. **2.4 GHz only.** Stock iPhone↔iPhone AirDrop puts the bulk data on **5 GHz ch149** (captured
+   discovery on ch6, but the unicast data was not there). We are pinned to ch6 because wonder.ko
+   cannot hop (findings 100/101). That is a real throughput ceiling versus real Apple, though it
+   matches stock libmosey (also ch6-only), so the libmosey A/B stays valid. Non-contacts still
+   need AirDrop = "Everyone" (expected, not a bug).
+
+`tarish-daemon` branch `httpd-concurrent-accept`: 82d94cc + 50c86d1 (handoff) + the E0382 fix.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
