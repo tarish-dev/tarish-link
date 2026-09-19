@@ -6752,3 +6752,26 @@ nothing is broken.
 wants a peer to remember us — a trusted-device list, a one-time confirmation, a
 reconnect-without-prompting — needs a stable identity, and we throw ours away twice per
 restart. That should stay a decision rather than becoming an accident.
+
+## 113. ★★★ Startup stall FIXED — small control bursts sent redundantly; setup gaps collapse 11.8s→1s
+
+The felt "takes forever to even start sending" was pinned with per-transfer logging: on a
+receive the setup phase stalled in multi-second, RTO-shaped gaps — `/Discover`→`/Ask` ~8 s,
+`/Ask`→accept ~3.4 s, **accept→`/Upload` ~11.8 s**. Cause: our small HTTP **response** frames
+(the `/Discover` reply, the `/Ask` 200 that tells the sender we accepted) are single frames on the
+no-ARQ inject path; one loss is a full TCP RTO backoff (1→2→4→8 s), so a lost `/Ask` 200 left the
+iPhone waiting ~12 s before it sent `/Upload`.
+
+**Fix:** transmit **small outbound bursts redundantly** (`SMALL_BURST_MAX`=6, each frame ×`ACK_REPEAT`,
+Retry bit, peer de-duplicates) in both drain paths, while leaving **large** (bulk-data) bursts
+single — repeating bulk only adds contention (finding 110), but a control burst is 1–2 frames so
+redundancy is nearly free and kills the RTO stall.
+
+**Measured after the fix (same flow):** `/Ask`→accept **3.4 s → 0.07 s**, accept→`/Upload`
+**11.8 s → 0.99 s**. The remaining `/Discover`→`/Ask` gap is the human tapping/picking the file,
+not a stall.
+
+**Still open (bulk data phase, not setup):** a 7 MB `/Upload` starts fast then crawls/stalls — the
+2.4-GHz-only + AWDL availability-pacing throughput ceiling (finding 108). And per-restart MAC
+rotation forces the peer to re-discover us (a sheet refresh fixes it); pinning a stable wondertap0
+MAC would remove that friction.

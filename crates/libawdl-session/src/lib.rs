@@ -160,6 +160,12 @@ const DRAIN_PER_WINDOW: usize = 24;
 /// is ~40 bytes. Sending it 3× (same seq, Retry bit; the peer de-duplicates) makes a ~p loss ~p³
 /// for negligible airtime. Finding 110.
 const ACK_REPEAT: u32 = 3;
+/// A drain of at most this many queued frames is a "small burst" — a control/handshake exchange
+/// (the `/Discover`, `/Ask`, TLS and 200-response frames of the startup), not bulk data. Small
+/// bursts are transmitted redundantly (`ACK_REPEAT`) because a single lost control frame is a
+/// multi-second TCP RTO stall at connection setup (measured: 8 s `/Discover`→`/Ask`, 12 s
+/// accept→`/Upload`, finding 113). A large burst is bulk data: repeating it only adds contention.
+const SMALL_BURST_MAX: usize = 6;
 
 /// Run the session on `radio` (already brought up) until `stop` is set or `cfg.duration`
 /// elapses. Returns what it did.
@@ -413,19 +419,24 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                             &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
                         );
                         let read = outbound.len().saturating_sub(before);
+                        // A small burst here is a control/handshake response (e.g. our /Ask 200)
+                        // the kernel generated right after we delivered the request — repeat it so
+                        // a lost setup frame does not become a multi-second RTO stall (finding 113).
+                        // A large burst is bulk-data ACKs: send once, as repeating them only adds
+                        // contention with no measurable gain (finding 110).
+                        let reps: u32 = if outbound.len() <= SMALL_BURST_MAX { ACK_REPEAT } else { 1 };
                         while let Some(f) = outbound.pop_front() {
                             match radio.tx(&f, TxParams::default()) {
                                 Ok(()) => dp_sent += 1,
                                 Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
                             }
-                            // NOTE: redundant ACK injection (each ACK N×) was tried here to survive
-                            // ACK loss without the RTO stall, but on a shared channel it added
-                            // airtime/contention and the run-to-run variance (17-64 s for the same
-                            // file) dwarfed any effect — it could not be shown to help. The
-                            // dominant factor is the single-threaded httpd accept loop churning
-                            // connections (SYN/RST storm), fixed in tarish-daemon, not here.
-                            // Finding 110. ACK_REPEAT is kept as a knob for a proper isolated A/B.
-                            let _ = ACK_REPEAT;
+                            if reps > 1 && f.len() >= 2 {
+                                let mut dup = f.clone();
+                                dup[1] |= 0x08;
+                                for _ in 1..reps {
+                                    if radio.tx(&dup, TxParams::default()).is_ok() { dp_sent += 1; }
+                                }
+                            }
                         }
                         if read == 0 {
                             break; // the tun had nothing more to send this instant
@@ -646,9 +657,14 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 }
             }
         }
-        // In-window drain: the beacon just went out, so the peer is listening now. Fewer unique
-        // frames when repeating, to hold total per-window transmissions ~constant.
-        for _ in 0..(DRAIN_PER_WINDOW / cfg.data_repeat.max(1) as usize).max(1) {
+        // In-window drain: the beacon just went out, so the peer is listening now. A SMALL burst
+        // (control/handshake frames — the startup /Discover, /Ask, TLS and 200 responses) is sent
+        // redundantly so a single lost frame does not cost a multi-second RTO stall at setup
+        // (finding 113); a large burst is bulk data, sent once to avoid channel contention (which
+        // repeating was shown to add, finding 110). data_repeat, if set, still applies to bulk.
+        let small_burst = outbound.len() <= SMALL_BURST_MAX;
+        let reps: u32 = if small_burst { ACK_REPEAT } else { cfg.data_repeat.max(1) };
+        for _ in 0..(DRAIN_PER_WINDOW / reps as usize).max(1) {
             let Some(f) = outbound.pop_front() else { break };
             match radio.tx(&f, TxParams::default()) {
                 Ok(()) => dp_sent += 1,
@@ -659,12 +675,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     }
                 }
             }
-            // Repetition FEC (finding 106): resend with Retry bit set, same sequence, so the
-            // peer de-duplicates and one copy survives our no-ARQ air loss.
-            if cfg.data_repeat > 1 && f.len() >= 2 {
+            if reps > 1 && f.len() >= 2 {
                 let mut dup = f.clone();
-                dup[1] |= 0x08;
-                for _ in 1..cfg.data_repeat {
+                dup[1] |= 0x08; // 802.11 Retry; the peer de-duplicates on sequence number
+                for _ in 1..reps {
                     if radio.tx(&dup, TxParams::default()).is_ok() {
                         dp_sent += 1;
                     }
