@@ -6984,3 +6984,36 @@ piece. Bench: mustang = rooted stock (reference), blazer = our stack, both on th
 > how tightly we hold the peer's windows** — protocol-layer libawdl work, the real task-7 target.
 > NEXT: decode + compare the Sync-Parameters presence/availability (extended AW, aw_periods, presence
 > mode) between stock (mustang capture) and ours, and measure per-window overlap; keep the mcs fix.
+
+## 119. ★★★ Availability parameters are IDENTICAL stock-vs-ours — the receive 20× is REALIZED presence (firmware channel-following), i.e. the findings 100/101 wall
+
+Decoded the Synchronization-Parameters TLV (tag 4) per-source from both captures (stock = mustang
+`6a:e4:f0:48:67:a4`, ours = blazer `62:65:83:77:2d:e8`), the same shared peer in the room. The
+availability knobs are **byte-for-byte identical**:
+
+| field (offset) | stock | ours |
+|---|---|---|
+| `aw_period` (5) | 16 TU | 16 TU |
+| `aw_ext_length` (11) | 16 | 16 |
+| `ext_min` (17) | 3 | 3 |
+| `ext_max_multicast` (18) | 3 | 3 |
+| **`ext_max_unicast` (19)** | **3** | **3** |
+| `ext_max_af` (20) | 3 | 3 |
+| `presence_mode` (27) | **4** | **4** |
+
+So we **advertise the same availability as stock** — that is ruled out. Combined with 115/117/118
+(same channel, same width once forced, same channel-sequence `[149]`, same command set, same
+advertised availability), the receive 20× is **realized presence**: stock's **firmware AWDL data path
+actually attends the peer's channel schedule** (follows `[6,149]` across channels in firmware), while
+our **mac80211 monitor-injection path is pinned to one channel and cannot retune** — `SET_CHANNEL` on
+the up monitor is `EOPNOTSUPP` (wonder.rs:767; findings 100/101). When the iPhone is on the other
+channel of its sequence, stock catches it and we miss it → the ~72 % of windows we lose on ch149.
+
+**This is the findings 100/101 wall, now proven to be THE receive-throughput limiter — not a
+protocol/config value we can copy.** Closing it needs one of: (a) a working live channel retune on
+the monitor (driver-gated, currently EOPNOTSUPP); (b) driving wonder.ko's firmware channel-schedule
+so the radio attends multiple channels like stock's data path does (the "stub" schedule command —
+re-examine whether it can be made to work); or (c) using the firmware data interface (wondertap0)
+for bulk instead of monitor injection. All three are radio/driver-level, not libawdl-protocol tweaks.
+The mcs fix (118) stays for SEND; the availability advertisement already matches; the frontier is the
+channel-following capability.
