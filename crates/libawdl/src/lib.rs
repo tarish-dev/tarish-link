@@ -30,6 +30,7 @@
 
 pub mod action;
 pub mod beacon;
+pub mod blockack;
 pub mod coverage;
 pub mod follow;
 pub mod data;

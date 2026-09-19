@@ -6312,6 +6312,192 @@ is stubbed; is there another route?) or tighten the software timing loop far bel
 ~8 ms — and confirm from an Apple device's own log (`log stream` on a Mac) whether it adds our
 peer and where it stops. Not an on-air-frame problem.
 
+## 104. ★★★ SOLVED — iOS peers our pure stack: we advertised wonder0's MAC; the firmware only ACKs wondertap0's
+
+**"Pixel 10 Pro" now appears on the iPhone share sheet over our pure stack — no libmosey, no
+GMS, SELinux enforcing.** The iPhone discovers us, opens a TLS connection to `:8770`, and sends
+`POST /Discover`. This retires findings 102 and 103: **the cause was NOT timing precision**, and
+the software-TSF/8-ms-jitter theory in 103 was wrong. The gap was a single wrong MAC.
+
+**The mechanism.** `wonder.ko` is only a mac80211 injection shim; the actual radio is
+**`wondertap0`** (the bcmdhd4390 / Broadcom interface it delegates all RF to). An 802.11 ACK is
+emitted by firmware at SIFS (~16 µs) — it can never be a host job — and the Broadcom firmware
+auto-ACKs directed frames **only for the address `wondertap0` owns**. Our session advertised the
+AWDL peer address as **`wonder0`'s** MAC (`ce:25…`), which the firmware does not own. So every
+directed frame the iPhone sent — the ADDBA (Block Ack) setup, the TCP SYN to `:8770`, `/Discover`
+— went un-ACKed, and the iPhone retried the ADDBA forever and never opened the unicast path.
+
+**The evidence, before and after, measured on the Pi and on wonder0:**
+
+| | advertising wonder0's MAC | advertising wondertap0's MAC |
+|---|---|---|
+| ADDBA to us in 10 s | ~146, **all Retry** | 14, **0 Retry** |
+| frames directed to us | never ACKed | 547 seen, **0 Retry** |
+| QoS data frames | 0 | 32 |
+| TCP to `:8770` | none | SYN → **TLS ok → `POST /Discover`** |
+| share sheet | never | **"Pixel 10 Pro" appears** |
+
+This is why stock always worked: **stock libmosey's `mosey0` address equals `wondertap0`'s** —
+it advertises the radio's own address, so the firmware ACKs. Confirmed live: under stock,
+`mosey0` == `wondertap0` (`62:35…`, then `96:5b…` after a restart), and the iPhone's ADDBA to
+stock carried 0 Retry with data flowing (`data_rx_frame_count > 0`).
+
+**The fix (`crates/libawdl-hal/src/wonder.rs`, `crates/libawdl-mosey-shim/src/lib.rs`).** The
+shim now reads `wondertap0`'s MAC over netlink at session start and passes it as
+`cfg.override_mac`, so the advertised SA, `mosey0`'s address, and RX matching all use the
+firmware-ACKed radio MAC. `wondertap0`'s MAC is a fresh random per session (stable within one),
+so it is read live, never pinned. `Wonder::mac_of()` does an nl80211 **`GET_INTERFACE` DUMP** and
+picks the matching ifindex — a targeted get by ifindex fails for `wondertap0` (different wiphy),
+exactly as a single-`iw` get would, which is why `iw dev` dumps. The family id and the dump both
+run on a **dedicated** netlink socket: resolving them on the shared bring-up socket read back
+stale datagrams and returned a bogus family / no MAC (two failed attempts before this was seen).
+
+**What 102/103 got right and wrong.** Right: it isn't BLE, isn't the responder, and the on-air
+*frames* match stock byte-for-byte. Wrong: it concluded the remaining variable was sync timing.
+The remaining variable was the link-layer ACK, which depends on the advertised address matching
+the firmware's owned address — an RX/data-path fact, not a TX-timing one. This matches the
+operator's standing intuition that the gap was simple and internal between `wonder.ko` and our
+stack, reachable by tracing libmosey and matching its calls rather than reimplementing.
+
+## 105. ★★★ Send over the pure stack: discovery/handshake/prompt all work; bulk `/Upload` loses frames because monitor injection has no link-layer ARQ
+
+Follow-up to 104 (receive works). Send was taken end-to-end and isolated the same way — swap
+stock libmosey ↔ our shim, capture the actual TCP on `mosey0` — and it landed somewhere the
+timing theory (103) did not predict.
+
+**What works on the pure stack (no libmosey, no GMS, enforcing):** the Pixel joins the cluster,
+resolves the iPhone as a peer over `_airdrop._tcp`, and completes outbound `/Discover` (200 +
+`ReceiverMediaCapabilities`) and `/Ask` — the iPhone **shows the accept prompt and returns 200
+with an `IDSSessionID`** (`peer accepted, sending 419138 bytes`). Everything up to the payload is
+proven on our own AWDL.
+
+**What fails:** the bulk `/Upload` stalls and dies at the 30 s write timeout (`send N failed:
+Try again (os error 11)` = EAGAIN, `sharingd/src/send.rs`). The `mosey0` capture shows why: the
+iPhone repeatedly ACKs the *same* sequence while **SACK-ing later blocks it did receive** — i.e.
+our *earlier* data segments are being lost in the air. We retransmit the hole at +5 s, +16 s,
++38 s and each retransmit is lost too, so TCP never recovers and the send buffer never drains.
+The iPhone's ACKs reach us fine (RX is solid), so the loss is one-directional: **our transmit.**
+
+**Root cause — no link-layer ARQ on our TX path, not clock timing.** Stock's bulk data rides the
+Broadcom firmware's normal TX, which retransmits a lost frame in hardware (ARQ). Ours rides
+**AF_PACKET injection on the `wonder0` monitor interface**, which has no ARQ — a frame that misses
+(bad window phase, collision, ~10% here) is simply gone, and TCP's own retransmit hits the same
+loss rate and stalls. This is why the identical `/Upload` completes over stock (send to a
+freshly-restarted iPhone worked) but not over ours, and why *receive* works either way (there we
+are the listener; the iPhone transmits with hardware timing + ARQ).
+
+**Two traps this cleared up, both of which wasted a cycle:**
+
+- **iOS suppresses a repeatedly-failing sender.** After ~8 failed `/Upload`s from the same
+  `SenderID` (fixed per `tarishsharingd` process), the iPhone still ACKs our `/Ask` at the TCP
+  layer but stops showing the prompt and sends no HTTP response — looking exactly like a send-side
+  hang. It is not: restart `tarishsharingd` for a fresh `SenderID` **and** reset the iPhone
+  (toggle AirDrop off/on, or reboot — one iPhone mini stayed poisoned until a reboot). The `/Ask`
+  body was never the problem; it is the same 436-byte body that got accepted on the first attempt.
+- **The transport swap is what isolates it.** Send fails *identically* over stock libmosey and
+  our shim at the `/Ask` step while a sender is suppressed — which briefly looked like the send
+  code, not the radio. Only after clearing the iOS suppression does the real split appear: `/Upload`
+  completes over stock, loses frames over ours.
+
+**Send-datapath changes made in passing (`libawdl-session`):** `DRAIN_PER_WINDOW` 4→24,
+`OUTBOUND_MAX` 64→512, and `enqueue_from_tun` now applies backpressure (stop reading the tun when
+the queue is full) instead of dropping the oldest frame — a dropped TCP segment on a no-ARQ path
+is a stall, not a hiccup. Correct improvements, but they do not fix the air loss.
+
+**The ARQ-path hunt is answered: there is no firmware-ARQ path, because stock does not use one.**
+Captured stock libmosey's own outbound during a working-then-failing send:
+
+- stock's outbound data frames are **all 12 Mb/s OFDM with the Retry bit clear** — identical to
+  ours; the firmware does not retransmit them (injected monitor frames bypass firmware ARQ for
+  stock too)
+- **every ADDBA Request on air comes from the iPhone**, never from stock — stock sets up no
+  Block-Ack session for its *outbound* data, so there is no aggregation/retransmit agreement
+- the BlockAck frames are iPhone→us only
+- **stock also failed** a 4.5 MB `/Upload` with the same EAGAIN; it had earlier completed a
+  419 KB one
+
+So Google's libmosey send is *also* best-effort raw AF_PACKET injection with no ARQ, and it too
+has a ceiling. Stock beats us only on the smaller file because its injection **loss rate is
+lower** (tighter timing), not because it has a reliable path we lack. This kills option (c).
+
+The remaining levers, in order of payoff:
+
+1. **Match stock's timing to lower our loss** — reach parity so small/moderate files complete as
+   they do on stock. This is the "do what libmosey does" that actually applies: same raw
+   injection, just land the frames in-window as tightly as stock does. Our measured spread is
+   ~4–13 ms against a 16 ms window; stock's is tighter.
+2. **Do BETTER than libmosey — implement 802.11 Block Ack ARQ ourselves.** We *originate* the
+   data, so we can send our own ADDBA, transmit QoS data under a TID with sequence numbers, parse
+   the iPhone's BlockAck bitmaps (we already receive them), and retransmit the un-acked MPDUs with
+   the Retry bit set. This is real software ARQ over injection — reliable large transfers, beyond
+   what stock's bridge achieves. Ambitious but squarely in reach and the honest "full protocol"
+   answer.
+3. **Redundant TX** (each data frame 2–3×) — a cheap stopgap that trades airtime for a lower
+   effective loss rate; not a real fix but could carry a moderate file through as proof.
+
+## 106. ★★★ Software Block Ack ARQ is not viable with iOS — the iPhone ignores an ADDBA we originate, even mid-transfer
+
+Tested the "beat libmosey with real ARQ" idea (finding 105, lever 2) directly. Built the
+originator side of 802.11 Block Ack (`libawdl::blockack`: ADDBA Request / BlockAckReq builders,
+ADDBA Response / BlockAck parsers, unit-tested) and a probe in the session that, while synced and
+in the master's window, sends an ADDBA Request to the iPhone every 2 s and logs any response.
+
+**Result: the iPhone answers nothing.** Dozens of ADDBA Requests sent — from an idle share-sheet
+state *and* during an active, accepted `/Upload` (4.5 MB in flight) — `resp_seen=0 ack_seen=0`
+throughout. tcpdump confirms our frames are well-formed and on air: `Action: BA ADDBA Request`,
+BSSID `00:25:00:ff:94:73`, `DA` the iPhone, `SA` us, 12 Mb/s. The iPhone's firmware auto-ACKs
+them at L2 (it owns nothing that would drop them — the MAC fix of 104 applies), but no ADDBA
+Response and no BlockAck ever comes back.
+
+**Why:** iOS manages Block Ack in the firmware, bound to a real peer/association context. A BA
+agreement arriving as an injected action frame from a device that is not an associated peer in
+its driver state is simply not entertained. This is the same class of wall as 104's ACK problem,
+one layer up — except here there is no address trick to satisfy it: BA is not addressable state
+we can reach by injection. (Consistent with the capture in 105: the only ADDBAs on air during a
+real transfer originate from the *iPhone*, for its own direction, and stock libmosey never sends
+one either — Google did not find a way to originate BA over this path, and neither is there one.)
+
+**Consequence — the door this closes and the one it leaves open.** We cannot get the iPhone to
+BlockAck our data, so there is no selective-retransmit feedback to build software ARQ on. What we
+*do* have is the iPhone's **TCP** ACKs, which arrive fine (RX is reliable). So the only lever left
+for reliable bulk send is to **lower the air-loss rate** until TCP's own recovery sustains
+throughput — either by matching stock's tighter injection timing (parity: moderate files
+complete) or by **repetition FEC**: transmit each outbound data frame N× so an independent ~10%
+loss becomes ~10%^N. Repetition needs no peer cooperation, directly attacks the measured loss, and
+if it carries a file stock cannot (stock failed 4.5 MB, finding 105) it beats libmosey after all —
+just not by the mechanism first guessed. `libawdl::blockack` stays in the tree: the parsers are
+still useful for *reading* the iPhone's BA traffic, and the builders document the attempt.
+
+## 107. ★★★ The bulk-send loss is timing-correlated (whole windows missed), not random — repetition FEC barely helps; the fix is sync precision
+
+Built repetition FEC (finding 106 lever): `Config::data_repeat` sends each outbound data frame
+N× with the 802.11 Retry bit and the same sequence number, the drain count divided by N to hold
+per-window airtime constant. Deployed at 3×.
+
+**It barely moved the needle, and the capture says why.** With 3× on, the iPhone's cumulative ACK
+advances in a **stuck-then-jump** pattern — frozen for stretches, then leaping ~2856 bytes at once
+— with 70 SACK blocks over 265 segments. That is the signature of **timing-correlated loss: whole
+availability windows are missed**, not independent single-frame loss. Same-window repetition
+cannot help that: when a window's phase is wrong, all N copies miss together. It confirms the real
+cause is our **sync precision** — clock spread ~4–13 ms against a 16 TU (~16.4 ms) window (finding
+103), so a large fraction of windows we transmit into are not actually where the iPhone is awake.
+
+**What this means for the plan.** The lever is not FEC and not ARQ (both dead ends here); it is
+landing our transmits in the peer's window. Concrete next directions, untried:
+
+- **Data only in the reactive path.** We already transmit best when we transmit *immediately after
+  hearing a master frame* (provably in-window). Today data also drains in the loosely-timed
+  `us_until_master_window` path, whose error is the full spread. Draining data **only** in the
+  reactive (just-heard-master) moment should cut the missed-window rate at the cost of throughput.
+- **Time-diversity repetition.** Spread the N copies across *different* windows instead of one
+  burst, so an independent bad window does not take all copies.
+- **Tighten the clock.** Reduce spread well below the window: better TSFT anchoring, discard
+  outlier samples, smaller estimator gain. This is the general fix and helps discovery too.
+
+`data_repeat` stays (off by default = 1); it is a cheap knob and helps a little once timing is
+tighter. This is a genuine research frontier, not a one-line fix — parity with stock's send needs
+stock's timing, and stock spent Google-years on it.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us

@@ -91,6 +91,7 @@ fn init_log() {}
 /// `tarishd` calls this. `country` is a NUL-terminated 2-letter code.
 /// A fresh locally-administered unicast MAC (LAA bit set, multicast bit clear), from
 /// `/dev/urandom` — what Apple's own AWDL uses for each session.
+#[allow(dead_code)] // kept for experiments; the AWDL address now tracks wondertap0's MAC
 fn random_laa() -> [u8; 6] {
     let mut m = [0u8; 6];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
@@ -151,7 +152,7 @@ pub unsafe extern "C" fn mosey_start_5(
         }
     };
     // libmosey's captured bring-up rate; 20 MHz on the 2.4 GHz social channel.
-    let params = TxParams { mcs: 3, nss: 2, bandwidth: if channel < 36 { 0 } else { 2 }, short_gi: false };
+    let params = TxParams { mcs: 11, nss: 2, bandwidth: if channel < 36 { 0 } else { 2 }, short_gi: false }; // HT MCS 11, matching stock libmosey
     if let Err(e) = radio.bring_up(channel, params, cc) {
         log::error!("mosey shim: wonder bring-up failed: {e:?}");
         return std::ptr::null_mut();
@@ -165,9 +166,51 @@ pub unsafe extern "C" fn mosey_start_5(
     // master's windows that are on it — bursting PSFs there so Apple peers us reliably despite
     // being present on just one social channel.
     cfg.channel_lock = true;
-    // Rotate a fresh locally-administered MAC each session, as Apple devices do — a fixed AWDL
-    // address reused across many discovery attempts can be negatively cached by iOS.
-    cfg.override_mac = Some(random_laa());
+    // Transmit on hearing the master (provably in-window) — the window alignment a host clock
+    // cannot compute, and how the libmosey trace lands frames in the window (findings 100-103).
+    cfg.reactive = true;
+    // Block Ack probe: originate an ADDBA to the master and log whether the iPhone answers, to
+    // decide whether software ARQ over injection is viable (finding 105). Off unless asked.
+    cfg.blockack = std::env::var("TARISH_BA_PROBE").is_ok()
+        || read_property("persist.tarish.ba_probe").as_deref() == Some("1");
+    // Repetition FEC for outbound data (finding 106): our inject path has no ARQ and iOS will not
+    // Block-Ack us, so send each data frame N times (same seq, Retry bit) and let the peer de-dup.
+    // Default 3 (~10% loss -> ~0.1%); tune with persist.tarish.data_repeat or TARISH_DATA_REPEAT.
+    cfg.data_repeat = std::env::var("TARISH_DATA_REPEAT")
+        .ok()
+        .or_else(|| read_property("persist.tarish.data_repeat"))
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n >= 1 && n <= 8)
+        .unwrap_or(3);
+    // Advertise **wondertap0's** MAC as our AWDL address, not wonder0's.
+    //
+    // wonder0 is only the mac80211 injection shim; the actual radio is wondertap0 (bcmdhd4390),
+    // which wonder.ko delegates all RF to. The Broadcom firmware auto-ACKs directed frames only
+    // for the address wondertap0 owns. The iPhone opens its transfer with an 802.11 ADDBA
+    // (Block Ack) handshake and sends /Discover over a directed link; those frames need a
+    // link-layer ACK, which is done in firmware at SIFS and can never be a host job.
+    //
+    // Advertising wonder0's MAC (ce:25…) or a random LAA leaves the directed frames on an
+    // address the firmware does not own, so it never ACKs and the peer retries ADDBA forever
+    // (measured: ~146 retries/10s from each iPhone, no session, never shown on the share sheet).
+    // Stock libmosey advertises wondertap0's MAC for exactly this reason — its mosey0 address
+    // equals wondertap0's, and data then flows (stock log: data_rx_frame_count > 0). We do the
+    // same. wondertap0's MAC rotates each session, so read it live rather than pinning it.
+    const WONDERTAP_IFACE: &str = "wondertap0";
+    match radio.mac_of(WONDERTAP_IFACE) {
+        Ok(m) => {
+            log::info!(
+                "mosey shim: AWDL address = {WONDERTAP_IFACE} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (firmware-ACKed radio MAC)",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            );
+            cfg.override_mac = Some(m);
+        }
+        Err(e) => {
+            // Fall back to wonder0's MAC (override left None). This will not be ACKed, but it
+            // keeps sync/advertising working and makes the cause visible rather than silent.
+            log::error!("mosey shim: cannot read {WONDERTAP_IFACE} MAC ({e:?}); AWDL address falls back to wonder0 — directed frames will NOT be ACKed");
+        }
+    }
     cfg.datapath = Some(iface);
     // duration None: run until mosey_stop.
 

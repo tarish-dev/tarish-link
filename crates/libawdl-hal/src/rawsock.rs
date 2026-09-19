@@ -35,6 +35,17 @@ use crate::{Error, Result};
 /// and a zero presence word.
 pub const RADIOTAP_EMPTY: [u8; 8] = [0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
 
+/// Radiotap header with the RATE field set to **12 Mb/s (0x18 = 24 × 500 kbps), an OFDM rate**.
+///
+/// An empty header lets the driver default to **1 Mb/s DSSS (802.11b)** on the 2.4 GHz social
+/// channel, and an AWDL receiver decodes only OFDM — so a DSSS data frame is invisible to it
+/// even though a promiscuous monitor still logs it. wonder DOES honour the legacy RATE field on
+/// injection (verified: stock libmosey injects its mDNS with exactly this header,
+/// `00 00 09 00 04 00 00 00 18`, and it goes out OFDM). The rate value must be one the driver
+/// supports — 6 Mb/s silently fell back to DSSS, 12 Mb/s (stock's value) does not.
+/// Layout: version, pad, len=9, present=RATE(bit 2 = 0x04), rate=0x18.
+pub const RADIOTAP_OFDM: [u8; 9] = [0x00, 0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x00, 0x18];
+
 /// A raw socket bound to one monitor interface.
 pub struct RawSock {
     fd: i32,
@@ -82,8 +93,9 @@ impl RawSock {
 
     /// Transmit one 802.11 frame, prefixing the radiotap header the driver requires.
     pub fn tx(&self, frame: &[u8]) -> Result<()> {
-        let mut buf = Vec::with_capacity(RADIOTAP_EMPTY.len() + frame.len());
-        buf.extend_from_slice(&RADIOTAP_EMPTY);
+        // Force OFDM (see RADIOTAP_OFDM): a DSSS frame is invisible to an AWDL receiver.
+        let mut buf = Vec::with_capacity(RADIOTAP_OFDM.len() + frame.len());
+        buf.extend_from_slice(&RADIOTAP_OFDM);
         buf.extend_from_slice(frame);
         let n = unsafe {
             libc::send(self.fd, buf.as_ptr() as *const libc::c_void, buf.len(), 0)

@@ -73,6 +73,12 @@ const NL80211_ATTR_VENDOR_DATA: u16 = 0xc5;
 
 const NL80211_IFTYPE_MONITOR: u32 = 6;
 
+/// The wiphy the wonder monitor lives on. Normally resolved from the existing wonder0, but when
+/// wonder0 has been torn down (a killed session leaves none, and it is not recreated at boot)
+/// there is nothing to resolve from, so it must be created fresh. Stock libmosey creates wonder0
+/// with `NL80211_ATTR_WIPHY = 0`, which is the `wonder` phy on this device — the fallback here.
+const WONDER_WIPHY_FALLBACK: u32 = 0;
+
 /// The OUI `wonder.ko` registers its vendor commands under. Not Broadcom's and not a
 /// standard — Google's own, recovered from the module.
 const WONDER_OUI: u32 = 0x001a11;
@@ -284,6 +290,48 @@ impl Drop for NlSock {
     }
 }
 
+/// Resolve the nl80211 generic-netlink family id on a specific socket
+/// (`CTRL_CMD_GETFAMILY "nl80211"`).
+///
+/// Not a constant: it is assigned at load time and differs between kernels (it was `0x20` in the
+/// finding-92 capture, but nothing guarantees that). Taking the socket as an argument lets a
+/// caller resolve it on a dedicated socket, where no stale traffic from an earlier bring-up can
+/// be read back in place of the reply.
+fn nl80211_family_on(sock: &mut NlSock) -> Result<u16> {
+    const GENL_ID_CTRL: u16 = 0x10;
+    const CTRL_CMD_GETFAMILY: u8 = 3;
+    const CTRL_ATTR_FAMILY_ID: u16 = 1;
+    const CTRL_ATTR_FAMILY_NAME: u16 = 2;
+
+    let seq = sock.next_seq();
+    let mut m = NlMsg::genl(GENL_ID_CTRL, NLM_F_REQUEST, seq, CTRL_CMD_GETFAMILY, 1);
+    m.attr(CTRL_ATTR_FAMILY_NAME, b"nl80211\0");
+    sock.send(&m.finish())?;
+
+    let mut buf = [0u8; 4096];
+    let n = unsafe {
+        libc::recv(sock.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
+    };
+    if n < 20 {
+        return Err(Error::Radio("resolving nl80211 family: short reply".into()));
+    }
+    let n = n as usize;
+    // Walk the attributes after nlmsghdr(16) + genlmsghdr(4) for CTRL_ATTR_FAMILY_ID.
+    let mut off = 20;
+    while off + 4 <= n {
+        let alen = u16::from_ne_bytes([buf[off], buf[off + 1]]) as usize;
+        let atype = u16::from_ne_bytes([buf[off + 2], buf[off + 3]]);
+        if alen < 4 || off + alen > n {
+            break;
+        }
+        if atype == CTRL_ATTR_FAMILY_ID && alen >= 6 {
+            return Ok(u16::from_ne_bytes([buf[off + 4], buf[off + 5]]));
+        }
+        off += (alen + 3) & !3; // NLA_ALIGN
+    }
+    Err(Error::Radio("nl80211 family id not in reply — is the driver loaded?".into()))
+}
+
 // --- the radio --------------------------------------------------------------------------
 
 /// The `wonder.ko` backend.
@@ -336,6 +384,113 @@ impl Wonder {
             off += (alen + 3) & !3;
         }
         Err(Error::Radio("MAC not present in GET_INTERFACE reply".into()))
+    }
+
+    /// Read the MAC of an arbitrary nl80211 interface by name, over netlink.
+    ///
+    /// Needed for `wondertap0` — the bcmdhd radio interface that `wonder.ko` delegates RF to.
+    /// The Broadcom firmware auto-ACKs frames addressed to **wondertap0's** MAC, not wonder0's
+    /// (the injection shim); stock `libmosey` advertises wondertap0's address as the AWDL peer
+    /// address for exactly this reason, so directed frames (ADDBA, /Discover) land on an address
+    /// the firmware owns and ACKs. We must do the same or the peer retries ADDBA forever with no
+    /// session (measured against both wonder0's own MAC and a random LAA). sysfs
+    /// `/sys/class/net/<if>/address` is denied under tarishd's policy, so this goes over netlink.
+    pub fn mac_of(&mut self, iface: &str) -> Result<[u8; 6]> {
+        const NL80211_CMD_GET_INTERFACE: u8 = 5;
+        const NL80211_CMD_NEW_INTERFACE: u8 = 7;
+        const NL80211_ATTR_MAC: u16 = 6;
+
+        let c = std::ffi::CString::new(iface)
+            .map_err(|_| Error::Radio("bad interface name".into()))?;
+        let idx = unsafe { libc::if_nametoindex(c.as_ptr()) };
+        if idx == 0 {
+            return Err(Error::Radio(format!(
+                "no interface {iface}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // A DEDICATED socket, not the shared genl one: after bring-up the shared socket can hold
+        // stale replies/ACKs, and reading them back gave the wrong datagram even though nl80211
+        // does carry wondertap0's address. The family id is resolved on THIS socket too, for the
+        // same reason — resolving it on the shared socket read stale data and returned a bogus id,
+        // so the dump went nowhere and timed out. On a fresh socket the only traffic is our reply.
+        let mut sock = NlSock::open(libc::NETLINK_GENERIC)?;
+        let tv = libc::timeval { tv_sec: 0, tv_usec: 500_000 };
+        unsafe {
+            libc::setsockopt(
+                sock.fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &tv as *const libc::timeval as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as u32,
+            );
+        }
+        let family = nl80211_family_on(&mut sock)?;
+        // DUMP every interface and pick the one whose ifindex matches, exactly as `iw dev` does.
+        // A targeted GET_INTERFACE by ifindex fails for wondertap0 (it lives on a different wiphy
+        // / the bcmdhd driver), which is why the single-get returned no MAC; the dump lists it.
+        const NLM_F_DUMP: u16 = 0x300; // NLM_F_ROOT | NLM_F_MATCH
+        const NLMSG_DONE: u16 = 0x3;
+        let seq = sock.next_seq();
+        let m = NlMsg::genl(family, NLM_F_REQUEST | NLM_F_DUMP, seq, NL80211_CMD_GET_INTERFACE, 1);
+        sock.send(&m.finish())?;
+
+        // A dump is multipart: many nlmsghdr-framed messages, possibly several per datagram,
+        // terminated by NLMSG_DONE. Walk every message; return the MAC of the matching ifindex.
+        let mut buf = [0u8; 16384];
+        'outer: for _ in 0..64 {
+            let n = unsafe {
+                libc::recv(sock.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
+            };
+            if n <= 0 {
+                break; // timeout or error — caller falls back and logs
+            }
+            let n = n as usize;
+            let mut moff = 0;
+            while moff + 16 <= n {
+                let mlen = u32::from_ne_bytes([
+                    buf[moff], buf[moff + 1], buf[moff + 2], buf[moff + 3],
+                ]) as usize;
+                let mtype = u16::from_ne_bytes([buf[moff + 4], buf[moff + 5]]);
+                if mlen < 16 || moff + mlen > n {
+                    break;
+                }
+                if mtype == NLMSG_DONE {
+                    break 'outer;
+                }
+                // genlmsghdr cmd at +16; nl80211 attributes at +20.
+                if mlen >= 20 && buf[moff + 16] == NL80211_CMD_NEW_INTERFACE {
+                    let mut off = moff + 20;
+                    let end = moff + mlen;
+                    let mut got_idx = None;
+                    let mut got_mac = None;
+                    while off + 4 <= end {
+                        let alen = u16::from_ne_bytes([buf[off], buf[off + 1]]) as usize;
+                        let atype = u16::from_ne_bytes([buf[off + 2], buf[off + 3]]);
+                        if alen < 4 || off + alen > end {
+                            break;
+                        }
+                        if atype == NL80211_ATTR_IFINDEX && alen >= 8 {
+                            got_idx = Some(u32::from_ne_bytes([
+                                buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+                            ]));
+                        } else if atype == NL80211_ATTR_MAC && alen >= 10 {
+                            got_mac = Some(<[u8; 6]>::try_from(&buf[off + 4..off + 10]).unwrap());
+                        }
+                        off += (alen + 3) & !3; // NLA_ALIGN
+                    }
+                    if got_idx == Some(idx) {
+                        if let Some(mac) = got_mac {
+                            return Ok(mac);
+                        }
+                    }
+                }
+                moff += (mlen + 3) & !3; // NLMSG_ALIGN
+            }
+        }
+        Err(Error::Radio(format!(
+            "MAC of {iface} not returned by GET_INTERFACE dump"
+        )))
     }
 
     /// The wiphy index behind an interface, over netlink (`NL80211_CMD_GET_INTERFACE`).
@@ -410,39 +565,8 @@ impl Wonder {
     /// Not a constant: it is assigned at load time and differs between kernels (it was
     /// `0x20` in the finding-92 capture, but nothing guarantees that).
     fn nl80211_family(&mut self) -> Result<u16> {
-        const GENL_ID_CTRL: u16 = 0x10;
-        const CTRL_CMD_GETFAMILY: u8 = 3;
-        const CTRL_ATTR_FAMILY_ID: u16 = 1;
-        const CTRL_ATTR_FAMILY_NAME: u16 = 2;
-
         let sock = self.genl()?;
-        let seq = sock.next_seq();
-        let mut m = NlMsg::genl(GENL_ID_CTRL, NLM_F_REQUEST, seq, CTRL_CMD_GETFAMILY, 1);
-        m.attr(CTRL_ATTR_FAMILY_NAME, b"nl80211\0");
-        sock.send(&m.finish())?;
-
-        let mut buf = [0u8; 4096];
-        let n = unsafe {
-            libc::recv(sock.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
-        };
-        if n < 20 {
-            return Err(Error::Radio("resolving nl80211 family: short reply".into()));
-        }
-        let n = n as usize;
-        // Walk the attributes after nlmsghdr(16) + genlmsghdr(4) for CTRL_ATTR_FAMILY_ID.
-        let mut off = 20;
-        while off + 4 <= n {
-            let alen = u16::from_ne_bytes([buf[off], buf[off + 1]]) as usize;
-            let atype = u16::from_ne_bytes([buf[off + 2], buf[off + 3]]);
-            if alen < 4 || off + alen > n {
-                break;
-            }
-            if atype == CTRL_ATTR_FAMILY_ID && alen >= 6 {
-                return Ok(u16::from_ne_bytes([buf[off + 4], buf[off + 5]]));
-            }
-            off += (alen + 3) & !3; // NLA_ALIGN
-        }
-        Err(Error::Radio("nl80211 family id not in reply — is the driver loaded?".into()))
+        nl80211_family_on(sock)
     }
 
     /// One vendor command: `NL80211_CMD_VENDOR` with our OUI, the subcommand, and its data
@@ -466,18 +590,24 @@ impl Wonder {
     pub fn bring_up(&mut self, channel: u8, params: TxParams, country: [u8; 2]) -> Result<()> {
         let family = self.nl80211_family()?;
         // Resolve the wiphy over netlink from the existing monitor (it persists on a Pixel),
-        // before we tear it down — see query_wiphy for why not sysfs.
-        let old_idx = self.ifindex()?;
-        let wiphy = self.query_wiphy(family, old_idx)?;
-
-        // 1. DEL + NEW: recreate wonder0 as a fresh monitor.
-        {
-            let sock = self.genl.as_mut().unwrap();
-            {
+        // before we tear it down — see query_wiphy for why not sysfs. If wonder0 is absent (a
+        // prior session was killed mid-bring-up; it is not recreated at boot), there is nothing
+        // to resolve or delete — create it fresh on the wonder phy instead of failing.
+        let wiphy = match self.ifindex() {
+            Ok(old_idx) => {
+                let w = self.query_wiphy(family, old_idx)?;
+                let sock = self.genl.as_mut().unwrap();
                 let mut m = NlMsg::genl(family, NLM_F_REQUEST, 0, NL80211_CMD_DEL_INTERFACE, 1);
                 m.attr_u32(NL80211_ATTR_IFINDEX, old_idx);
                 sock.send_acked(m, "DEL_INTERFACE wonder0")?;
+                w
             }
+            Err(_) => WONDER_WIPHY_FALLBACK,
+        };
+
+        // 1. NEW: (re)create wonder0 as a fresh monitor on the resolved wiphy.
+        {
+            let sock = self.genl.as_mut().unwrap();
             let mut m = NlMsg::genl(family, NLM_F_REQUEST, 0, NL80211_CMD_NEW_INTERFACE, 1);
             m.attr_u32(NL80211_ATTR_WIPHY, wiphy);
             m.attr_u32(NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
@@ -526,8 +656,14 @@ impl Wonder {
         //    SET_FIXED_TX_RATE: preamble(u32), bw(u16), gi(u32), nss(u8), mcs(u8). Bring-up
         //    replicates libmosey's captured VHT rate (Pre=2, Bw=2, Gi=2, Nss=2, Mcs=3);
         //    per-frame rate for action frames is a separate, lower setting (see TxParams).
+        // Match stock libmosey's captured SET_FIXED_TX_RATE byte-for-byte (traced from tarishd):
+        // preamble 1 = HT on the 2.4 GHz social channel, 2 = VHT on the 5 GHz ones. Our earlier
+        // value (VHT everywhere) is INVALID on 2.4 GHz, so the radio silently fell back to 1 Mb/s
+        // DSSS — and an AWDL receiver that only decodes OFDM/HT would never see a DSSS frame the
+        // way a promiscuous monitor does. gi=2, nss=2, mcs=11 are stock's values.
+        let preamble: u32 = if channel < 36 { 1 } else { 2 };
         let rate = vendor_data(|m| {
-            m.attr_u32(1, 2); // preamble = VHT
+            m.attr_u32(1, preamble);
             m.attr_u16(2, params.bandwidth as u16);
             m.attr_u32(3, if params.short_gi { 1 } else { 2 }); // gi (libmosey: 2)
             m.attr_u8(4, params.nss);

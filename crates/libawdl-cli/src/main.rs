@@ -1391,7 +1391,7 @@ fn open_wonder(monitor: &str, channel: u8) -> Box<dyn libawdl_hal::Radio> {
     // libmosey's captured bring-up rate on 5 GHz is VHT/80 MHz (finding 92); on the 2.4 GHz
     // social channel (6) that width is invalid, so drop to 20 MHz there. bandwidth: 0=20, 2=80.
     let bandwidth = if channel < 36 { 0 } else { 2 };
-    let params = TxParams { mcs: 3, nss: 2, bandwidth, short_gi: false };
+    let params = TxParams { mcs: 11, nss: 2, bandwidth, short_gi: false }; // HT MCS 11, matching stock libmosey
     if let Err(e) = w.bring_up(channel, params, *b"QA") {
         eprintln!("wonder bring_up failed: {e:?}");
         std::process::exit(1);
@@ -1481,12 +1481,15 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         follow: follow || hop,
         follow_channels: false,
         channel_lock: hop,
+        reactive: hop,
         override_mac: None,
         tenure,
         legacy_timing: legacy,
         version,
         garbage,
         datapath: datapath.map(|s| s.to_string()),
+        blockack: std::env::var("TARISH_BA_PROBE").is_ok(),
+        data_repeat: std::env::var("TARISH_DATA_REPEAT").ok().and_then(|s| s.parse().ok()).unwrap_or(1),
         duration: Some(std::time::Duration::from_secs(secs)),
     };
     let stop = std::sync::atomic::AtomicBool::new(false);

@@ -45,6 +45,13 @@ pub struct Config {
     /// only if its sync frames arrive while the peer is on our channel, and often enough to hold a
     /// peer-table entry.
     pub channel_lock: bool,
+    /// Transmit the instant we receive a frame from the master, instead of only on our
+    /// software-computed window schedule. When a master frame arrives we are provably inside
+    /// the master's availability window on its channel, so a frame sent right then lands where
+    /// the whole cluster is awake and listening — the window alignment a host-timestamp clock
+    /// cannot guarantee, and (per the libmosey trace, findings 100-103) how a software stack on
+    /// a hop-less radio actually gets its frames into the window.
+    pub reactive: bool,
     /// Use this AWDL address instead of the radio's hardware MAC. Apple devices rotate a fresh
     /// locally-administered MAC every AWDL session (privacy), and a peer that reuses one fixed
     /// address across many failed discovery attempts can be negatively cached. `None` keeps the
@@ -56,6 +63,19 @@ pub struct Config {
     pub garbage: Option<Garbage>,
     /// Name of a TUN to bring up and carry IP over (e.g. `tawdl0`). None = control plane only.
     pub datapath: Option<String>,
+    /// Originate an 802.11 Block Ack agreement with the master and log the peer's ADDBA
+    /// Response / BlockAck frames. The de-risking probe for real outbound ARQ (finding 105):
+    /// injection has no hardware ARQ, so to make bulk send reliable we must run Block Ack in
+    /// software, which only works if the peer honours an ADDBA *we* originate. It does not
+    /// (finding 106) — kept only for reading the peer's BA traffic.
+    pub blockack: bool,
+    /// Transmit each outbound **data** frame this many times (repetition FEC). Our inject path
+    /// has no link-layer ARQ and iOS will not Block-Ack us (finding 106), so a lost data frame
+    /// is only recovered by TCP — whose retransmits hit the same ~10% loss and stall. Sending
+    /// each frame N× with the 802.11 Retry bit set and the SAME sequence number lets the peer's
+    /// standard duplicate-detection keep one and drop the rest, turning ~10% loss into ~10%^N.
+    /// 1 = off (one transmission). Control frames/beacons are never repeated.
+    pub data_repeat: u32,
     /// Stop after this long. None = run until the stop flag is set (the shim's mode).
     pub duration: Option<Duration>,
 }
@@ -75,12 +95,15 @@ impl Config {
             follow: false,
             follow_channels: false,
             channel_lock: false,
+            reactive: false,
             override_mac: None,
             tenure: None,
             legacy_timing: false,
             version: None,
             garbage: None,
             datapath: None,
+            blockack: false,
+            data_repeat: 1,
             duration: None,
         }
     }
@@ -119,12 +142,19 @@ pub struct Stats {
     pub first_error: Option<String>,
 }
 
-/// Bounded outbound queue: a burst the radio cannot keep up with must not grow without limit,
-/// and on a windowed link the stale end is the part worth dropping.
-const OUTBOUND_MAX: usize = 64;
-/// Data frames drained per window visit. A beacon plus a few data frames fits an extended
-/// window; emptying a full queue into one window overruns into the next slot.
-const DRAIN_PER_WINDOW: usize = 4;
+/// Bounded outbound queue. Sized to hold a bulk TCP burst in flight: a 419 KB AirDrop
+/// upload is ~290 full-MSS segments, and the queue has to absorb a window's worth of them
+/// between drains without discarding any. When it is full we stop reading the tun (see
+/// `enqueue_from_tun`) rather than dropping — a dropped TCP segment on our inject path has
+/// no link-layer retransmit, so a drop becomes a stall, not a hiccup. Backpressure at the
+/// tun instead lets the kernel's own TCP flow control pace the sender to our drain rate.
+const OUTBOUND_MAX: usize = 512;
+/// Data frames drained per window visit. Was 4, which capped bulk send at ~250 frames/s
+/// (~360 KB/s ceiling, and far less once drops forced TCP to back off) — enough for a
+/// one-frame `/Discover` or `/Ask` but not a `/Upload`. At HT MCS 11 (~52 Mb/s) a 1500-byte
+/// frame is ~0.25 ms on air, so 24 frames is ~6 ms — comfortably inside a 16 TU (~16.4 ms)
+/// availability window, without overrunning into the next slot.
+const DRAIN_PER_WINDOW: usize = 24;
 
 /// Run the session on `radio` (already brought up) until `stop` is set or `cfg.duration`
 /// elapses. Returns what it did.
@@ -223,6 +253,15 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     let mut current_channel = cfg.channel;
     let mut hops = 0u64;
     let mut hop_fail = 0u64;
+    let mut last_reactive_us = 0u64;
+    let mut reactive_tx = 0u64;
+    // Block Ack probe (cfg.blockack): originate an ADDBA to the master and watch for the peer's
+    // ADDBA Response / BlockAck. State for the send throttle and what we have seen back.
+    let mut ba_last_addba_us = 0u64;
+    let mut ba_dialog: u8 = 0;
+    let mut ba_resp_seen = 0u64;
+    let mut ba_ack_seen = 0u64;
+    let mut ba_mgmt_seq: u16 = 0;
     // Diagnostic: how many beacons went out on each channel, and the slots we transmitted in.
     let mut tx_by_channel: std::collections::BTreeMap<u8, u64> = std::collections::BTreeMap::new();
     let mut tx_by_slot: std::collections::BTreeMap<usize, u64> = std::collections::BTreeMap::new();
@@ -255,6 +294,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             let budget_ms = if slack_us < 4_000 { 0 } else { 2 };
             let max_drain = if slack_us < 4_000 { 4 } else { 32 };
 
+            let mut heard_master = false;
             let mut drained = 0;
             while drained < max_drain {
                 if let Ok(Some(rx)) = radio.rx(if drained == 0 { budget_ms } else { 0 }) {
@@ -271,6 +311,22 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         Some(_) => rx_mgmt += 1,
                         None => {}
                     }
+                    if cfg.blockack {
+                        if let Some(resp) = libawdl::blockack::parse_addba_response(&rx.bytes, addr) {
+                            ba_resp_seen += 1;
+                            log::info!(
+                                "BLOCKACK PROBE: peer ADDBA RESPONSE — accepted={} tid={} buffer_size={} immediate={} (dialog {:#04x}); the iPhone honours an ARQ session we originate",
+                                resp.accepted(), resp.tid, resp.buffer_size, resp.immediate, resp.dialog_token
+                            );
+                        }
+                        if let Some(ba) = libawdl::blockack::parse_block_ack(&rx.bytes, addr) {
+                            ba_ack_seen += 1;
+                            log::info!(
+                                "BLOCKACK PROBE: peer BlockAck — ssn={} tid={} compressed={} bitmap={:#018x}",
+                                ba.ssn, ba.tid, ba.compressed, ba.bitmap
+                            );
+                        }
+                    }
                     if tundev.is_some() {
                         deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd);
                     }
@@ -285,6 +341,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 if let Some(cs) = chanseq {
                                     cluster.set_master_channels(&cs);
                                 }
+                                heard_master = true;
                             }
                         }
                     }
@@ -303,6 +360,84 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         cluster.master_slots,
                         cluster.clock.spread_us()
                     );
+                }
+            }
+
+            // REACTIVE INJECTION. We just heard the master, so right now we are inside its
+            // availability window on its channel — the whole cluster is awake and listening.
+            // Transmit immediately: this is the window alignment a host-timestamp clock cannot
+            // compute, and by the libmosey trace it is how a software stack lands its frames in
+            // the window (findings 100-103). Throttled so one master burst yields a few sends.
+            if cfg.reactive && heard_master && adopted {
+                let now_us = epoch.elapsed().as_micros() as u64;
+                if now_us.saturating_sub(last_reactive_us) >= 12_000 {
+                    if let Some(t) = tundev.as_ref() {
+                        enqueue_from_tun(
+                            t, addr, &mut tbuf, &mut outbound, OUTBOUND_MAX,
+                            &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
+                        );
+                    }
+                    set_follow(&mut b, &cluster, addr, target_metric, now_us);
+                    let is_mif = cfg.psf_per_mif == 0 || n % (cfg.psf_per_mif + 1) == 0;
+                    let mut frame = if is_mif { b.mif(now_us) } else { b.psf(now_us) };
+                    libawdl::action::stamp_phy_tx_time(
+                        &mut frame, libawdl::dot11::MGMT_HEADER_LEN, (now_us + tx_latency_est) as u32);
+                    match radio.tx(&frame, TxParams::default()) {
+                        Ok(()) => { if is_mif { sent_mif += 1 } else { sent_psf += 1 } }
+                        Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
+                    }
+                    b.advance();
+                    n += 1;
+                    // Drain queued IP (mDNS answers/announcements) into the same window. With
+                    // repetition FEC each frame is sent data_repeat times, so drain fewer unique
+                    // frames to keep total transmissions per window (and airtime) about constant.
+                    for _ in 0..(DRAIN_PER_WINDOW / cfg.data_repeat.max(1) as usize).max(1) {
+                        let Some(f) = outbound.pop_front() else { break };
+                        match radio.tx(&f, TxParams::default()) {
+                            Ok(()) => dp_sent += 1,
+                            Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
+                        }
+                        // Repetition FEC: resend the same frame (same seq, Retry bit set) so the
+                        // peer's duplicate-detection keeps one across our no-ARQ air loss.
+                        if cfg.data_repeat > 1 && f.len() >= 2 {
+                            let mut dup = f.clone();
+                            dup[1] |= 0x08; // 802.11 Retry
+                            for _ in 1..cfg.data_repeat {
+                                if radio.tx(&dup, TxParams::default()).is_ok() { dp_sent += 1; }
+                            }
+                        }
+                    }
+                    // BLOCK ACK PROBE: we just heard the master, so we are in its window — the
+                    // only moment an ADDBA has a chance of landing. Originate one to the master
+                    // every ~2 s and let the RX side above log whether it answers. This is the
+                    // single fact that decides whether software ARQ over injection is viable.
+                    if cfg.blockack {
+                        if let Some(master) = cluster.master {
+                            if now_us.saturating_sub(ba_last_addba_us) >= 2_000_000 {
+                                ba_dialog = ba_dialog.wrapping_add(1);
+                                if ba_dialog == 0 {
+                                    ba_dialog = 1;
+                                }
+                                let ssn = d11_data_seq;
+                                let f = libawdl::blockack::addba_request(
+                                    master, addr, ba_mgmt_seq, ba_dialog,
+                                    libawdl::data::DEFAULT_TID, ssn, libawdl::blockack::BA_WINDOW,
+                                );
+                                ba_mgmt_seq = (ba_mgmt_seq + 1) & 0x0fff;
+                                match radio.tx(&f, TxParams::default()) {
+                                    Ok(()) => log::info!(
+                                        "BLOCKACK PROBE: sent ADDBA Request to master {:?} (dialog {:#04x}, tid {}, ssn {}); resp_seen={} ack_seen={}",
+                                        libawdl::dot11::Mac(master), ba_dialog, libawdl::data::DEFAULT_TID, ssn, ba_resp_seen, ba_ack_seen
+                                    ),
+                                    Err(e) => log::warn!("BLOCKACK PROBE: ADDBA tx failed: {e:?}"),
+                                }
+                                ba_last_addba_us = now_us;
+                            }
+                        }
+                    }
+                    last_reactive_us = now_us;
+                    reactive_tx += 1;
+                    *tx_by_channel.entry(current_channel).or_default() += 1;
                 }
             }
         }
@@ -382,25 +517,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // earlier version this no longer requires root/follow_distance to be known before it
         // will follow: without them we still name the master and sit one hop out, because
         // claiming self against a stronger master is exactly what stops Apple peering us.
-        match (cluster.master, cluster.master_metric) {
-            (Some(m), Some(mm)) if m != addr && mm > target_metric => {
-                b.follow = Some(FollowAdvert {
-                    root: cluster.root.unwrap_or(m),
-                    parent: cluster.relay_parent.unwrap_or(m),
-                    distance: cluster.follow_distance.unwrap_or(1),
-                    master_metric: mm,
-                    master_counter: cluster.master_counter.unwrap_or(0),
-                });
-                // Present in the tag 4 sync params as a member of the master's cluster.
-                b.follow_master = Some(m);
-                b.follow_aw_counter = cluster.projected_master_counter(now_us);
-            }
-            _ => {
-                b.follow = None;
-                b.follow_master = None;
-                b.follow_aw_counter = None;
-            }
-        }
+        set_follow(&mut b, &cluster, addr, target_metric, now_us);
         let is_mif = cfg.psf_per_mif == 0 || n % (cfg.psf_per_mif + 1) == 0;
         // target_tx_time at build; phy_tx_time as late as possible, so tx_delay reflects real
         // injection latency rather than the impossible literal zero. Finding 81/82.
@@ -431,8 +548,9 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 }
             }
         }
-        // In-window drain: the beacon just went out, so the peer is listening now.
-        for _ in 0..DRAIN_PER_WINDOW {
+        // In-window drain: the beacon just went out, so the peer is listening now. Fewer unique
+        // frames when repeating, to hold total per-window transmissions ~constant.
+        for _ in 0..(DRAIN_PER_WINDOW / cfg.data_repeat.max(1) as usize).max(1) {
             let Some(f) = outbound.pop_front() else { break };
             match radio.tx(&f, TxParams::default()) {
                 Ok(()) => dp_sent += 1,
@@ -440,6 +558,17 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     failed += 1;
                     if first_error.is_none() {
                         first_error = Some(format!("{e:?}"));
+                    }
+                }
+            }
+            // Repetition FEC (finding 106): resend with Retry bit set, same sequence, so the
+            // peer de-duplicates and one copy survives our no-ARQ air loss.
+            if cfg.data_repeat > 1 && f.len() >= 2 {
+                let mut dup = f.clone();
+                dup[1] |= 0x08;
+                for _ in 1..cfg.data_repeat {
+                    if radio.tx(&dup, TxParams::default()).is_ok() {
+                        dp_sent += 1;
                     }
                 }
             }
@@ -462,6 +591,9 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     if cfg.follow_channels {
         log::info!("tx by channel: {tx_by_channel:?}");
         log::info!("tx by slot: {tx_by_slot:?} (master slots {:?})", cluster.master_slots);
+    }
+    if cfg.reactive {
+        log::info!("reactive injections (on hearing the master): {reactive_tx}");
     }
 
     Ok(Stats {
@@ -492,6 +624,36 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         hop_fail,
         first_error,
     })
+}
+
+/// Point the beacon at the cluster's master (address, relay data, projected AW counter) when
+/// one leads us, else claim self. Shared by the scheduled and reactive transmit paths so both
+/// advertise the same cluster membership.
+fn set_follow(
+    b: &mut Beacon,
+    cluster: &Cluster,
+    addr: [u8; 6],
+    target_metric: u32,
+    now_us: u64,
+) {
+    match (cluster.master, cluster.master_metric) {
+        (Some(m), Some(mm)) if m != addr && mm > target_metric => {
+            b.follow = Some(FollowAdvert {
+                root: cluster.root.unwrap_or(m),
+                parent: cluster.relay_parent.unwrap_or(m),
+                distance: cluster.follow_distance.unwrap_or(1),
+                master_metric: mm,
+                master_counter: cluster.master_counter.unwrap_or(0),
+            });
+            b.follow_master = Some(m);
+            b.follow_aw_counter = cluster.projected_master_counter(now_us);
+        }
+        _ => {
+            b.follow = None;
+            b.follow_master = None;
+            b.follow_aw_counter = None;
+        }
+    }
 }
 
 /// 802.11 frame type (0 = management, 1 = control, 2 = data) of a radiotap-prefixed frame.
@@ -581,7 +743,14 @@ fn enqueue_from_tun(
     use libawdl_hal::poll::wait_readable;
     use std::os::fd::AsRawFd;
 
-    for _ in 0..4 {
+    // Read up to a window's worth of segments per cycle so a bulk TCP burst actually reaches
+    // the queue (was 4, which throttled /Upload to a trickle). Bounded by the queue's free
+    // space: once it is full we stop reading and leave the rest in the kernel, which is what
+    // makes TCP flow-control the sender instead of us silently dropping in-flight segments.
+    for _ in 0..DRAIN_PER_WINDOW {
+        if queue.len() >= max {
+            return; // backpressure: let the tun/kernel hold it; do not drop TCP data
+        }
         match wait_readable(tun.as_raw_fd(), tun.as_raw_fd(), 0) {
             Ok(r) if r.first => {}
             _ => return,
@@ -604,10 +773,9 @@ fn enqueue_from_tun(
         let frame = Encap::unicast(our_mac, dst).frame(*d11_seq, *awdl_seq, ETHERTYPE_IPV6, pkt);
         *d11_seq = (*d11_seq + 1) & 0x0fff;
         *awdl_seq = awdl_seq.wrapping_add(1);
-        if queue.len() >= max {
-            queue.pop_front();
-            *dropped += 1;
-        }
+        // Space was checked at the top of the loop, so this never exceeds `max`. We do not drop
+        // here: a dropped TCP segment stalls the whole transfer (no link-layer retransmit). The
+        // `dropped` counter therefore stays 0 now, which honestly reflects the backpressure path.
         queue.push_back(frame);
     }
 }
