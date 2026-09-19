@@ -305,6 +305,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             let max_drain = if slack_us < 4_000 { 4 } else { 32 };
 
             let mut heard_master = false;
+            let dp_recvd_before = dp_recvd;
             let mut drained = 0;
             while drained < max_drain {
                 if let Ok(Some(rx)) = radio.rx(if drained == 0 { budget_ms } else { 0 }) {
@@ -387,6 +388,39 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     break;
                 }
             }
+
+            // IMMEDIATE ACK. If a peer just sent us data, it is awake and listening RIGHT NOW —
+            // receiving from it is proof of that, better than any scheduled window. So pull the
+            // TCP ACKs the kernel just generated and inject them at once, instead of parking them
+            // in the outbound queue until the next windowed drain. Parking them delayed every ACK
+            // by ~a window (16-65 ms), inflating the peer's RTT and stalling its send: measured at
+            // ~22 inbound frames/s with 111 half-second stalls, against stock's ~220 fps and none
+            // (finding 109). This is the reactive-beacon trick applied to the data path: we just
+            // heard the peer, so transmit to it now — no throttle, no per-window cap.
+            if dp_recvd > dp_recvd_before {
+                if let Some(t) = tundev.as_ref() {
+                    // Drain generously: a burst of inbound data yields a burst of ACKs, and they
+                    // are small. Loop until the tun has nothing more queued this instant.
+                    for _ in 0..64 {
+                        let before = outbound.len();
+                        enqueue_from_tun(
+                            t, addr, &mut tbuf, &mut outbound, OUTBOUND_MAX,
+                            &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
+                        );
+                        let read = outbound.len().saturating_sub(before);
+                        while let Some(f) = outbound.pop_front() {
+                            match radio.tx(&f, TxParams::default()) {
+                                Ok(()) => dp_sent += 1,
+                                Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
+                            }
+                        }
+                        if read == 0 {
+                            break; // the tun had nothing more to send this instant
+                        }
+                    }
+                }
+            }
+
             let usable = cluster.clock.is_usable();
             if usable != adopted {
                 adopted = usable;

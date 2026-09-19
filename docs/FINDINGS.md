@@ -6546,6 +6546,46 @@ that cluster yet, so our windows and its scan rarely coincide. Matching stock ne
 4. **BLE address-rotation flicker** — the app's BLE RPA cycles, so iOS re-adds us as "new"
    (cosmetic; affects stock equally).
 
+## 109. ★★★ A/B vs libmosey (Pi witness): receive was 10× slow from ACK latency (fixed); discovery is a Tarish-wide daemon bug, not the radio
+
+Controlled A/B with the Pi (ALFA MT7612U, monitor on ch6) as independent witness: the **same
+419 KB JPG, iPhone → Pixel**, once over stock libmosey, once over our stack, capturing on-air
+plus device app timing.
+
+| | stock libmosey | our stack (before fix) |
+|---|---|---|
+| peak inbound data rate | ~220 frames/s | ~22 frames/s |
+| on-air stalls (gaps >500 ms) | 8 (idle either side) | 111 |
+| link-layer retries | 0 | 0 |
+| `/Upload` (419 KB) | 1.03 s | 2.03 s |
+| `/Ask` body receive | 0.19 s | 5.26 s |
+
+**Not loss (0 retries both), not the clock (33–42 µs now). It was ACK latency.** On receive the
+iPhone streams data and needs our **TCP ACKs** to advance its window. We only transmitted in our
+availability windows, so each ACK waited ~a window (16–65 ms); TCP throughput ≈ window/RTT, so
+that inflated RTT collapsed it to ~22 fps and stalled the sender 111 times. Stock's firmware ACKs
+in hardware at ~µs, so the iPhone never waits.
+
+**Fix — immediate ACK (`libawdl-session`):** the reactive-beacon trick applied to the data path.
+When a peer just sent us a data frame it is provably awake *now*, so right after the RX drain we
+pull the kernel's freshly-generated ACKs from the tun and inject them at once — no 12 ms throttle,
+no per-window cap — instead of parking them for the next windowed drain. On device this made a
+connected transfer go, in the operator's words, "blazing fast." Lifts both directions (prompt
+ACKs on receive, prompt data whenever the peer is proven awake on send).
+
+**Discovery is NOT our radio — it is a Tarish-wide daemon bug (prod reports it on libmosey too).**
+The operator's key observation: production users on the libmosey transport hit the same discovery
+unreliability. That rules out the AWDL layer and points at code above the transport. Root cause:
+`tarishsharingd`'s httpd **accept loop is single-threaded** — accept one connection, fully serve it
+(TLS + request + possible ASK_TIMEOUT + drain), then accept the next. iOS opens several `/Discover`
+connections at once to decide whether to render a peer; served one at a time over the slow link,
+the rest pile up in the backlog and get RST (121 `Invalid certificate verification context` /
+`reset by peer` in one session, port incrementing per retry). The peer never completes `/Discover`,
+so we never appear. Fixed in `tarish-daemon` (branch `httpd-concurrent-accept`, commit 82d94cc):
+thread-per-connection, shared state is all `Arc`, handlers are `&self`. **Untested** — sharingd
+builds via Soong and the build host was unreachable this session; build and verify against the
+121-reset repro next.
+
 ## Open, not yet investigated
 
 ### AirDrop's non-contact code is Apple-to-Apple only — it does not reach us
