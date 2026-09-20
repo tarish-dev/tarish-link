@@ -7171,3 +7171,12 @@ internals and, most likely, **BLE** (which triggers the offer and is not in Wi-F
 captures have hit their limit here. To settle whether it's real vs look-time: **stopwatch A/B** (time
 tap→start on blazer vs mustang; mustang ~1 s per operator). If real, it's the **app's BLE path**
 (tarish-app), not the daemon/libawdl — investigate with a BLE/HCI (btsnoop) capture, not Wi-Fi.
+
+**124 CORRECTED magnitude (stopwatch A/B): ~2–4 s, not 13–18 s.** With the accept prompt enabled the
+operator timed tap→prompt directly: **blazer ~3–5 s, mustang ~1 s.** So the real extra latency on our
+stack is **~2–4 s**, not the 13–18 s the raw `/Discover→/Ask` implied — that number was inflated by
+look-time (the user studying the tile before tapping). Log confirms: `/Discover` 30.6 → `/Ask` 41.4
+(10.8 s) but the tap was ~5 s before `/Ask`. So: real, modest (~2–4 s), and — since our Wi-Fi
+responses are ~0.1 s and the iPhone is idle on Wi-Fi during the gap — it's the **iOS/BLE rendezvous**
+(the app's BLE path), worth ~2–4 s vs libmosey. Fix path unchanged (BLE/HCI capture, tarish-app), but
+the prize is small now: transfer speed + completion (the big wins) are done; this is a ~2–4 s polish.
