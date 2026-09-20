@@ -7106,3 +7106,28 @@ is modest and can be chased later (further drain/ACK tuning, or the completion-s
 **Still open — the completion delay:** the operator noted the *transfer* is flawless but there is a
 brief delay before the sender knows it finished (our final ACK / HTTP-completion getting back). Bytes
 fly now; this is a small end-of-transfer signal, not throughput. Next.
+
+## 123. ★★★ FIXED the "termination takes 30 s": /Upload answered keep-alive instead of close. Plus: setup lag is lost control frames (RTO), mostly instant
+
+**Completion delay (fixed).** After the throughput fix, the *bytes* flew but the sender hung ~30 s at
+"done." Capture of the close: iPhone sends the last data (t), we send our HTTP 200 response ~183 ms
+later — then **no FIN**, 30 s of silence, then the iPhone RSTs. Cause: `httpd.rs` answered a
+successful `/Upload` with `respond(..., keep_alive)` where `keep_alive` was **true** (the connection
+arrived keep-alive because AirDrop reuses the /Ask socket for /Upload). But `/Upload` is the LAST
+request in the exchange — nothing follows it — so keeping the connection open left the sender waiting
+on a socket we would never speak on again until its ~30 s timeout. Fix: answer `Connection: close`
+and return `Disposition::Close` (like the error path). Deployed → completion is now immediate.
+
+**Setup/start lag (mostly instant, occasional ~1 s).** Blazer setup timeline to first bulk byte:
+`SYN → TLS → /Discover → /Ask → accept → /Upload`. Typical is instant, but a slower attempt showed a
+99 B control frame sent, lost, and **retransmitted ~0.23 s later** (twice), plus a 0.31 s gap before
+the 1207 B /Discover render — ~1 s total. These are small setup frames dropped on our no-ARQ inject
+path, each costing an RTO (~0.2–0.3 s). Same class as finding 113 / the completion bug: our small
+frames aren't reliable. The operator confirms it's *mostly* instant now ("prompt right away, start
+right away"); the occasional slow start is a dropped setup frame. Optional hardening: send the setup
+control frames with the small-burst redundancy (`ACK_REPEAT`) so one drop doesn't stall.
+
+**Net (this session): our clean-room libawdl now does the whole AirDrop receive flow well** — prompt
+appears immediately, ~2 MB/s transfer (finding 122), clean instant finish (this) — on our own AWDL
+stack, no libmosey, at parity-ish with stock. Shipped: identity/ghost fix (114), ch149 default
+(120), mcs=3 send (118), RX max_drain (122), /Upload close (123).
