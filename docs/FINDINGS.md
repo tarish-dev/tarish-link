@@ -7118,16 +7118,20 @@ request in the exchange — nothing follows it — so keeping the connection ope
 on a socket we would never speak on again until its ~30 s timeout. Fix: answer `Connection: close`
 and return `Disposition::Close` (like the error path). Deployed → completion is now immediate.
 
-**Setup/start lag (mostly instant, occasional ~1 s).** Blazer setup timeline to first bulk byte:
-`SYN → TLS → /Discover → /Ask → accept → /Upload`. Typical is instant, but a slower attempt showed a
-99 B control frame sent, lost, and **retransmitted ~0.23 s later** (twice), plus a 0.31 s gap before
-the 1207 B /Discover render — ~1 s total. These are small setup frames dropped on our no-ARQ inject
-path, each costing an RTO (~0.2–0.3 s). Same class as finding 113 / the completion bug: our small
-frames aren't reliable. The operator confirms it's *mostly* instant now ("prompt right away, start
-right away"); the occasional slow start is a dropped setup frame. Optional hardening: send the setup
-control frames with the small-burst redundancy (`ACK_REPEAT`) so one drop doesn't stall.
+**Setup/start lag — REAL and unfixed on our stack (CORRECTED: libmosey starts instant, we don't).**
+The operator's "prompt right away, start right away" was **mustang (libmosey)**, not blazer — I
+mis-attributed it. On blazer (our libawdl) the start is still slow. Setup timeline to first bulk byte
+(`SYN → TLS → /Discover → /Ask → accept → /Upload`): a 99 B control frame sent, lost, and
+**retransmitted ~0.23 s later (twice)**, plus a 0.31 s gap before the 1207 B /Discover render — **~1 s
+total**. Small setup frames dropped on our no-ARQ inject path, each an RTO (~0.2–0.3 s); same class as
+finding 113 / the completion bug. libmosey's firmware path doesn't drop them → instant start. **This
+is the remaining libawdl gap (START phase).** Fix: send the setup-phase control frames with the
+small-burst redundancy (`ACK_REPEAT`); first check why the existing SMALL_BURST_MAX/ACK_REPEAT path
+isn't already covering these TLS/HTTP records (window-alignment timing, or they go out before the
+immediate-ACK path is active).
 
-**Net (this session): our clean-room libawdl now does the whole AirDrop receive flow well** — prompt
-appears immediately, ~2 MB/s transfer (finding 122), clean instant finish (this) — on our own AWDL
-stack, no libmosey, at parity-ish with stock. Shipped: identity/ghost fix (114), ch149 default
-(120), mcs=3 send (118), RX max_drain (122), /Upload close (123).
+**Net (this session): our clean-room libawdl now does the AirDrop receive flow well except START** —
+~2 MB/s transfer (finding 122) and clean instant finish (this) on our own AWDL stack, no libmosey.
+The START phase is still ~1 s slower than libmosey (lost setup control frames, above) — the one
+remaining libawdl gap. Shipped: identity/ghost fix (114), ch149 default (120), mcs=3 send (118),
+RX max_drain (122), /Upload close (123). Remaining: setup-frame reliability (start lag).
