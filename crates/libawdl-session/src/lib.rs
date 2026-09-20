@@ -313,7 +313,14 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 }
             };
             let budget_ms = if slack_us < 4_000 { 0 } else { 2 };
-            let max_drain = if slack_us < 4_000 { 4 } else { 32 };
+            // Finding 121: at ch149 libmosey pushes ~2150 data-fps, we sustained ~563. We only
+            // RX during window-aligned visits (~17/s), so the per-visit cap directly sets the
+            // frame rate: 32 x ~17 ~= 563. The `else break` already stops the instant the socket
+            // is empty, so a higher cap is "drain everything that queued this visit" — only a
+            // sustained burst reaches it. Raise it (4->32 near a window, 32->128 otherwise) so we
+            // can absorb and immediately-ACK a full window's burst instead of leaving frames in the
+            // kernel buffer, which paces the peer down. Experiment for the 4x RX/ACK target.
+            let max_drain = if slack_us < 4_000 { 32 } else { 128 };
 
             let mut heard_master = false;
             let dp_recvd_before = dp_recvd;
