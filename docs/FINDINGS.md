@@ -7135,3 +7135,29 @@ immediate-ACK path is active).
 The START phase is still ~1 s slower than libmosey (lost setup control frames, above) — the one
 remaining libawdl gap. Shipped: identity/ghost fix (114), ch149 default (120), mcs=3 send (118),
 RX max_drain (122), /Upload close (123). Remaining: setup-frame reliability (start lag).
+
+## 124. ★★★ Remaining gap: tap→offer ~14–18 s (mustang seamless) — AWDL/mDNS rendezvous, below TCP
+
+After the transfer + completion fixes (122/123), the last thing the operator feels is a **~5–10 s
+wait from tapping our tile** on the iPhone to the transfer starting. Measured via tarishsharingd's
+log across two runs: from `/Discover` (we render on the share sheet) to `/Ask` (the offer, sent when
+the user taps) is **~14–18 s, consistent** — not human variance. The rest is fast: `/Ask` →
+auto-accept → `/Upload` is ~100 ms.
+
+**It's below TCP.** During the 14 s the iPhone makes **no TCP SYN attempt at all** (capture filtered
+`tcp 8770 or udp 5353`) — so it is NOT connecting to a stale address and retrying; it simply will not
+open the `/Ask` connection until it has completed some **AWDL/mDNS rendezvous**, and only periodic
+mDNS (~8 s cadence) happens in the gap. libmosey/firmware satisfies this instantly (mustang seamless,
+per the operator). So this is a **discovery/rendezvous responsiveness gap in our stack**, distinct
+from the (now-fixed) transfer path.
+
+**Couldn't A/B mustang's TCP timing:** on mustang, `mosey0` carries **only mDNS** — Google's AirDrop
+data path is on a *different* interface (not `mosey0`), so `tcpdump -i mosey0`/`-i any port 8770` saw
+no TCP. Find Google's data iface if a mustang TCP A/B is needed later.
+
+**Next diagnostic:** capture `wonder0` (on-air) + `mosey0:5353` during the tap→offer gap and check
+(1) does the iPhone's mDNS query for us actually arrive, and do we answer it within <1 s on-air, or
+is our answer lost so it falls back to waiting for our ~8–20 s unsolicited announce; (2) our AWDL
+presence/sync during idle — is the link solid enough between /Discover and the tap for the iPhone to
+proceed, or does our on-demand radio drop presence. This is the last piece for a fully libmosey-class
+experience; transfer speed and completion are done.
