@@ -7192,3 +7192,35 @@ satisfies it in ~1s, our software sync takes ~2-4s. Subtle, opaque from our side
 chased: compare our AWDL sync/election/presence params + master-relationship stability to libmosey's
 during the tap window (we already know clock spread is ~33us and Sync-Params match, finding 119) —
 but the prize is ~2-4s and the big wins (transfer 122, completion 123) are done. Recommend deferring.
+
+## 125. ★★★ MEASURED root of the tap-latency: our election joins the WRONG master + emits garbage distance (255 / v2 2830); libmosey cleanly joins the sender's cluster (distance 1)
+
+Operator pushed to measure mustang instead of guessing — decisive. Decoded each device's OWN election
+params on-air (same room, same iPhones):
+
+| field | mustang (libmosey) | blazer (our libawdl) |
+|---|---|---|
+| master it names | `7a:4a:0f:8a:be:d5` (the sender's cluster master) | **`72:cd:01:60:74:1b`** (a DIFFERENT master) |
+| distance (v1) | **1** (synced, one hop) | **255** (AWDL "unsynced/infinity") |
+| distance (v2) | 1 | **2830** (garbage — should be ~1) |
+| self_metric | 1 | 65 |
+
+So **our libawdl does not reliably join the *sender's* AWDL cluster.** libmosey adopts the same master
+the sending iPhone uses (7a:4a) at distance 1. We adopt a different master (72:cd — likely the other
+iPhone in range, "mini" vs "air", metrics are close: 528 vs 538) and advertise distance 255 (unsynced)
+with a garbage v2 distance (2830). The iPhone then sees us as an out-of-cluster / unsynced peer and
+has to reconcile that before sending /Ask → the ~2-4s tap→offer (finding 124). This is exactly the
+"pull the master from the initiated cluster" problem the operator flagged early on — now measured, not
+guessed. Transfers still work (they bridge it), so it manifests only as start latency.
+
+**Two located bugs (careful — election/follow is delicate, tuned for the peering that works):**
+1. **Master convergence:** we pick a different master than the sender when metrics are close (72:cd 538
+   vs 7a:4a 528). Should converge on the sender's cluster. `Cluster` master selection in follow.rs.
+2. **Distance encoding:** we emit v1 distance 255 and v2 distance **2830** even when following. `set_follow`
+   uses `follow_distance.unwrap_or(1)` but the value reaching the wire is 255/2830 — trace how
+   `cluster.follow_distance` and the beacon's ElectionParamsV2 distance are computed/encoded (2830 is a
+   clear overflow/miscompute bug; 255 = we think we're unsynced to the master we named).
+
+NEXT: fix (2) first (garbage distance is a clear bug, lower risk), then (1) master convergence. Verify
+on-air that blazer then advertises the sender's master at distance 1 like mustang, and re-time
+tap→prompt. This is the last real gap; transfer speed + completion are done.
