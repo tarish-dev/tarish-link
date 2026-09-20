@@ -7224,3 +7224,15 @@ guessed. Transfers still work (they bridge it), so it manifests only as start la
 NEXT: fix (2) first (garbage distance is a clear bug, lower risk), then (1) master convergence. Verify
 on-air that blazer then advertises the sender's master at distance 1 like mustang, and re-time
 tap→prompt. This is the last real gap; transfer speed + completion are done.
+
+**125 update — election FIXED on-air, but it was NOT the tap-latency cause (hypothesis disproven).**
+Deployed the distance-guard fix; verified on-air blazer now names the sender's master 7a:4a at
+distance 1 / v2 1 (was 72:cd / 255 / 2830), matching libmosey exactly. **But tap→prompt is unchanged
+(~3-5s).** So the wrong-master/garbage-distance was a real bug worth fixing (kept — correctness, may
+help discovery robustness) but NOT what the iPhone waits on before the offer. Tap latency now has
+THREE ruled-out causes: not BLE (124), not election/cluster-membership (125), not Wi-Fi-response
+speed (our /Discover, /Ask ~0.1s). The iPhone makes NO network activity for ~3-5s after the tap, so
+it's an iOS-internal AirDrop decision (or AirDrop-protocol content the iPhone validates) that is
+opaque from our side. Remaining lead: diff our /Discover response + mDNS TXT content vs libmosey's —
+but libmosey's AirDrop isn't on mosey0:8770 (its data iface differs), so capturing its /Discover for a
+content diff needs finding that iface first. Low leverage (~2-4s); transfer + completion are the wins.
