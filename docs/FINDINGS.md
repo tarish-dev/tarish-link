@@ -7085,3 +7085,24 @@ draining/decoding/delivering frames fast enough. NEXT diagnostic: measure our li
 throughput in isolation (how many frames/s it can read+decode+deliver to the tun) and our ACK
 emission latency per received burst, vs libmosey's. Bench stays: blazer=libawdl, mustang=libmosey,
 both @149 rooted. (Prod ch149 default already landed, finding 120/task 8; mcs=3 for send, 118.)
+
+## 122. ★★★ FIXED: raising RX max_drain (4/32 -> 32/128) took libawdl from ~335 KB/s to 2.16 MB/s (~6.5x), peak 2699 fps > libmosey's 2150
+
+Finding 121's diagnosis was right and the fix is a two-number change. Our session RX loop drained at
+most `max_drain` frames per window-aligned visit (`4` when <4 ms of slack, else `32`), and we only
+visit ~17×/s, so 32×17 ≈ 563 fps — the measured ceiling. The `else break` already stops the instant
+the socket is empty, so the cap only ever bit on a real burst: a full window's worth of the iPhone's
+frames arrived, we took 32 and left the rest in the kernel buffer, and the iPhone (pacing to the ACKs
+we could then generate) throttled down to us.
+
+Raised it to `32`/`128` (crates/libawdl-session/src/lib.rs). Measured on blazer @ch149, same bench:
+- **peak on-air data-frame rate 563 → 2699 fps** (libmosey ~2150 — we now match/exceed it).
+- **active throughput ~335 KB/s → 2.16 MB/s (~6.5×)**; flawless on a 29 MB file per the operator.
+
+So the clean-room libawdl now performs in libmosey's league on identical hardware/channel — the
+weeks-old "our stack is just slow" is resolved for RECEIVE. Remaining headroom to libmosey's 3.4 MB/s
+is modest and can be chased later (further drain/ACK tuning, or the completion-signal latency below).
+
+**Still open — the completion delay:** the operator noted the *transfer* is flawless but there is a
+brief delay before the sender knows it finished (our final ACK / HTTP-completion getting back). Bytes
+fly now; this is a small end-of-transfer signal, not throughput. Next.
