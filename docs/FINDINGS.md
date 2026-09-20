@@ -7161,3 +7161,13 @@ is our answer lost so it falls back to waiting for our ~8–20 s unsolicited ann
 presence/sync during idle — is the link solid enough between /Discover and the tap for the iPhone to
 proceed, or does our on-demand radio drop presence. This is the last piece for a fully libmosey-class
 experience; transfer speed and completion are done.
+
+**124 update — our Wi-Fi side is NOT the cause; it's iOS/BLE.** Captured `wonder0`+`mosey0` across a
+tap→offer gap and checked our response latency: our `/Discover` and `/Ask` responses go out ~0.1 s
+after the request (prompt), and during the 13.6 s gap the iPhone makes **zero connection attempts**
+(~3 mDNS pkts) while our AWDL presence is healthy (8683 sync frames on air). So everything our stack
+does is fast; the wait is the iPhone idle between rendering us and sending the offer — iOS AirDrop
+internals and, most likely, **BLE** (which triggers the offer and is not in Wi-Fi captures). Wi-Fi
+captures have hit their limit here. To settle whether it's real vs look-time: **stopwatch A/B** (time
+tap→start on blazer vs mustang; mustang ~1 s per operator). If real, it's the **app's BLE path**
+(tarish-app), not the daemon/libawdl — investigate with a BLE/HCI (btsnoop) capture, not Wi-Fi.
