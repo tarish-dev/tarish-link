@@ -7054,3 +7054,34 @@ cause: the ch6 default in `channels_for`. The prod fix (default ch149) resolves 
 ch149 is stable because that is where the peer actually spends its time / where mosey's social+data
 alignment lands — ch6 discovery was the flaky path. (Our earlier "ch149 flakes discovery" note was
 about OUR libawdl shim on ch149, not libmosey — libmosey@149 discovers fine.)
+
+## 121. ★★★ The libawdl 9× at ch149 is our RX/ACK DELIVERY RATE: libmosey pushes ~2150 data-fps, we sustain ~563. Frame-diffed on the bench
+
+Ran the clean A/B the whole session was building toward: blazer (our libawdl @149) and mustang
+(libmosey @149), both rooted, same iPhone, same room, dual-capture (`mosey0` TCP + `wonder0` on-air)
+on the same file transfer.
+
+**On-air data-frame rate (`wonder0`, frames >600 B = real data, not the ~300 B action frames):**
+- **libmosey (mustang): peak ~2150 fps** — smooth, "finished in a flash," progress in sync on both
+  devices.
+- **our libawdl (blazer): peak ~563 fps** — ~4× slower, plus stop-start pauses → ~335 KB/s and a
+  hung tail.
+
+**Where our stall time goes (blazer `mosey0`):** 4.44 MB in 13.6 s, 48% of it in gaps (one 3.9 s
+tail), retransmits only 1.3%, receiver window mostly open. **Correlating the gaps against `wonder0`:
+during them the iPhone is NOT sending data — only AWDL action/sync frames are on air.** So it is NOT
+RX-delivery loss (an earlier mis-read: the "data-sized" frames in the gaps were 213 *action* frames,
+not the iPhone's data). **The iPhone is paused, waiting for us.** It paces its send rate to our
+acknowledgment; libmosey acks at line rate (2150 fps flowing), we sustain ~563, so the iPhone throttles
+to us and stalls between bursts.
+
+**Plus a completion bug:** the file arrives but our final ACK / HTTP completion never gets back, so
+the iPhone hangs on "sending" (the 3.9 s tail). Separate from throughput; fix alongside.
+
+**So task 7 is now a hard target: our receive/acknowledge path delivers ~563 fps; libmosey does
+~2150 — we need ~4× on our RX/ACK rate.** Mechanism not yet pinned (careful not to over-call): either
+our software ACK cadence pacing the iPhone (our `mosey0` ACKs are ~4.2 ms apart), or our RX loop not
+draining/decoding/delivering frames fast enough. NEXT diagnostic: measure our libawdl RX-loop
+throughput in isolation (how many frames/s it can read+decode+deliver to the tun) and our ACK
+emission latency per received burst, vs libmosey's. Bench stays: blazer=libawdl, mustang=libmosey,
+both @149 rooted. (Prod ch149 default already landed, finding 120/task 8; mcs=3 for send, 118.)
