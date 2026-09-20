@@ -7180,3 +7180,15 @@ look-time (the user studying the tile before tapping). Log confirms: `/Discover`
 responses are ~0.1 s and the iPhone is idle on Wi-Fi during the gap — it's the **iOS/BLE rendezvous**
 (the app's BLE path), worth ~2–4 s vs libmosey. Fix path unchanged (BLE/HCI capture, tarish-app), but
 the prize is small now: transfer speed + completion (the big wins) are done; this is a ~2–4 s polish.
+
+**124 — BLE RULED OUT; residual ~2-4s is AWDL-sync/iOS-internal.** Chased the BLE angle: our
+advertise is already ADVERTISE_MODE_LOW_LATENCY / TX_POWER_HIGH / **non-connectable** / timeout 0
+(TarishBleService.java:331), scan is SCAN_MODE_LOW_LATENCY. Captured Bluetooth + app logs across a
+tap→offer: the ONLY BLE is our beacon advertising + our scan seeing other beacons; **no BLE
+interaction with the iPhone in the gap** (non-connectable = no GATT/connection). So BLE is optimal and
+not in the offer's critical path. The residual ~2-4s (blazer ~3-5s vs mustang ~1s tap→prompt) is the
+iPhone re-confirming the AWDL peer relationship before sending /Ask — libmosey's firmware sync
+satisfies it in ~1s, our software sync takes ~2-4s. Subtle, opaque from our side, and small. If ever
+chased: compare our AWDL sync/election/presence params + master-relationship stability to libmosey's
+during the tap window (we already know clock spread is ~33us and Sync-Params match, finding 119) —
+but the prize is ~2-4s and the big wins (transfer 122, completion 123) are done. Recommend deferring.
