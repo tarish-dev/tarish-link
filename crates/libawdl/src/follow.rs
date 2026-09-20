@@ -520,6 +520,18 @@ impl Cluster {
             // The rule is AWDL's own: follow the better metric. A weaker cluster is
             // ignored rather than averaged in, and an EQUAL metric does not displace the
             // incumbent -- otherwise two clusters that happen to match would flap forever.
+            // A frame advertising an implausible distance to the root is not a cluster member
+            // we can relay through — it is unsynced or garbage. Finding 125: we adopted a
+            // higher-metric master (72:cd, 538 vs the sender's 7a:4a, 528) whose frames carried
+            // distance 2829, which we could not actually sync to — splitting us from the sending
+            // iPhone's cluster and putting a garbage distance (2829->2830) on our own frames.
+            // The iPhone then had to reconcile an out-of-cluster, "unsynced" peer before sending
+            // /Ask, which was the ~2-4s tap->offer latency. Real AWDL meshes are shallow, so a
+            // distance beyond this is not a master worth chasing: ignore it and stay with a
+            // master we can actually sync to, as libmosey does. Normal distances (0..a few) are
+            // untouched.
+            const MAX_PLAUSIBLE_DISTANCE: u32 = 32;
+            let plausible = e.distance <= MAX_PLAUSIBLE_DISTANCE;
             let claimed = if e.master == src { e.self_metric } else { e.master_metric };
             let switch = match (self.master, self.master_metric) {
                 (None, _) => true,
@@ -527,7 +539,7 @@ impl Cluster {
                 (Some(_), Some(have)) => claimed > have,
                 (Some(_), None) => true,
             };
-            if switch {
+            if switch && plausible {
                 if self.master != Some(e.master) {
                     // A different cluster: every anchor we hold was measured against the
                     // old one's timeline and is now meaningless.
@@ -548,7 +560,7 @@ impl Cluster {
             // the root; to advertise ourselves as one hop further out we relay the root and
             // its counter unchanged and add one to the distance. `src` is the node we heard
             // it from — our upstream parent (the root itself when we follow it directly).
-            if self.master == Some(e.master) {
+            if self.master == Some(e.master) && plausible {
                 self.root = Some(e.master);
                 self.relay_parent = Some(src);
                 self.master_counter = Some(e.master_counter);
