@@ -8,7 +8,7 @@
 > being removed / tlink sits alongside" framing is also superseded: **tlink now replaces
 > libmosey in prod images.** The swap is a drop-in `.so` (same soname, same five FFI
 > symbols) via `../grapheneos/scripts/gos-tlink.sh`; the build recipe is
-> `../grapheneos/docs/LIBAWDL-PROD.md`. Everything below is the original pre-work, kept for
+> `../grapheneos/docs/TLINK-PROD.md`. Everything below is the original pre-work, kept for
 > its reasoning.
 
 ---
