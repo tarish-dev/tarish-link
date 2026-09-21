@@ -38,7 +38,7 @@ CAPS=${CAPS:-210}
 SETTLE=${SETTLE:-75}
 MAXWAIT=${MAXWAIT:-45}
 OUT=${OUT:-/tmp/auto}
-BIN=./target/release/awdl
+BIN=./target/release/tlink
 
 mkdir -p "$OUT"
 [ -f "$OUT/results.tsv" ] || printf 'trial\tarm\tpeers\tentry\tsent\tnamed_us\tverdict\tincumbent\tinc_metric\tnote\n' > "$OUT/results.tsv"

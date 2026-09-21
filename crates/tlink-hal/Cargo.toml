@@ -1,0 +1,11 @@
+[package]
+name = "tlink-hal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The contract between an AWDL implementation and the radio underneath it."
+
+[dependencies]
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = "0.2"

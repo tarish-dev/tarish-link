@@ -27,11 +27,11 @@ R=/tmp/ft_$LABEL
 
 echo "### 1. checking the room is EMPTY before we start"
 ssh -o ConnectTimeout=10 "$PI" "
-cd ~/tarish-libawdl
+cd ~/tarish-link
 sudo killall awdl tcpdump 2>/dev/null; sudo ip link del awdl0 2>/dev/null; sleep 1
 sudo timeout 12 tcpdump -i $MON -w $R.before.pcap -s0 2>/dev/null
-./target/release/awdl stats $R.before.pcap 2>&1 | grep -E 'AWDL action|no AWDL' | head -2
-./target/release/awdl stats $R.before.pcap 2>&1 | grep -A6 'senders:' | head -7
+./target/release/tlink stats $R.before.pcap 2>&1 | grep -E 'AWDL action|no AWDL' | head -2
+./target/release/tlink stats $R.before.pcap 2>&1 | grep -A6 'senders:' | head -7
 "
 
 echo
@@ -46,8 +46,8 @@ echo "### 2. starting the beacon at metric $METRIC $FLAGS"
 # nohup plus all three descriptors redirected is what makes ssh let go. Same reason as
 # harness bug 3, different disguise.
 ssh -o ConnectTimeout=10 "$PI" "
-cd ~/tarish-libawdl
-nohup sudo ./target/release/awdl beacon $MANAGED $MON $CHAN $SECS 2 --metric $METRIC --tenure 99999 $FLAGS > $R.log 2>&1 < /dev/null &
+cd ~/tarish-link
+nohup sudo ./target/release/tlink beacon $MANAGED $MON $CHAN $SECS 2 --metric $METRIC --tenure 99999 $FLAGS > $R.log 2>&1 < /dev/null &
 for i in \$(seq 1 15); do ip link show $MON >/dev/null 2>&1 && break; sleep 1; done
 sleep 4
 nohup sudo timeout $CAPS tcpdump -i $MON -w $R.pcap -s0 > /dev/null 2>&1 < /dev/null &
@@ -64,7 +64,7 @@ echo "waiting for the window to close ($CAPS s)..."
 while ssh -o ConnectTimeout=10 "$PI" "ps -eo comm | grep -q '^tcpdump$'" 2>/dev/null; do sleep 5; done
 sleep 14
 
-fetch() { ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && $1" 2>/dev/null; }
+fetch() { ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && $1" 2>/dev/null; }
 
 echo "=================== OUR RUN ==================="
 LOG=$(fetch "cat $R.log")
@@ -76,7 +76,7 @@ LIVE=$(echo "$LOG" | grep -oE 'adopted by [0-9]+ peer' | grep -oE '[0-9]+')
 echo
 echo "=================== DID THE PEERS FORM? (rule 7) ==================="
 echo "silent at the start then arriving is '..*' — talking in bucket 1 is SETTLED, not forming"
-fetch "./target/release/awdl timeline $R.pcap 2>&1 | sed -n '3,14p'"
+fetch "./target/release/tlink timeline $R.pcap 2>&1 | sed -n '3,14p'"
 
 echo
 echo "=================== VALIDITY ==================="
@@ -88,10 +88,10 @@ MINSENT=$(awk -v s="$SECS" 'BEGIN {print int(s * 2)}')
 [ "${SENT:-0}" -ge "$MINSENT" ] || VOID="$VOID
   frames sent = ${SENT:-0} in ${SECS}s, under ${MINSENT} (2/s). A starved transmitter
   cannot be adopted, and it will lose to any peer that is transmitting normally."
-OURS=$(fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -c '$OURMAC'")
+OURS=$(fetch "./target/release/tlink stats $R.pcap 2>&1 | grep -c '$OURMAC'")
 [ "${OURS:-0}" -gt 0 ] || VOID="$VOID
   our address is absent from the capture: the frames never reached the air."
-PEERS=$(fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -A8 'senders:' | grep -cE '^  [0-9a-f]{2}:'")
+PEERS=$(fetch "./target/release/tlink stats $R.pcap 2>&1 | grep -A8 'senders:' | grep -cE '^  [0-9a-f]{2}:'")
 [ "${PEERS:-0}" -ge 2 ] || VOID="$VOID
   only ${PEERS:-0} sender(s) in the capture: no peer ever showed up to adopt anything."
 echo "  frames sent            ${SENT:-?}   (>= ${MINSENT:-?}, i.e. 2/s)"
@@ -101,8 +101,8 @@ echo "  live adoption count    ${LIVE:-0} peer(s)   <- from the beacon itself"
 
 echo
 echo "=================== OUTCOME ==================="
-fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -A10 'who names whom' | tail -9"
-NAMED=$(fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -E '\->  *$OURMAC' | awk '{n+=\$NF} END {print n+0}'")
+fetch "./target/release/tlink stats $R.pcap 2>&1 | grep -A10 'who names whom' | tail -9"
+NAMED=$(fetch "./target/release/tlink stats $R.pcap 2>&1 | grep -E '\->  *$OURMAC' | awk '{n+=\$NF} END {print n+0}'")
 NAMED=${NAMED:-0}
 echo
 if [ -n "$VOID" ]; then echo "VOID — no result.$VOID"; exit 3; fi

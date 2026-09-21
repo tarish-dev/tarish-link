@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/libawdl", "crates/libawdl-hal", "crates/libawdl-session", "crates/libawdl-cli", "crates/awdl-inject", "crates/libawdl-mosey-shim"]
+members = ["crates/tlink", "crates/tlink-hal", "crates/tlink-session", "crates/tlink-cli", "crates/tlink-inject", "crates/tlink-shim"]
 
 [workspace.package]
 version = "0.1.0"

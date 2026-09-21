@@ -4,7 +4,7 @@
 > see **[SPEC.md](SPEC.md)**. This file is the three-way comparison and the coverage
 > accounting.
 
-*The specification for `libawdl`'s transmitter, derived from captures rather than from a
+*The specification for `tlink`'s transmitter, derived from captures rather than from a
 paper.*
 
 Regenerate any row with `awdl profile <capture>`; this document is assembled from that
@@ -251,7 +251,7 @@ failure. It is one field to change and a large surface to be judged against.
 > So two hypotheses remain, and they are the two that were always harder: an AirDrop-layer
 > version, or the Apple-signed identity.
 >
-> **The decisive test needs `libawdl` transmitting**, since only then do we control tag 21.
+> **The decisive test needs `tlink` transmitting**, since only then do we control tag 21.
 > Announce v10.0, otherwise unchanged, and see whether the flow changes. That is a good
 > reason to build the transmitter, and a reason not to change the version casually before
 > then.
@@ -279,7 +279,7 @@ Both `libmosey` and OWL emit **16/16 on a single channel**. Three consequences, 
 
 **This cannot be fixed at the integration layer** — finding 8 measured `libmosey` refusing
 to build a multi-channel sequence even when handed two bands. It is the single strongest
-reason `libawdl` has to exist.
+reason `tlink` has to exist.
 
 ### 3. Election: we forfeit by advertising nothing
 
@@ -318,7 +318,7 @@ classes cover only 2.4 and 5 GHz. Neither `libmosey` nor OWL emits them at all.
 
 ---
 
-## Therefore, for `libawdl`
+## Therefore, for `tlink`
 
 Ordered by how much each buys:
 
@@ -363,8 +363,8 @@ action frame, pinned by taking a captured Apple frame apart and rebuilding it by
   `tests/build_frame.rs` asserts the missing set is exactly `{6, 7, 32, 33}`, so it cannot
   grow unnoticed.
 - **Tags 32/33** — conditional on a 6 GHz association, not unconditionally missing.
-- ~~**The transmitter.**~~ ✅ **Done, and it worked.** `libawdl::beacon` builds the frames,
-  `libawdl-hal`'s `rawsock` injects them, and on the first run **two iPhones and a MacBook
+- ~~**The transmitter.**~~ ✅ **Done, and it worked.** `tlink::beacon` builds the frames,
+  `tlink-hal`'s `rawsock` injects them, and on the first run **two iPhones and a MacBook
   elected our node master of their cluster** — one of them two hops out, relaying our metric
   and tenure counter through the other. See FINDINGS 34.
 
@@ -378,7 +378,7 @@ re-derived with `awdl profile`.
 ## What this table does not cover
 
 **Transmit correctness.** Emitting the right bytes and being *accepted* are different bars,
-and nothing here has been on the air from `libawdl`. The table says what to send; only an
+and nothing here has been on the air from `tlink`. The table says what to send; only an
 Apple device can say whether it worked.
 
 ## Check OWL first

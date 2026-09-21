@@ -1,0 +1,10 @@
+[package]
+name = "tlink-inject"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal AWDL frame injector — build with tlink, transmit through tlink-hal, no pcap. The thin Android-portable entry point."
+
+[dependencies]
+tlink = { path = "../tlink" }
+tlink-hal = { path = "../tlink-hal" }

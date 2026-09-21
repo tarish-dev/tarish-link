@@ -29,14 +29,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "awdl-inject"
-version = "0.1.0"
-dependencies = [
- "libawdl",
- "libawdl-hal",
-]
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -94,49 +86,6 @@ name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
-
-[[package]]
-name = "libawdl"
-version = "0.1.0"
-
-[[package]]
-name = "libawdl-cli"
-version = "0.1.0"
-dependencies = [
- "libawdl",
- "libawdl-hal",
- "libawdl-session",
- "log",
- "pcap",
-]
-
-[[package]]
-name = "libawdl-hal"
-version = "0.1.0"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "libawdl-mosey-shim"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "libawdl",
- "libawdl-hal",
- "libawdl-session",
- "libc",
- "log",
-]
-
-[[package]]
-name = "libawdl-session"
-version = "0.1.0"
-dependencies = [
- "libawdl",
- "libawdl-hal",
- "log",
-]
 
 [[package]]
 name = "libc"
@@ -221,6 +170,57 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "tlink"
+version = "0.1.0"
+
+[[package]]
+name = "tlink-cli"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "pcap",
+ "tlink",
+ "tlink-hal",
+ "tlink-session",
+]
+
+[[package]]
+name = "tlink-hal"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "tlink-inject"
+version = "0.1.0"
+dependencies = [
+ "tlink",
+ "tlink-hal",
+]
+
+[[package]]
+name = "tlink-session"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "tlink",
+ "tlink-hal",
+]
+
+[[package]]
+name = "tlink-shim"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "libc",
+ "log",
+ "tlink",
+ "tlink-hal",
+ "tlink-session",
+]
 
 [[package]]
 name = "winapi"

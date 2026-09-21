@@ -1,0 +1,8 @@
+[package]
+name = "tlink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AWDL frame parsing. No I/O, no OS dependency — bytes in, structures out."
+
+[dependencies]

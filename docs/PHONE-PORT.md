@@ -1,13 +1,13 @@
-# Running libawdl on a phone — DONE (this doc is the pre-work, now superseded)
+# Running tlink on a phone — DONE (this doc is the pre-work, now superseded)
 
-> **STATUS 2026-09-21 — no longer on hold; the port happened and works.** libawdl runs on a
+> **STATUS 2026-09-21 — no longer on hold; the port happened and works.** tlink runs on a
 > Pixel 10 Pro (blazer) driving `wonder.ko`, doing AirDrop receive **and** send against a
 > real iPhone under SELinux enforcing with zero Google AWDL code. The "gate" and phases
 > below were answered: monitor injection works on the wonder wiphy, and what remained was
 > RX/TX tuning, not feasibility — see `docs/FINDINGS.md` 104–125. The old "libmosey is not
-> being removed / libawdl sits alongside" framing is also superseded: **libawdl now replaces
+> being removed / tlink sits alongside" framing is also superseded: **tlink now replaces
 > libmosey in prod images.** The swap is a drop-in `.so` (same soname, same five FFI
-> symbols) via `../grapheneos/scripts/gos-libawdl.sh`; the build recipe is
+> symbols) via `../grapheneos/scripts/gos-tlink.sh`; the build recipe is
 > `../grapheneos/docs/LIBAWDL-PROD.md`. Everything below is the original pre-work, kept for
 > its reasoning.
 
@@ -18,15 +18,15 @@ has not started; nothing in it is needed for the work on the Pi.*
 
 ## Why it is on hold and not abandoned
 
-libawdl works on the Pi: control plane, data plane, elections, a netdev carrying IPv6.
+tlink works on the Pi: control plane, data plane, elections, a netdev carrying IPv6.
 Getting it onto a Pixel is a **separate** problem whose difficulty is unknown, and the
 unknown is one measurement wide. Parked because device time is better spent on experiments
 that need a cooperative Apple peer, which is the one resource the Pi cannot substitute for.
 
-## The framing that makes this cheap — libawdl sits ALONGSIDE libmosey
+## The framing that makes this cheap — tlink sits ALONGSIDE libmosey
 
 Operator's decision, and it changes the shape of the whole track: **libmosey is not being
-removed.** libawdl does not have to replace anything to be useful on a phone, so there is no
+removed.** tlink does not have to replace anything to be useful on a phone, so there is no
 migration, no flag day, and no risk to Tarish's working AirDrop.
 
 The consequence worth remembering: **receiving needs no injection and no exclusivity.** That
@@ -36,7 +36,7 @@ makes phase 1 below essentially free.
 
 `wonder.ko` is bound to **mac80211 and cfg80211** (`lsmod` shows both), and libmosey drives
 it over plain netlink as `wiphy_name: "wonder"`, `iface_name: "wonder0"` — see
-`../grapheneos/docs/MOSEY-ABI.md`. So it presents a real nl80211 device, and libawdl's
+`../grapheneos/docs/MOSEY-ABI.md`. So it presents a real nl80211 device, and tlink's
 existing HAL (`Nl80211` + AF_PACKET on a monitor vif) may work unchanged.
 
 **But `../grapheneos/docs/OWL-PATH.md` expects the opposite.** Its cost table for the
@@ -51,7 +51,7 @@ That is an expectation, not a measurement, and it is the whole gate:
 can we add a monitor interface on the "wonder" wiphy, and does AF_PACKET injection succeed?
 ```
 
-- **yes** → the port is nearly free; libawdl's HAL already does exactly this
+- **yes** → the port is nearly free; tlink's HAL already does exactly this
 - **no**  → we drive wonder's vendor commands instead. A real project, but with an ABI that
   is already documented rather than one that has to be recovered
 
@@ -79,11 +79,11 @@ software timer suffices — what actually separates it from our losing mt76-USB 
 
 So the real phone-port plan: drive wonder as libmosey does — the five radio vendor commands
 (`set_frequency`, `set_fixed_tx_rate`, `get_if_mac_addr`, `set_filter`, `set_reg`) plus
-libawdl's existing software AWDL timing, injecting through wonder's low-jitter kernel path. The
+tlink's existing software AWDL timing, injecting through wonder's low-jitter kernel path. The
 next steps:
 
-1. **Injection** on `wonder` (Phase 2) — can libawdl inject AWDL frames through it.
-2. A `libawdl-hal` wonder backend issuing those five radio vendor commands + frame TX/RX.
+1. **Injection** on `wonder` (Phase 2) — can tlink inject AWDL frames through it.
+2. A `tlink-hal` wonder backend issuing those five radio vendor commands + frame TX/RX.
 
 ## Three phases
 
@@ -93,8 +93,8 @@ Open a monitor interface on the phone's radio and decode what it sees, while lib
 normally. No injection, no exclusivity, no build change, nothing removed.
 
 Worth doing for its own sake: it validates the parser against the **target** hardware rather
-than an ALFA, and it lets libawdl's view be diffed against libmosey's behaviour on the same
-frames. That is the cheapest confidence check available before trusting libawdl with
+than an ALFA, and it lets tlink's view be diffed against libmosey's behaviour on the same
+frames. That is the cheapest confidence check available before trusting tlink with
 anything on a phone.
 
 ### Phase 2 — the injection probe
@@ -116,7 +116,7 @@ should run close to unchanged.
 
 ## What has to exist first
 
-**A binary.** `libawdl` has zero dependencies and `libawdl-hal` needs only `libc`, so this is
+**A binary.** `tlink` has zero dependencies and `tlink-hal` needs only `libc`, so this is
 small either way:
 
 | | route | good for |
@@ -161,9 +161,9 @@ kernel path is tight (finding 88). We do the same.
 
 ### The Android track — concrete, and de-risked
 
-1. **Cross-compile the inject path.** `pcap` (the only libpcap dep) is in `libawdl-cli`
+1. **Cross-compile the inject path.** `pcap` (the only libpcap dep) is in `tlink-cli`
    and used only by the file-reading subcommands (`read`, `coverage`, `bytemap`, …). Feature-gate
-   it out — or build a minimal binary linking `libawdl` + `libawdl-hal` only — so the beacon /
+   it out — or build a minimal binary linking `tlink` + `tlink-hal` only — so the beacon /
    data-plane path compiles for `aarch64-linux-android`. NDK 30 is installed; the target is a
    `rustup target add` away. No cross-built libpcap required.
 2. **Phase 2 gate — inject through wonder.** With a session up (`moseyprobe`), can our binary
@@ -171,16 +171,16 @@ kernel path is tight (finding 88). We do the same.
    Expect a possible mt76-style "second vif" trap; if so, drive wonder's own path.
 3. **The wonder HAL backend.** Drive wonder as libmosey does — the five radio vendor commands
    (`set_frequency`, `set_fixed_tx_rate`, `get_if_mac_addr`, `set_filter`, `set_reg`, OUI
-   0x001a11) plus libawdl's existing software AWDL timing, injecting through wonder's tight
+   0x001a11) plus tlink's existing software AWDL timing, injecting through wonder's tight
    kernel path. No TSF, no hardware schedule — those are stubs (finding 88).
-4. **Then wire libawdl's protocol on top** and test interop against a real Apple peer.
+4. **Then wire tlink's protocol on top** and test interop against a real Apple peer.
 
 The protocol is done (Pi). The vendor channel is proven reachable (finding 87). `moseyprobe`
 gives a session on demand. What is new is a Rust cross-build and the wonder injection backend.
 
 ### Cross-compile setup (done 2026-09-18) — the core libs build for Android
 
-`libawdl` and `libawdl-hal` now cross-compile for `aarch64-linux-android` with the **real**
+`tlink` and `tlink-hal` now cross-compile for `aarch64-linux-android` with the **real**
 AF_PACKET/tun inject code, not the stubs. What it took:
 
 - `rustup target add aarch64-linux-android`; NDK 30 provides the linker.
@@ -198,7 +198,7 @@ AF_PACKET/tun inject code, not the stubs. What it took:
   glibc; added an `IoctlReq` type alias and retyped the four request constants. `EAGAIN` and
   `EWOULDBLOCK` are equal on bionic, so that match arm is `#[allow(unreachable_patterns)]`.
 
-Build: `cargo build -p libawdl -p libawdl-hal --target aarch64-linux-android --release`.
+Build: `cargo build -p tlink -p tlink-hal --target aarch64-linux-android --release`.
 Host (macOS) build, tests, and the coverage ratchet are unaffected (the Pi still matches
 `linux`; macOS still gets the stubs). Next: a thin Android inject binary linking these two
 crates (no `pcap`), then the Phase 2 inject-through-wonder test.

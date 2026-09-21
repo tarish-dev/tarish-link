@@ -29,7 +29,7 @@ GARBAGE=${GARBAGE:-}
 R=/tmp/ct_$LABEL
 ssh -o ConnectTimeout=10 "$PI" "
 set -u
-cd ~/tarish-libawdl
+cd ~/tarish-link
 sudo killall awdl tcpdump 2>/dev/null; sleep 1
 
 # DELETE LAST RUN'S ARTIFACTS FIRST. $R is derived from $LABEL, so a re-run with the same
@@ -43,10 +43,10 @@ rm -f $R.pcap $R.before.pcap $R.log $R.before.txt $R.timeline.txt $R.tcpdump.err
 # BEFORE: is the room a settled cluster at all? A trial against an empty or churning room
 # measures nothing, and both look like a clean refusal afterwards.
 sudo timeout 12 tcpdump -i $MON -w $R.before.pcap -s0 2>>$R.tcpdump.err
-./target/release/awdl stats $R.before.pcap 2>&1 | grep -A8 'who names whom' > $R.before.txt
-./target/release/awdl timeline $R.before.pcap 2>&1 | sed -n '3,12p' > $R.timeline.txt
+./target/release/tlink stats $R.before.pcap 2>&1 | grep -A8 'who names whom' > $R.before.txt
+./target/release/tlink timeline $R.before.pcap 2>&1 | sed -n '3,12p' > $R.timeline.txt
 
-(sudo ./target/release/awdl beacon $MANAGED $MON $CHAN $SECS 2 --follow --metric $METRIC --tenure 99999 ${GARBAGE:+--garbage $GARBAGE} > $R.log 2>&1 &)
+(sudo ./target/release/tlink beacon $MANAGED $MON $CHAN $SECS 2 --follow --metric $METRIC --tenure 99999 ${GARBAGE:+--garbage $GARBAGE} > $R.log 2>&1 &)
 for i in \$(seq 1 15); do ip link show $MON >/dev/null 2>&1 && break; sleep 1; done
 sleep 4
 sudo timeout $CAPS tcpdump -i $MON -w $R.pcap -s0 2>>$R.tcpdump.err
@@ -95,7 +95,7 @@ MINSENT=$(awk -v s="$SECS" 'BEGIN {print int(s * 2)}')
 [ -n "${SPREAD:-}" ] && [ "$SPREAD" -lt 32768 ] || VOID="$VOID
   spread=${SPREAD:-?} us, not under half a slot (32768)."
 # D. did our frames reach the air? The beacon's own counter is not evidence of that.
-OURS=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl stats $R.pcap 2>&1 | grep -c '$OURMAC'")
+OURS=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && ./target/release/tlink stats $R.pcap 2>&1 | grep -c '$OURMAC'")
 [ "${OURS:-0}" -gt 0 ] || VOID="$VOID
   our address does not appear in the capture: the frames never reached the air."
 
@@ -109,7 +109,7 @@ echo "  our frames on the air: ${OURS:-0} reference(s)"
 # E. was a PEER even present? An empty room refuses everything, and run E3 spent eight
 #    minutes proving that a garbage field is refused by nobody at all. This is the check
 #    that was missing, and it is the difference between a result and a void.
-PEERS=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl stats $R.pcap 2>&1 | sed -n '/^senders:/,/^[a-z]/p' | grep -cvE '^senders:|$OURMAC|^[a-z]'")
+PEERS=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && ./target/release/tlink stats $R.pcap 2>&1 | sed -n '/^senders:/,/^[a-z]/p' | grep -cvE '^senders:|$OURMAC|^[a-z]'")
 [ "${PEERS:-0}" -ge 1 ] || VOID="$VOID
   no sender other than us appears in the capture. The room was empty, so nothing
   refused anything -- this is a void, not a REFUSE."
@@ -119,7 +119,7 @@ echo "  peers transmitting: ${PEERS:-0}   (>= 1)"
 #    that dropped the change makes a garbage run look exactly like a clean one.
 if [ -n "$GARBAGE" ]; then
   echo "  --garbage $GARBAGE, as sent:"
-  ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl tlv $R.pcap 24 $OURMAC 2>&1 | sed -n '3,8p'"
+  ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && ./target/release/tlink tlv $R.pcap 24 $OURMAC 2>&1 | sed -n '3,8p'"
 fi
 
 
@@ -135,7 +135,7 @@ fi
 #    NOT "the line starts with dots" -- the first version tested that and scored the good
 #    control as 0. A peer that was master, went away and came back reads `MMM...fff`, which
 #    is the commonest entry shape of all. The test is a dot with presence somewhere AFTER it.
-ENTRY=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl timeline $R.pcap 2>&1 | grep -E '^[0-9a-f]{2}:' | grep -v '$OURMAC' | awk '{print \$2}' | grep -cE '[.][.]*[A-Za-z*]'")
+ENTRY=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && ./target/release/tlink timeline $R.pcap 2>&1 | grep -E '^[0-9a-f]{2}:' | grep -v '$OURMAC' | awk '{print \$2}' | grep -cE '[.][.]*[A-Za-z*]'")
 [ "${ENTRY:-0}" -ge 1 ] || VOID="$VOID
   no peer ENTERED during the capture -- every peer was either present throughout or absent
   throughout. A settled cluster refuses correct frames as readily as garbage, so this is a
@@ -144,9 +144,9 @@ echo "  peers that entered during the run: ${ENTRY:-0}   (>= 1 for an election t
 
 echo
 echo "=================== OUTCOME ==================="
-ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl stats $R.pcap 2>&1 | grep -A10 'who names whom' | tail -9"
+ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && ./target/release/tlink stats $R.pcap 2>&1 | grep -A10 'who names whom' | tail -9"
 # awk, not bc: the Pi has no bc, and this runs there.
-NAMED=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && ./target/release/awdl stats $R.pcap 2>&1 | grep -E '\->  *$OURMAC' | awk '{n+=\$NF} END {print n+0}'")
+NAMED=$(ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && ./target/release/tlink stats $R.pcap 2>&1 | grep -E '\->  *$OURMAC' | awk '{n+=\$NF} END {print n+0}'")
 NAMED=${NAMED:-0}
 
 echo

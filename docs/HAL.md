@@ -170,7 +170,7 @@ the ones `wonder.ko` adds (`get_mac_tsf`, `set_channel_schedule_req`, `set_fixed
 ## Verifying a backend
 
 A vendor backend is correct when it produces the same results as the reference one on the
-same captures. `crates/libawdl` parses independently of any radio, and its output has been
+same captures. `crates/tlink` parses independently of any radio, and its output has been
 checked frame-for-frame against Wireshark's dissector — 278 of 6584 frames identified as
 AWDL by both, with identical tag histograms. That is the bar: not "it runs", but "it
 agrees with an independent implementation on recorded evidence".

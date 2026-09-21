@@ -29,7 +29,7 @@ R=/tmp/bt_$LABEL
 
 ssh -o ConnectTimeout=10 "$PI" "
 set -u
-cd ~/tarish-libawdl
+cd ~/tarish-link
 st() { sudo hcitool -i hci0 cmd \$@ 2>&1 | tail -1 | awk '{print \$4}'; }
 sudo killall awdl tcpdump 2>/dev/null
 
@@ -38,13 +38,13 @@ sudo killall awdl tcpdump 2>/dev/null
 st 0x08 0x000A 00 >/dev/null
 for try in 1 2 3 4 5 6; do
   sudo timeout 15 tcpdump -i $MON -w $R.q.pcap -s0 2>/dev/null
-  n=\$(./target/release/awdl stats $R.q.pcap 2>&1 | grep -oE '[0-9]+ AWDL action' | grep -oE '^[0-9]+')
+  n=\$(./target/release/tlink stats $R.q.pcap 2>&1 | grep -oE '[0-9]+ AWDL action' | grep -oE '^[0-9]+')
   echo \"  quiet check \$try: \${n:-0} frames\"
   [ \"\${n:-0}\" = 0 ] && break
 done
 
 # 2. our beacon into the verified-empty room
-nohup sudo ./target/release/awdl beacon $MANAGED $MON $CHAN $SECS 2 --metric $METRIC --tenure 99999 $FLAGS > $R.log 2>&1 < /dev/null &
+nohup sudo ./target/release/tlink beacon $MANAGED $MON $CHAN $SECS 2 --metric $METRIC --tenure 99999 $FLAGS > $R.log 2>&1 < /dev/null &
 for i in \$(seq 1 15); do ip link show $MON >/dev/null 2>&1 && break; sleep 1; done
 sleep 4
 
@@ -58,18 +58,18 @@ echo \"  BLE wake -> \$(st 0x08 0x000A 01)\"
 sleep \$(( $CAPS + 20 ))
 "
 
-fetch() { ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-libawdl && $1" 2>/dev/null; }
+fetch() { ssh -o ConnectTimeout=10 "$PI" "cd ~/tarish-link && $1" 2>/dev/null; }
 echo
 echo "===== $LABEL  flags='$FLAGS' ====="
-fetch "./target/release/awdl timeline $R.pcap 10 2>&1 | sed -n '3,10p'"
-fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -A6 'election (per sender' | head -6"
+fetch "./target/release/tlink timeline $R.pcap 10 2>&1 | sed -n '3,10p'"
+fetch "./target/release/tlink stats $R.pcap 2>&1 | grep -A6 'election (per sender' | head -6"
 LOG=$(fetch "cat $R.log")
 echo "$LOG" | grep -E '^sent|^adopted by'
 
 SENT=$(echo "$LOG" | grep -oE '^sent [0-9]+ MIF, [0-9]+ PSF' | grep -oE '[0-9]+' | awk '{n+=$1} END {print n+0}')
 MIN=$(awk -v s="$SECS" 'BEGIN {print int(s*2)}')
-PEERS=$(fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -A8 'senders:' | grep -cE '^  [0-9a-f]{2}:'")
-NAMED=$(fetch "./target/release/awdl stats $R.pcap 2>&1 | grep -E '\->  *$OURMAC' | awk '{n+=\$NF} END {print n+0}'")
+PEERS=$(fetch "./target/release/tlink stats $R.pcap 2>&1 | grep -A8 'senders:' | grep -cE '^  [0-9a-f]{2}:'")
+NAMED=$(fetch "./target/release/tlink stats $R.pcap 2>&1 | grep -E '\->  *$OURMAC' | awk '{n+=\$NF} END {print n+0}'")
 echo
 V=""
 [ "${SENT:-0}" -ge "$MIN" ] || V="$V frames_sent=${SENT:-0}<$MIN(starved)"

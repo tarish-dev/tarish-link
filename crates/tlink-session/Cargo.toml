@@ -1,0 +1,11 @@
+[package]
+name = "tlink-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The held AWDL session loop — beacon, election, sync and the data path — over a Radio."
+
+[dependencies]
+tlink = { path = "../tlink" }
+tlink-hal = { path = "../tlink-hal" }
+log = "0.4"

@@ -1,7 +1,7 @@
 # AWDL on the wire
 
 *A reference for the frame format, derived from captures. Generated against the parsers in
-`crates/libawdl`, not from memory or from a paper.*
+`crates/tlink`, not from memory or from a paper.*
 
 ## How to read this, and what it is not
 
@@ -199,7 +199,7 @@ on one channel.
 The three bytes after the slot list were zero in all 7,054 samples, so they are named as
 padding **because measured**, not because assumed.
 
-> **A note on the sample counts in the source.** Several doc comments in `crates/libawdl`
+> **A note on the sample counts in the source.** Several doc comments in `crates/tlink`
 > cite 18,157 frames or 7,054 samples. Those were the corpus when each was written; it is
 > now 37,829 frames. The conclusions still hold — `awdl bytemap` re-derives them across the
 > whole corpus — but the numbers in those comments are stale, and a claim resting on a count
@@ -594,8 +594,8 @@ falls back to stable-privacy. Finding 51.
 problem and does not apply here — an earlier version of these docs said it did.
 
 The address is not a parameter: it is derived from the MAC we advertise, because any other
-value is wrong by construction. The rule exists in `libawdl::data` and again in
-`libawdl_hal::tun` so the HAL need not depend on the protocol crate, and a test holds the
+value is wrong by construction. The rule exists in `tlink::data` and again in
+`tlink_hal::tun` so the HAL need not depend on the protocol crate, and a test holds the
 two copies against each other — a silent divergence would put the interface on an address no
 peer computes.
 

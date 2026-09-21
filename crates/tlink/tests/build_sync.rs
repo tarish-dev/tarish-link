@@ -1,0 +1,245 @@
+//! The Synchronization Parameters builder, against bytes real devices put on the air.
+//!
+//! Same rule as `build.rs`: byte equality with a capture, not a round-trip through our
+//! own parser. A parser and a builder that are wrong in the same direction agree with
+//! each other perfectly and with no device at all.
+
+mod fixture_sync;
+
+use fixture_sync::*;
+use tlink::sync::{ChanEncoding, ChannelSequence, SyncParams};
+
+fn rebuild(original: &[u8], label: &str) {
+    let parsed = SyncParams::parse(original)
+        .unwrap_or_else(|| panic!("{label}: the fixture must parse"));
+    let rebuilt = parsed.encode().unwrap_or_else(|| panic!("{label}: must re-encode"));
+
+    assert_eq!(
+        rebuilt.len(),
+        original.len(),
+        "{label}: length differs — rebuilt {} vs captured {}. The usual cause is the \
+         channel count, which is stored MINUS ONE.",
+        rebuilt.len(),
+        original.len()
+    );
+    if rebuilt != original {
+        let first = rebuilt.iter().zip(original).position(|(a, b)| a != b).unwrap();
+        panic!(
+            "{label}: byte {first} differs — rebuilt 0x{:02x}, captured 0x{:02x}",
+            rebuilt[first], original[first]
+        );
+    }
+}
+
+#[test]
+fn apple_associated_survives_parse_and_rebuild() {
+    rebuild(APPLE_ASSOCIATED, "apple/associated");
+}
+
+/// The one with a non-zero value after the channel sequence.
+///
+/// OWL and Wireshark both call those two bytes padding. If they were, this test would
+/// pass with a builder that writes zeros — it does not.
+#[test]
+fn a_non_zero_trailing_value_is_preserved() {
+    assert_eq!(
+        SyncParams::parse(APPLE_FOLLOWER).unwrap().trailing,
+        [0x00, 0x4c],
+        "the fixture is the one chosen for its non-zero trailing bytes"
+    );
+    rebuild(APPLE_FOLLOWER, "apple/follower");
+}
+
+/// A full sixteen-slot schedule in the other encoding, so the sparse fixtures above
+/// cannot be passed by a builder that assumes Apple's shape.
+#[test]
+fn libmosey_survives_parse_and_rebuild() {
+    rebuild(LIBMOSEY, "libmosey");
+}
+
+#[test]
+fn the_channel_sequence_tag_survives_parse_and_rebuild() {
+    let parsed = ChannelSequence::parse(APPLE_TAG18).expect("fixture parses");
+    assert_eq!(parsed.encode_tag18().expect("re-encodes"), APPLE_TAG18);
+}
+
+/// Legacy stores the qualifier first and the channel second; every other encoding is the
+/// other way round. A builder that gets this backwards produces a frame that parses
+/// cleanly into a different schedule, which is why it is worth its own test rather than
+/// being left to the fixtures.
+#[test]
+fn legacy_and_opclass_put_their_two_bytes_in_opposite_orders() {
+    let legacy = SyncParams::parse(APPLE_ASSOCIATED).unwrap().channel_sequence.unwrap();
+    assert_eq!(legacy.encoding, ChanEncoding::Legacy);
+    assert_eq!(legacy.channels[8], 6, "slot 8 is channel 6");
+    assert_eq!(legacy.qualifiers[8], 0x2b, "and 0x2b is its qualifier, not its channel");
+
+    let opclass = ChannelSequence::parse(APPLE_TAG18).unwrap();
+    assert_eq!(opclass.encoding, ChanEncoding::OpClass);
+    assert_eq!(opclass.channels[8], 6);
+    assert_eq!(opclass.qualifiers[8], 81, "operating class 81 is 2.4 GHz");
+}
+
+/// The schedule this project is for: four occupied slots out of sixteen.
+#[test]
+fn the_built_schedule_matches_the_shape_apple_uses() {
+    let apple = SyncParams::parse(APPLE_ASSOCIATED).unwrap().channel_sequence.unwrap();
+    let ours = ChannelSequence::apple_shaped(149, Some(104));
+
+    assert_eq!(ours.channels.len(), 16);
+    assert_eq!(ours.occupied_slots(), apple.occupied_slots(), "four of sixteen");
+    assert_eq!(ours.channels[0], 104, "slot 0 is the association");
+    assert_eq!(ours.channels[8], 6, "slot 8 is channel 6, whatever band the rest uses");
+    assert_eq!(ours.slots_on(149), 2, "slots 2 and 10");
+
+    // Occupancy must match slot for slot, not just in count -- the association and the
+    // social channel differ, so comparing which slots are non-zero is the real check.
+    let occupied = |c: &ChannelSequence| -> Vec<usize> {
+        c.channels.iter().enumerate().filter(|(_, v)| **v != 0).map(|(i, _)| i).collect()
+    };
+    assert_eq!(occupied(&ours), occupied(&apple), "the same slots, not merely as many");
+
+    // A device with no association leaves slot 0 empty, as the follower fixture does.
+    assert_eq!(ChannelSequence::apple_shaped(149, None).occupied_slots(), 3);
+}
+
+/// A sequence that cannot be represented is refused, not silently truncated.
+#[test]
+fn an_unrepresentable_sequence_is_refused() {
+    let mut seq = ChannelSequence::apple_shaped(149, Some(104));
+    seq.channels.clear();
+    seq.qualifiers.clear();
+    assert!(seq.encode().is_none(), "zero slots has no encoding: the count is stored minus one");
+
+    let mut unknown = ChannelSequence::apple_shaped(149, Some(104));
+    unknown.encoding = ChanEncoding::Unknown(7);
+    assert!(unknown.encode().is_none(), "an unknown encoding has no known stride");
+}
+
+mod fixture_frame;
+
+/// A whole captured frame, taken apart and put back together byte for byte.
+///
+/// This is the test the transmitter rests on. The TLV builders each prove one tag; this
+/// proves the thing that carries them — the 802.11 header, the vendor-specific action
+/// wrapper, the 12-byte fixed block, and every TLV in its original order with its
+/// original length encoding. A frame that differs from this by one byte is a frame an
+/// Apple device may simply ignore, with nothing logged anywhere to say why.
+#[test]
+fn a_whole_apple_frame_survives_parse_and_rebuild() {
+    use tlink::{action::ActionFrame, dot11::{management_header, Dot11, Mac}, radiotap::Radiotap};
+
+    let rt = Radiotap::parse(fixture_frame::FRAME).expect("radiotap parses");
+    let body80211 = rt.payload(fixture_frame::FRAME).expect("has a payload");
+    let d = Dot11::parse(body80211).expect("802.11 header parses");
+    assert!(d.is_action());
+
+    // The 802.11 header, rebuilt from its parsed parts.
+    let seq = u16::from_le_bytes([body80211[22], body80211[23]]) >> 4;
+    let rebuilt_hdr = management_header(d.dst, d.src, seq);
+    assert_eq!(
+        &rebuilt_hdr[..],
+        &body80211[..24],
+        "the 24-byte management header differs; duration and the BSSID are the usual causes"
+    );
+    assert_eq!(d.bssid, Mac(tlink::action::BSSID), "every AWDL frame carries this BSSID");
+
+    // The action frame body, rebuilt from its parsed parts.
+    let af = ActionFrame::parse(&body80211[24..]).expect("AWDL action frame parses");
+    let tlvs: Vec<(u8, Vec<u8>)> = af.tlvs().map(|t| (t.tag, t.value.to_vec())).collect();
+    assert!(tlvs.len() > 3, "the fixture carries a real set of tags, not one");
+
+    let rebuilt = tlink::action::encode_body(&af.fixed, &tlvs);
+    let original = &body80211[24..];
+    assert_eq!(
+        rebuilt.len(),
+        original.len(),
+        "body length differs — rebuilt {} vs captured {}",
+        rebuilt.len(),
+        original.len()
+    );
+    if rebuilt != original {
+        let i = rebuilt.iter().zip(original).position(|(a, b)| a != b).unwrap();
+        panic!("body byte {i} differs: rebuilt 0x{:02x}, captured 0x{:02x}", rebuilt[i], original[i]);
+    }
+}
+
+/// The header version is a packed pair of nibbles, and it is NOT the version in tag 21.
+#[test]
+fn the_header_version_is_one_point_oh_and_is_not_tag_21() {
+    use tlink::action::{Fixed, HEADER_VERSION};
+
+    let f = Fixed::for_tx(tlink::action::SUBTYPE_MIF, 0x1234_5678);
+    assert_eq!(f.version_major, 1);
+    assert_eq!(f.version_minor, 0);
+    assert_eq!(f.encode()[5], HEADER_VERSION, "0x10 is 1.0, not 16");
+    assert_eq!(f.encode()[5], 0x10);
+}
+
+/// Broadcast frames carry duration 0; unicast frames carry 48. Measured, both.
+#[test]
+fn duration_follows_the_destination() {
+    use tlink::dot11::{management_header, Mac, BROADCAST};
+
+    let src = Mac([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    assert_eq!(management_header(BROADCAST, src, 0)[2..4], [0, 0]);
+    assert_eq!(management_header(Mac([0x8a; 6]), src, 0)[2..4], [48, 0]);
+}
+
+/// The Legacy list carries 40 MHz CENTRES, and the qualifier says which half is the
+/// control channel. Resolving it must reproduce tag 18 exactly, slot for slot.
+///
+/// This is the whole derivation in one assertion: the two encodings describe the same
+/// schedule, so if the qualifier is decoded correctly they agree, and if it is not they
+/// differ by two on every 40 MHz slot — which is a channel nobody is listening on.
+#[test]
+fn resolving_legacy_centres_reproduces_the_opclass_list() {
+    use tlink::sync::LegacyQualifier;
+
+    let legacy = SyncParams::parse(APPLE_ASSOCIATED).unwrap().channel_sequence.unwrap();
+    let opclass = ChannelSequence::parse(APPLE_TAG18).unwrap();
+    assert_eq!(legacy.encoding, ChanEncoding::Legacy);
+    assert_eq!(opclass.encoding, ChanEncoding::OpClass);
+
+    // The raw lists DISAGREE, which is the point.
+    assert_ne!(legacy.channels, opclass.channels, "151 vs 149, 102 vs 104");
+
+    // Resolved, they agree.
+    let resolved = legacy.control_channels();
+    let expected: Vec<Option<u8>> =
+        opclass.channels.iter().map(|c| if *c == 0 { None } else { Some(*c) }).collect();
+    assert_eq!(resolved, expected, "the same schedule, once the centres are resolved");
+
+    // And specifically:
+    assert_eq!(legacy.channels[0], 102, "the Legacy list says 102");
+    assert_eq!(resolved[0], Some(104), "the radio must tune to 104");
+    assert_eq!(legacy.channels[2], 151);
+    assert_eq!(resolved[2], Some(149), "and to 149, not 151");
+    assert_eq!(resolved[8], Some(6), "channel 6 is 20 MHz and is its own centre");
+
+    assert_eq!(LegacyQualifier::from(0x1e), LegacyQualifier::Width40Upper);
+    assert_eq!(LegacyQualifier::from(0x1d), LegacyQualifier::Width40Lower);
+    assert_eq!(LegacyQualifier::from(0x2b), LegacyQualifier::Width20);
+}
+
+/// A qualifier we have never seen yields no channel rather than a plausible wrong one.
+#[test]
+fn an_unseen_qualifier_is_refused_not_guessed() {
+    use tlink::sync::LegacyQualifier;
+
+    let q = LegacyQualifier::from(0x77);
+    assert_eq!(q, LegacyQualifier::Other(0x77));
+    assert_eq!(q.control_channel(149), None, "an unknown offset is not an offset of zero");
+    assert_eq!(q.to_u8(), 0x77, "and it still round-trips");
+}
+
+/// OpClass sequences need no resolution — the list is already control channels.
+#[test]
+fn opclass_channels_pass_through_unchanged() {
+    let s = ChannelSequence::apple_shaped(149, Some(104));
+    let resolved = s.control_channels();
+    assert_eq!(resolved[0], Some(104));
+    assert_eq!(resolved[2], Some(149));
+    assert_eq!(resolved[8], Some(6));
+    assert_eq!(resolved[1], None, "an empty slot resolves to nothing");
+}

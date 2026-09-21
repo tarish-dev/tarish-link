@@ -18,7 +18,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-BIN=./target/release/awdl
+BIN=./target/release/tlink
 BASE=docs/coverage-floor.txt
 
 [ -x "$BIN" ] || { echo "build first: cargo build --release"; exit 2; }

@@ -27,14 +27,14 @@ FLAGS="${FLAGS:-}"
 BEACON_S="${BEACON_S:-70}"
 CAP_S="${CAP_S:-50}"
 PI=pi@raspberrypi.local
-OUT="/path/to/tarish-libawdl/captures/trial-${LABEL}.pcap"
+OUT="/path/to/tarish-link/captures/trial-${LABEL}.pcap"
 REMOTE="/tmp/trial_${LABEL}.pcap"
 
 ssh -o ConnectTimeout=10 "$PI" "
   set -u
-  cd ~/tarish-libawdl
+  cd ~/tarish-link
   sudo rm -f -- '$REMOTE'
-  sudo ./target/release/awdl beacon wlx00c0cab0604c mon0 149 $BEACON_S 2 $FLAGS > '/tmp/t_${LABEL}.log' 2>&1 &
+  sudo ./target/release/tlink beacon wlx00c0cab0604c mon0 149 $BEACON_S 2 $FLAGS > '/tmp/t_${LABEL}.log' 2>&1 &
   BPID=\$!
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if ip link show mon0 >/dev/null 2>&1; then break; fi
@@ -48,12 +48,12 @@ ssh -o ConnectTimeout=10 "$PI" "
   tail -2 '/tmp/t_${LABEL}.log'
 "
 scp -q -o ConnectTimeout=10 "$PI:$REMOTE" "$OUT"
-cd /path/to/tarish-libawdl
+cd /path/to/tarish-link
 echo "--- $LABEL  $(shasum -a 256 "$OUT" | cut -c1-10)  $(wc -c < "$OUT" | tr -d ' ')B"
-./target/release/awdl phase "$OUT" 2>/dev/null | grep "00:c0:ca" || true
-./target/release/awdl stats "$OUT" 2>&1 | grep -A5 "who names whom" | tail -4
+./target/release/tlink phase "$OUT" 2>/dev/null | grep "00:c0:ca" || true
+./target/release/tlink stats "$OUT" 2>&1 | grep -A5 "who names whom" | tail -4
 # Rule 7: the cell is void unless the manipulation took. For a forming cell the peers must
 # be SILENT in the opening buckets and then transition in. Peers talking in bucket 1 are
 # settled peers, whatever was done to the phones beforehand. Four FL runs died here.
 echo "--- validity (forming cells: peers must start silent, look for ..* )"
-./target/release/awdl timeline "$OUT" 2>&1 | sed -n '3,9p'
+./target/release/tlink timeline "$OUT" 2>&1 | sed -n '3,9p'

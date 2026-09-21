@@ -248,14 +248,14 @@ The cross-band cliff — a 2.4 GHz device and a 5 GHz device never discovering e
 ordering that makes `libmosey` schedule two bands. It is not a configuration we have
 failed to find; it is a capability the library does not have.
 
-That moves the item out of "integration tuning" and into the case for `libawdl`:
+That moves the item out of "integration tuning" and into the case for `tlink`:
 
 - **It is a requirement, not a nice-to-have.** Building a schedule that reserves slot 8
   for channel 6 is something our own implementation must do, because nothing else can.
 - **We now have the target shape, measured.** Not inferred from a paper: a real device's
   sequence, in a capture, next to ours for comparison.
 - **It is testable the same way.** The same Pi, the same parser, the same one-command
-  comparison — so the day `libawdl` builds a sequence, we can check it against Apple's
+  comparison — so the day `tlink` builds a sequence, we can check it against Apple's
   side by side rather than hoping.
 
 ### A second divergence, noticed in passing
@@ -353,7 +353,7 @@ to cause a problem.** Our node followed the strongest peer while that peer was p
 promoted itself correctly when it left — with a metric of 1 throughout. For a phone, never
 wanting to be master is arguably the right posture anyway.
 
-So this is a note for `libawdl` to decide deliberately rather than a defect to fix, and
+So this is a note for `tlink` to decide deliberately rather than a defect to fix, and
 the link to the sending bug is **withdrawn**. There was never evidence for it.
 
 ### The open question this leaves
@@ -418,16 +418,16 @@ would not have raised it.
 Highest metric holds mastership. The counter remains irrelevant to the outcome: `02:3b`
 carries **68368**, a hundred times the winner's 659, and follows without contest.
 
-### What this means for libawdl
+### What this means for tlink
 
 - **The election is understood well enough to implement.** Advertise a metric, follow the
   highest, take over on silence. Confirmed against four devices in two captures.
 - **Metric 1 is a deliberate posture, not a bug.** A node that never wants to be master
-  is a legitimate configuration, and ours behaves correctly as one. Whether `libawdl`
+  is a legitimate configuration, and ours behaves correctly as one. Whether `tlink`
   should ever claim mastership is now a design choice with evidence behind it rather than
   a defect to fix.
 - **Counter still unexplained**, and now demonstrably not load-bearing for the election.
-  `libawdl` can advertise something sane and revisit it if a peer ever appears to care.
+  `tlink` can advertise something sane and revisit it if a peer ever appears to care.
 
 ### The method note
 
@@ -687,7 +687,7 @@ advertising AirDrop at `5b28e76c-….local:8770`"*. That matters for three thing
 - **Correlating BLE with AWDL.** Findings 12 and 13 could only pair a BLE beacon with an
   AWDL sender by the timing of a departure. A device name and a stable instance identifier
   give a second, independent handle.
-- **Knowing what to advertise.** `libawdl` must emit these records, and now we have real
+- **Knowing what to advertise.** `tlink` must emit these records, and now we have real
   ones to match rather than a specification to interpret.
 - **Port 8770**, read off the air. Worth noting our own GoOpenDrop config carries 8772.
 
@@ -763,7 +763,7 @@ BUILD-NOTES 40 and 42, and which we treated as a hardware limitation.
 It is not only a hardware limitation. Apple solves it in the **schedule**, on hardware that
 also cannot hold two channels at once, by not being on the AWDL channel during slot 0. Our
 stack cannot express that, because `libmosey` will not build a multi-channel sequence — and
-that is now a requirement for `libawdl` rather than an optimisation.
+that is now a requirement for `tlink` rather than an optimisation.
 
 The `AP Beacon alignment delta` field from finding 6 belongs to this mechanism: a device
 time-sharing with an AP needs to know where that AP's beacon falls relative to its own
@@ -847,7 +847,7 @@ as a hardware limitation.
 Apple appears to run on hardware with the same constraint and keep its association by
 scheduling around it. If finding 15 holds, the capability we lack is in the scheduler
 rather than the silicon, and `libmosey` will not express it — which would make
-multi-channel scheduling with a reserved association slot a requirement for `libawdl`.
+multi-channel scheduling with a reserved association slot a requirement for `tlink`.
 **Conditional on a control that has not yet been run.**
 
 ## 17. A 6 GHz association is invisible in the channel sequence
@@ -930,7 +930,7 @@ BUILD-NOTES 40 and 42 as a hardware limitation.
 Apple runs hardware under the same constraint and keeps its association by scheduling
 around it. **The capability we lack is in the scheduler, not the silicon**, and `libmosey`
 will not express it — which makes multi-channel scheduling with a reserved slot 0 a
-requirement for `libawdl`, with this capture as the exact target to reproduce.
+requirement for `tlink`, with this capture as the exact target to reproduce.
 
 The `AP Beacon alignment delta` field (finding 6) belongs to this mechanism: a device
 time-sharing with an AP needs to know where that AP's beacon falls relative to its own
@@ -990,7 +990,7 @@ sequence numbers up to **416**, so roughly 416 were transmitted and we decoded a
 
 **The multicast frames use the same encapsulation a file transfer uses.** The rate differs;
 the framing does not. So the header was recoverable from the frames we could read, and
-`crates/libawdl/src/data.rs` decodes it.
+`crates/tlink/src/data.rs` decodes it.
 
 An earlier hypothesis — that both phones being on one access point let AirDrop carry the
 payload over the infrastructure link instead of AWDL — is **refuted**: with Wi-Fi off on
@@ -1149,7 +1149,7 @@ The captured Apple value decodes as a two-stream 80 MHz phone: maximum MPDU 1145
 MCS 0–9 on two spatial streams in both directions.
 
 **The consequence for transmitting is the whole reason to care.** These bits describe the
-radio, so they have to come from the radio — `libawdl-hal` — and not from a table copied
+radio, so they have to come from the radio — `tlink-hal` — and not from a table copied
 out of an Apple frame. Announcing capabilities the hardware does not have is an invitation
 to a peer to use them.
 
@@ -1513,10 +1513,10 @@ Apple device would ever offer this flow to a non-Apple peer at all. **The last o
 the one that decides whether any of it matters to Tarish**, and it needs a deliberate test on
 the *personal* iPhone, not the managed one.
 
-## 34. ★ libawdl transmitted, and three Apple devices elected it master
+## 34. ★ tlink transmitted, and three Apple devices elected it master
 
 First transmission, 2026-09-12. 60 seconds on channel 149 from a Raspberry Pi with an
-MT7612U, one MIF per two PSFs, frames built entirely by `libawdl::beacon`.
+MT7612U, one MIF per two PSFs, frames built entirely by `tlink::beacon`.
 
 The test was never "did `send()` succeed" — that only means the driver accepted bytes. The
 test was whether a real peer **acts** on them, and the election is the cheapest oracle:
@@ -1688,8 +1688,8 @@ two hops away carried our metric and our tenure counter, values it could only ho
 parsing our frame and believing it. **Being elected is evidence of correctness; not being
 elected is not evidence against it.**
 
-What changes is the claim's strength. "libawdl can be elected master" is true and
-demonstrated once. "libawdl will be elected master" is **not** supported, and the deciding
+What changes is the claim's strength. "tlink can be elected master" is true and
+demonstrated once. "tlink will be elected master" is **not** supported, and the deciding
 variable is still unidentified.
 
 ## 37. We were followed when we overlapped LEAST — audibility is not the gate
@@ -2068,7 +2068,7 @@ candidates were eliminated in findings 36-39 and the timing error was a sixth co
 running underneath all of them — but removing it has not produced a rule, only a better
 success rate on a sample of one.
 
-The honest next step is still **reception**: `libawdl::follow` can now recover a cluster's
+The honest next step is still **reception**: `tlink::follow` can now recover a cluster's
 phase correctly, and a beacon that transmits in *the cluster's* windows rather than its own
 is a different experiment from any run so far.
 
@@ -2169,7 +2169,7 @@ it), and that a slot is one availability window (its `schedule.c` says otherwise
 before claiming anything is new.** It is on the research Pi at `~/owl`, it is 4278 lines, and
 reading it costs less than one wrong experiment.
 
-## 43. ★ libawdl synchronises to a live Apple cluster
+## 43. ★ tlink synchronises to a live Apple cluster
 
 `awdl beacon --follow` listens, recovers the cluster's window phase from the frames it hears,
 and transmits inside **the cluster's** windows instead of its own. On hardware:
@@ -2781,7 +2781,7 @@ field, and nothing published describes these.
 
 ## 51. ★ The data plane — and the second link-local the kernel gives you for free
 
-libawdl could join a cluster, hold a schedule and be elected master, and could not carry a
+tlink could join a cluster, hold a schedule and be elected master, and could not carry a
 byte. `data.rs` parsed the encapsulation; nothing built it, and `grep TUNSETIFF` found
 nothing.
 
@@ -2953,7 +2953,7 @@ instead of assumed.
 
 ### Architecture note
 
-`poll` went into `libawdl-hal::poll` rather than the CLI. The CLI has no `libc` dependency
+`poll` went into `tlink-hal::poll` rather than the CLI. The CLI has no `libc` dependency
 and should not acquire one to run a loop; syscalls belong in the HAL. `EINTR` is reported as
 "neither descriptor ready" rather than as an error, because a signal arriving during a poll
 is not a failure — treating it as one means resizing a terminal kills the data plane.
@@ -3003,7 +3003,7 @@ median 0.03 ms
 
 **Thirty microseconds.** An extended availability window is 65.536 ms, so every data frame
 went out in the same window as the beacon that preceded it, with three orders of magnitude
-to spare. `crates/libawdl-cli/examples/inwindow.rs` is the measurement.
+to spare. `crates/tlink-cli/examples/inwindow.rs` is the measurement.
 
 ### The queue's two deliberate limits
 
@@ -3030,7 +3030,7 @@ neither existed.
 **That is the next experiment, not a defect.** It needs us to be in a cluster — which
 finding 46 says means transmitting before the peer arrives — and then an mDNS query on
 `ff02::fb` that a real device answers. At that point the receive counter becomes the
-measurement that matters, and libawdl is doing the whole job `libmosey` does today.
+measurement that matters, and tlink is doing the whole job `libmosey` does today.
 
 ## 54. The interface configures itself — and Linux needed no routing help at all
 
@@ -3082,7 +3082,7 @@ looking for a fault that does not exist, which is its own kind of expensive.
 
 ### The duplicated EUI-64 rule, and the test that guards it
 
-`libawdl_hal::tun` needs the link-local rule and the HAL does not depend on the protocol
+`tlink_hal::tun` needs the link-local rule and the HAL does not depend on the protocol
 crate — reasonably, since it is four lines. So it exists twice, and a divergence would put
 the interface on an address **no peer computes**: the peer would discover us and never get a
 reply. A test in the CLI, which depends on both, holds the copies against each other over
@@ -3993,7 +3993,7 @@ why this needed a transmitter to find out.
 
 ### Tag 6 is not required to be elected
 
-`libawdl` sends **no tag 6 at all** — `state_tlvs` is documented as "the measured PSF set
+`tlink` sends **no tag 6 at all** — `state_tlvs` is documented as "the measured PSF set
 minus tag 6, which we cannot fill". And peers have adopted us **146, 241 and 714** times
 across the day.
 
@@ -4056,7 +4056,7 @@ nor a tick counter.
 
 ### The obstacle, and what it cost to get past
 
-`libawdl` sends a **13-byte tag 12 with no extended block at all** — and is elected master
+`tlink` sends a **13-byte tag 12 with no extended block at all** — and is elected master
 regardless. So there was nothing to perturb. Asking the question required teaching the beacon
 to emit a block it had never needed, which is the first time an experiment here has required
 *adding* capability rather than corrupting what we already sent.
@@ -4963,7 +4963,7 @@ clock just restarted — finding 77's floor) and its synchronisation bar is mome
 
 Being elected master reliably is **a hardware-tier problem, not a protocol-field problem.** It
 needs frames timestamped at actual PHY transmit time against a cluster-synchronised TSF —
-exactly the capability `libawdl-hal` already grades radios by, and exactly what commodity USB
+exactly the capability `tlink-hal` already grades radios by, and exactly what commodity USB
 injection does not give us. Every remaining election field is already correct; no amount of
 tuning tag 24 changes this.
 
@@ -5245,7 +5245,7 @@ settings"` — it fires only when no session holds wondertap, and the command is
 until then. So OWL-PATH's expectation (both vendor commands present) was right; MOSEY-ABI
 generalised an inactive-state message. `docs/MOSEY-ABI.md` in the grapheneos repo is annotated.
 
-### What it changes for libawdl
+### What it changes for tlink
 
 Finding 81's conclusion — "reliable master needs PHY-time timestamping this hardware does not
 provide" — was true **of the ALFA**, not of the target device. On blazer the timing anchor is
@@ -5257,7 +5257,7 @@ available:
   jitter that made us an unlockable anchor goes away.
 
 The frontier is therefore no longer a hardware wall; it is an **implementation task**: a
-`libawdl-hal` backend that speaks wonder's vendor commands (construct the NL80211_CMD_VENDOR
+`tlink-hal` backend that speaks wonder's vendor commands (construct the NL80211_CMD_VENDOR
 messages, wire `get_mac_tsf` into the transmit-timestamp path, drive `set_channel_schedule_req`
 for the schedule). Real work, but the capability is confirmed present on silicon that a working
 stock stack already drives.
@@ -5279,7 +5279,7 @@ stock stack already drives.
 Follow-up to finding 86, on the attached Pixel. Rather than depend on the Tarish app to bring
 up an AWDL session (its AirDrop flow was stuck — `tarishsharingd` polling *"mosey0 has no
 link-local address yet"* while `tarishd` sat idle), drive the `wonder` radio directly, which
-is what a libawdl HAL backend would do.
+is what a tlink HAL backend would do.
 
 Created a monitor interface on the wonder wiphy and issued vendor commands with `iw`:
 
@@ -5306,7 +5306,7 @@ iw dev awdlmon vendor recv 0x001a11 0x07 -            -> -95, "get_mac_tsf is no
 
 ### What this pins down for the phone port
 
-The path is: **a libawdl phone backend must first bring the session up** (do what libmosey does
+The path is: **a tlink phone backend must first bring the session up** (do what libmosey does
 to activate wonder's RF, or coexist with a live libmosey session), and *then* `get_mac_tsf`
 (0x07) and `set_channel_schedule_req` (0x06) become available over the same vendor channel we
 just exercised. The channel is confirmed; the gate is session bring-up.
@@ -5358,7 +5358,7 @@ the "Found TSF" success strings exist but the code path is never reached.
   which finding 86 had wrongly "corrected".)
 - **The Pixel does AWDL timing in software**, in libmosey — CPU-timed channel hopping via
   `set_frequency`, availability-window scheduling in userspace. Same category as OWL and our
-  own libawdl. It is not hardware-timed.
+  own tlink. It is not hardware-timed.
 - There is therefore **no HwTimed tier available to us on this hardware** either. `caps.rs`'s
   claim that "Google's wonder wiphy exposes [TSF + scheduled channels] on Pixels" is
   aspirational, not what this module does.
@@ -5373,7 +5373,7 @@ software says they will. The real difference between libmosey (works) and our mt
 
 - libmosey injects through wonder's kernel mac80211 path on an **on-board** radio — tight,
   low-jitter, so its software-computed window timing lands where advertised.
-- our libawdl injects via AF_PACKET on a **USB** mt76 — milliseconds of variable latency
+- our tlink injects via AF_PACKET on a **USB** mt76 — milliseconds of variable latency
   between "send" and "on air", so the same software timing arrives smeared.
 
 **The lever is a low-jitter injection path, not a TSF register.** That is achievable in
@@ -5383,7 +5383,7 @@ tight enough; a TSF would help but is not the gate.
 
 ### What it means for the phone port
 
-libawdl on the phone would drive wonder **exactly as libmosey does** — the five radio vendor
+tlink on the phone would drive wonder **exactly as libmosey does** — the five radio vendor
 commands plus software AWDL timing, injecting through wonder's tight kernel path. No TSF, no
 hardware schedule needed. Our protocol logic (already complete on the Pi) plus wonder's
 low-jitter injection is, on this evidence, enough to interoperate — and possibly to win the
@@ -5426,16 +5426,16 @@ master's clock beyond the existing `--follow` phase-aiming; genuine schedule syn
 larger, separate piece (the finding-83 "credible synced member" path). And per finding 88 it
 will not change adoption on the mt76-USB path, where injection jitter is the ceiling — this is
 correctness, and it is the right shape for the eventual wonder backend where the timing lands.
-## 90. ★★★ libawdl injects AWDL frames through wonder — our own code, TX-confirmed on blazer
+## 90. ★★★ tlink injects AWDL frames through wonder — our own code, TX-confirmed on blazer
 
-The Phase 2 gate, passed for real. `awdl-inject` (our thin aarch64 binary: `libawdl` frames,
-`libawdl-hal` AF_PACKET TX, no pcap) transmitted AWDL frames through the Pixel's `wonder`
+The Phase 2 gate, passed for real. `tlink-inject` (our thin aarch64 binary: `tlink` frames,
+`tlink-hal` AF_PACKET TX, no pcap) transmitted AWDL frames through the Pixel's `wonder`
 radio, confirmed by the interface TX counter — not by absence of error.
 
 ### The false positive, caught
 
 First attempt injected on a freshly-added monitor (`injmon`) on the wonder wiphy during a
-`moseyprobe` session. `awdl-inject` reported **"sent 20, failed 0"** — and `injmon`'s TX
+`moseyprobe` session. `tlink-inject` reported **"sent 20, failed 0"** — and `injmon`'s TX
 counter was **0 packets.** The `sendto()` calls succeeded while the driver silently dropped
 every frame. This is the project's canonical trap (a success that isn't); the TX counter is
 what exposed it. A second, non-primary monitor on wonder accepts injected frames and airs
@@ -5454,10 +5454,10 @@ transmit through the primary monitor and treats a second as receive-only.
 ### What this establishes, and what it doesn't
 
 - **Established:** our cross-compiled Rust code drives frame TX through wonder.ko on the real
-  target. This is libawdl talking to wonder at the frame level — the substance of "replace
+  target. This is tlink talking to wonder at the frame level — the substance of "replace
   libmosey," beyond the single vendor command of finding 87.
 - **Not yet:** we injected *alongside* a live libmosey session (moseyprobe) that had already
-  brought the RF up and created the TX-capable `wonder0`. A standalone libawdl still has to do
+  brought the RF up and created the TX-capable `wonder0`. A standalone tlink still has to do
   what libmosey does at bring-up: activate wonder's RF and create a monitor with the flags
   that make it transmit. We have not replicated that; moseyprobe (libmosey) did it for us.
 - The delta was exactly 20 with no libmosey frames interleaved in the window, so the count is
@@ -5465,7 +5465,7 @@ transmit through the primary monitor and treats a second as receive-only.
 
 ### The wonder-backend shape this implies
 
-A libawdl wonder backend must either (a) coexist — inject on the `wonder0` libmosey creates,
+A tlink wonder backend must either (a) coexist — inject on the `wonder0` libmosey creates,
 as we just did — or (b) replace libmosey: bring the RF up and create the TX-capable monitor
 itself. The bring-up sequence is the remaining unknown (it is what libmosey's `mosey_start`
 does internally); tracing it is the next thread. Frame TX itself is no longer in question.
@@ -5525,7 +5525,7 @@ session is not what mac80211 transmits through; TX rides `wonder0`, the interfac
 event drove `.start()` and armed `wonder_tx_setup`. A late-added vif never participated in
 that and is receive-only.
 
-### What a standalone libawdl wonder backend now needs (no remaining unknown, only work)
+### What a standalone tlink wonder backend now needs (no remaining unknown, only work)
 
 1. Recreate `wonder0` as a monitor (nl80211 `DEL_INTERFACE` + `NEW_INTERFACE` type monitor).
 2. Send the four vendor commands over `NL80211_CMD_VENDOR`, OUI `0x001a11`: `SET_REG`(QA),
@@ -5600,14 +5600,14 @@ the vendor commands, confirming the ordering: configure (queues), then UP (appli
 - The AWDL BSSID `00:25:00:ff:94:73` is a constant here, as elsewhere in the protocol.
 - subcmd 0x08 (empty) is issued last before UP and ACKs cleanly; it is not `GET_MAC` (0x05).
   Left labelled rather than guessed — a follow-up capture that reads its *response* will say.
-- Our `libawdl-hal` already opens `NETLINK_GENERIC` (nl80211.rs) and does AF_PACKET TX
+- Our `tlink-hal` already opens `NETLINK_GENERIC` (nl80211.rs) and does AF_PACKET TX
   (rawsock.rs, finding 90). What it lacks is: the `NL80211_CMD_VENDOR` builder (OUI + subcmd +
   nested data), the DEL/NEW monitor dance, and one `RTM_SETLINK` UP over rtnetlink. That is the
   next piece of code, and it is fully specified above.
 
-## 93. ★★★ Standalone bring-up works — libawdl-hal drives wonder's RF with no libmosey
+## 93. ★★★ Standalone bring-up works — tlink-hal drives wonder's RF with no libmosey
 
-Implemented the finding-92 spec as `libawdl-hal::wonder` (a real generic-netlink backend, no
+Implemented the finding-92 spec as `tlink-hal::wonder` (a real generic-netlink backend, no
 `iw`, no `libmosey`) and brought wonder's radio up **from our own code**, on hardware, with
 nothing else driving it. This is the milestone the whole Android track was aimed at: the HAL
 replaces `libmosey` at the radio layer, proven — not argued.
@@ -5616,7 +5616,7 @@ replaces `libmosey` at the radio layer, proven — not argued.
 
 `mosey_server` (GMS) was running and the RF was already up, which would make "inject on 149
 and see frames" prove nothing — the frames could ride the existing bring-up. So the test used
-a **discriminator channel**: `awdl-inject wonder-up wonder0 44 20`. Channel 44 = 5220 MHz, and
+a **discriminator channel**: `tlink-inject wonder-up wonder0 44 20`. Channel 44 = 5220 MHz, and
 nothing else on the device sets it — GMS/libmosey use the AWDL social channels (6/44/149) only
 as libmosey configures them, and it was not running a session. No `moseyprobe` in the process
 list. So a bring-up to 5220 is unambiguously ours.
@@ -5661,24 +5661,24 @@ symlink gives one, that file gives the other. A backend written against `mt76` (
 
 ### What this establishes
 
-- **Established:** `libawdl-hal::wonder` performs the complete RF bring-up — DEL/NEW monitor,
+- **Established:** `tlink-hal::wonder` performs the complete RF bring-up — DEL/NEW monitor,
   the four OUI-`0x001a11` vendor commands with correct (including nested) attribute encoding,
   and the rtnetlink UP trigger — and then transmits AWDL frames that air. On the Pixel, with
-  no Google userspace involved in the radio path. The seam the whole `libawdl-hal` design bet
+  no Google userspace involved in the radio path. The seam the whole `tlink-hal` design bet
   on is real: everything above it is ours and portable, and the vendor layer is now driven by
   our code, not Google's.
 - **Not yet:** this is bring-up and TX, not a held AWDL session doing election/sync with a
-  real Apple peer. That is the protocol engine's job (libawdl), now that it has a radio to run
+  real Apple peer. That is the protocol engine's job (tlink), now that it has a radio to run
   on. Also untested: coexistence courtesy — our DEL_INTERFACE tears down the `wonder0` GMS may
-  hold, so a standalone libawdl and GMS AirDrop cannot run at once; that is expected (one
+  hold, so a standalone tlink and GMS AirDrop cannot run at once; that is expected (one
   radio) and not a defect.
 - subcmd `0x08` (finding 92's unidentified empty command) was replicated and the bring-up
   succeeds with it; it is still not decoded, but it is not in the way.
 
 ## 94. ★★★ Real Apple devices adopt us as master over our own wonder backend — bidirectional interop
 
-The whole stack, end to end, against real hardware. `libawdl`'s beacon/election loop, running
-on the `libawdl-hal::wonder` backend (findings 91–93), with **no libmosey anywhere in the
+The whole stack, end to end, against real hardware. `tlink`'s beacon/election loop, running
+on the `tlink-hal::wonder` backend (findings 91–93), with **no libmosey anywhere in the
 path**, held a session that real Apple devices discovered, believed, and answered.
 
 ### The run
@@ -5735,7 +5735,7 @@ tested directly, and the result is stronger than the original observation.
 
 - **Our binary contains no libmosey.** `llvm-readelf -d` on the cross-compiled `awdl`: the
   only NEEDED libraries are `libdl.so` and `libc.so`. No `dlopen` anywhere in the source. It
-  builds AWDL frames with `libawdl` and sends them over `AF_PACKET`; it cannot call into
+  builds AWDL frames with `tlink` and sends them over `AF_PACKET`; it cannot call into
   libmosey.
 - **Our netlink commands drive the bring-up.** `dmesg` during a run (with `mosey_server` just
   killed) shows *our* `SET_REG`/`SET_FREQUENCY`/`SET_FILTER`/`SET_FIXED_TX_RATE` → `Vendor
@@ -5861,17 +5861,17 @@ The data path is real on wonder: the TUN, the encapsulation, the in-window drain
 decapsulate-to-netdev RX all work end to end against a live Apple device — the first IP our
 stack has carried to and from Apple hardware with no libmosey.
 
-**libawdl does not need to implement mDNS, TLS or the transfer protocols — the Tarish daemon
+**tlink does not need to implement mDNS, TLS or the transfer protocols — the Tarish daemon
 already does all of that** (`tarishsharingd` / `libtarish_protocol`, done and tested over
-`mosey0`). libawdl's only job is to present a working netdev, the equivalent of `mosey0`. So
+`mosey0`). tlink's only job is to present a working netdev, the equivalent of `mosey0`. So
 what remains for a *usable* data path is engineering, not unknowns, and it is narrow:
 
 1. Make `awdl0` fully routable — the Android `ip rule` for its fwmark table so **unicast**
    routes (the documented trap in `tun.rs`), so a TCP/TLS connection can be established over it.
 2. The libmosey-ABI shim, so `tarishd` (which resolves its mosey lib via `TARISH_MOSEY_LIB`)
-   brings up wonder + our libawdl session + `awdl0` instead of Google's library.
+   brings up wonder + our tlink session + `awdl0` instead of Google's library.
 
-Then the end-to-end test is not "send mDNS from libawdl" — it is *point the daemon at `awdl0`
+Then the end-to-end test is not "send mDNS from tlink" — it is *point the daemon at `awdl0`
 and watch AirDrop and Quick Share work*, on the daemon's existing, proven stack. The sporadic
 multicast reception above stops mattering the moment the daemon is driving discovery over the
 interface the way it already does over `mosey0`.
@@ -5879,8 +5879,8 @@ interface the way it already does over `mosey0`.
 ## 97. ★★★ The libmosey-ABI shim works — a drop-in `.so` backed by our stack
 
 The integration seam, built and proven. Two supporting pieces first: the held-session loop was
-extracted from the CLI into a `libawdl-session` crate (`run(radio, cfg, stop) -> Stats`), so
-more than one caller can host it; then `libawdl-mosey-shim` wraps it in the exact C ABI
+extracted from the CLI into a `tlink-session` crate (`run(radio, cfg, stop) -> Stats`), so
+more than one caller can host it; then `tlink-shim` wraps it in the exact C ABI
 `tarishd` calls — `mosey_start_5` and `mosey_stop` (the only two symbols the daemon binds; see
 `tarish-daemon/src/mosey.rs`). It cross-compiles to **`libmosey_daemon_ffi.so`**, the precise
 soname the daemon searches for, exporting the mosey symbols and linking only `liblog`/`libdl`/
@@ -5898,23 +5898,23 @@ A small `dlopen` probe — the same sequence `tarishd` runs — loaded our `.so`
 ```
 mosey_start_5 -> 0xb400cd8dce98e210          (a real handle, not NULL)
 tarish_awdl: mosey shim: session starting on ch6 cc=QA
-tarish_awdl: datapath tawdl0: up on fe80::94f9:8bff:fe2f:d13a
+tarish_awdl: datapath tlink0: up on fe80::94f9:8bff:fe2f:d13a
 tarish_awdl: session up: ch6 metric 65 following +datapath
 tarish_awdl: ADOPTED cluster clock: master 72:01:e2:fd:9d:57, spread 0 us
 mosey_start_5 -> ... ; stopped                (mosey_stop tore it down cleanly)
 ```
 
-`tawdl0` came up with the derived link-local, `wonder0` aired frames, and the session even
+`tlink0` came up with the derived link-local, `wonder0` aired frames, and the session even
 synced to a live Apple master during the 14 s probe. So the shim is a working drop-in for
 Google's `libmosey_daemon_ffi.so`: point `TARISH_MOSEY_LIB` at it and the daemon gets an AWDL
 session and a data interface driven entirely by our stack.
 
 ### The one remaining wiring, and the boundary
 
-- **Interface name.** The shim's data interface is **`tawdl0`** (deliberately not Apple's
+- **Interface name.** The shim's data interface is **`tlink0`** (deliberately not Apple's
   `awdl0`, not Google's `mosey0`). `tarishd` currently hardcodes `mosey0`, so the last wiring
   step is making its `IFACE` configurable (`persist.tarish.iface` / `$TARISH_IFACE`) and
-  pointing it at `tawdl0`. Then a full `tarishd` run over the shim — mDNS, TLS, an actual
+  pointing it at `tlink0`. Then a full `tarishd` run over the shim — mDNS, TLS, an actual
   AirDrop transfer — is the end-to-end test.
 - **Single channel.** The session holds one channel; the shim takes the first the daemon
   offers. Real AirDrop discovery concentrates on ch6 while transfers use 5 GHz, so multi-channel
@@ -5945,7 +5945,7 @@ mosey shim: session starting on ch6 cc=QA
 datapath mosey0: up on fe80::94f9:8bff:fe2f:d13a
 tarishsharingd::httpd: listening on [fe80::…%mosey0]:8770
 tarishsharingd: AirDrop server up as "Pixel 10 Pro"
-libawdl_session: ADOPTED cluster clock: master 72:01:e2:fd:9d:57
+tlink_session: ADOPTED cluster clock: master 72:01:e2:fd:9d:57
 tarishd: route: fe80::/64 dev mosey0 table 111 ; rule: oif mosey0 lookup 111
 tarishsharingd::mdns: advertising as …_airdrop._tcp.local
 tarishsharingd::mdns: answered 8 record(s) to ["_airdrop._tcp.local/12"]
@@ -6000,9 +6000,9 @@ path must strip a 14-byte Ethernet header inbound and prepend one outbound.
 
 ### Update: (1) the TAP fix is done — and it proved (2) is the real wall
 
-The data interface is now a **TAP with the AWDL MAC** (`libawdl-hal::tun`), set via
+The data interface is now a **TAP with the AWDL MAC** (`tlink-hal::tun`), set via
 `SIOCSIFHWADDR` (in `tarishd`'s allowed ioctl xperms), with the 14-byte Ethernet header
-stripped/prepended in `libawdl-session`. Verified end to end on the daemon: `mosey0` came up as
+stripped/prepended in `tlink-session`. Verified end to end on the daemon: `mosey0` came up as
 `link/ether 96:f9:8b:2f:d1:3a` with the derived address, and `sharingd` advertised the **real**
 instance `96f98b2fd13a._airdrop._tcp.local` instead of `000000000000`. mDNS still flows over the
 TAP both ways — we receive the iPhone's `_airdrop` queries and answer them.
@@ -6032,7 +6032,7 @@ frames land in windows the hopping peer attends. Before writing that engine, its
 had to be measured — **how long does retuning `wonder0` cost?** A 65 ms slot cannot afford tens
 of ms of blind retune. Measured on a Pixel 10 Pro (blazer) against a live two-iPhone cluster,
 with `mosey_server`/`tarishd`/`tarishsharingd` stopped so the radio was ours alone. Tool:
-`awdl hopprobe` (new, in `libawdl-cli`), hopping 149/44/6 and timing each switch in-process.
+`awdl hopprobe` (new, in `tlink-cli`), hopping 149/44/6 and timing each switch in-process.
 
 **The vendor `SET_FREQUENCY` is a bring-up-cache primitive, not a live-retune one.** Re-issuing
 it on a *running* monitor is rejected — `EOPNOTSUPP` (os error 95), every time after the first
@@ -6080,7 +6080,7 @@ what stalls the AirDrop exchange. This is the same conclusion as findings 96 and
 sequence read off the wire and the switch cost measured: **following [6, 149] on the master's
 schedule is the piece, and nothing about the radio prevents it.**
 
-`libawdl` already parses tag 18 into the slot map and already keeps a synced `ClusterClock`, so
+`tlink` already parses tag 18 into the slot map and already keeps a synced `ClusterClock`, so
 the engine is: at each slot boundary, index the current slot from the synced TSF, look up its
 channel, `set_channel`. The instrumentation (`hopprobe`, per-channel occupancy, passive tag-18
 decode via `awdl tlv <pcap> 18`) is the controlled harness finding 98 asked for — no iPhone
@@ -6216,7 +6216,7 @@ goal):
    own code. Pure-Tarish end state, but a real bcmdhd reversing effort.
 3. **Hybrid.** Let libmosey/the Broadcom path own only radio activation + the schedule, and run
    our AWDL protocol above it. Fastest to multi-channel, but leans on Google's binary for the
-   radio — the thing libawdl exists to remove.
+   radio — the thing tlink exists to remove.
 
 ## 102. ★★★ Multi-channel is NOT the wall — our clean-room stack runs single-channel like stock, and matches it on-air, yet iOS still won't peer us
 
@@ -6342,7 +6342,7 @@ it advertises the radio's own address, so the firmware ACKs. Confirmed live: und
 `mosey0` == `wondertap0` (`62:35…`, then `96:5b…` after a restart), and the iPhone's ADDBA to
 stock carried 0 Retry with data flowing (`data_rx_frame_count > 0`).
 
-**The fix (`crates/libawdl-hal/src/wonder.rs`, `crates/libawdl-mosey-shim/src/lib.rs`).** The
+**The fix (`crates/tlink-hal/src/wonder.rs`, `crates/tlink-shim/src/lib.rs`).** The
 shim now reads `wondertap0`'s MAC over netlink at session start and passes it as
 `cfg.override_mac`, so the advertised SA, `mosey0`'s address, and RX matching all use the
 firmware-ACKed radio MAC. `wondertap0`'s MAC is a fresh random per session (stable within one),
@@ -6399,7 +6399,7 @@ are the listener; the iPhone transmits with hardware timing + ARQ).
   code, not the radio. Only after clearing the iOS suppression does the real split appear: `/Upload`
   completes over stock, loses frames over ours.
 
-**Send-datapath changes made in passing (`libawdl-session`):** `DRAIN_PER_WINDOW` 4→24,
+**Send-datapath changes made in passing (`tlink-session`):** `DRAIN_PER_WINDOW` 4→24,
 `OUTBOUND_MAX` 64→512, and `enqueue_from_tun` now applies backpressure (stop reading the tun when
 the queue is full) instead of dropping the oldest frame — a dropped TCP segment on a no-ARQ path
 is a stall, not a hiccup. Correct improvements, but they do not fix the air loss.
@@ -6438,7 +6438,7 @@ The remaining levers, in order of payoff:
 ## 106. ★★★ Software Block Ack ARQ is not viable with iOS — the iPhone ignores an ADDBA we originate, even mid-transfer
 
 Tested the "beat libmosey with real ARQ" idea (finding 105, lever 2) directly. Built the
-originator side of 802.11 Block Ack (`libawdl::blockack`: ADDBA Request / BlockAckReq builders,
+originator side of 802.11 Block Ack (`tlink::blockack`: ADDBA Request / BlockAckReq builders,
 ADDBA Response / BlockAck parsers, unit-tested) and a probe in the session that, while synced and
 in the master's window, sends an ADDBA Request to the iPhone every 2 s and logs any response.
 
@@ -6465,7 +6465,7 @@ throughput — either by matching stock's tighter injection timing (parity: mode
 complete) or by **repetition FEC**: transmit each outbound data frame N× so an independent ~10%
 loss becomes ~10%^N. Repetition needs no peer cooperation, directly attacks the measured loss, and
 if it carries a file stock cannot (stock failed 4.5 MB, finding 105) it beats libmosey after all —
-just not by the mechanism first guessed. `libawdl::blockack` stays in the tree: the parsers are
+just not by the mechanism first guessed. `tlink::blockack` stays in the tree: the parsers are
 still useful for *reading* the iPhone's BA traffic, and the builders document the attempt.
 
 ## 107. ★★★ The bulk-send loss is timing-correlated (whole windows missed), not random — repetition FEC barely helps; the fix is sync precision
@@ -6566,7 +6566,7 @@ availability windows, so each ACK waited ~a window (16–65 ms); TCP throughput 
 that inflated RTT collapsed it to ~22 fps and stalled the sender 111 times. Stock's firmware ACKs
 in hardware at ~µs, so the iPhone never waits.
 
-**Fix — immediate ACK (`libawdl-session`):** the reactive-beacon trick applied to the data path.
+**Fix — immediate ACK (`tlink-session`):** the reactive-beacon trick applied to the data path.
 When a peer just sent us a data frame it is provably awake *now*, so right after the RX drain we
 pull the kernel's freshly-generated ACKs from the tun and inject them at once — no 12 ms throttle,
 no per-window cap — instead of parking them for the next windowed drain. On device this made a
@@ -6586,7 +6586,7 @@ thread-per-connection, shared state is all `Arc`, handlers are `&self`. **Untest
 builds via Soong and the build host was unreachable this session; build and verify against the
 121-reset repro next.
 
-## 110. ★★★ Receive throughput is dominated by the daemon's connection churn, not the radio — libawdl ACK tuning is within the noise
+## 110. ★★★ Receive throughput is dominated by the daemon's connection churn, not the radio — tlink ACK tuning is within the noise
 
 Deep-dive on the "iPhone shows done, our app still receiving in chunks" report, with a device-side
 `mosey0` TCP capture (the definitive view; the on-air 802.11 counts were too coarse and their
@@ -6603,7 +6603,7 @@ What the TCP timeline shows on a 4.5 MB receive:
   it churns stale/parallel connections a live transfer goes unserviced for seconds.
 
 **The decisive observation is the variance:** the *same file* took 17.9 s, 30.5 s, 36.2 s, and
-64 s across runs. That 4× spread dwarfs any libawdl-side effect, so ACK tuning cannot be evaluated
+64 s across runs. That 4× spread dwarfs any tlink-side effect, so ACK tuning cannot be evaluated
 by single samples. A redundant-ACK experiment (inject each ACK 3× to survive loss) could not be
 shown to help and plausibly **hurt** by tripling ACK airtime into the channel's contention; it was
 reverted. `immediate-ACK` (finding 109) is kept — it has a clear mechanism and low airtime.
@@ -6613,7 +6613,7 @@ factor is the **single-threaded accept loop** (`tarish-daemon`, fixed on branch
 `httpd-concurrent-accept`, 82d94cc, unbuilt). It explains the "declined first time / works second,"
 the multi-second stalls, and the discovery flakiness prod hits on libmosey too — all above the
 transport. The next real step is to **build that fix on the build host and re-measure**, ideally
-over several runs to see through the variance, before any further libawdl ACK work. Blind
+over several runs to see through the variance, before any further tlink ACK work. Blind
 per-build tuning on a 4×-variance metric is a trap.
 
 ## 111. ★★★ Concurrent-accept built & deployed — churn and in-transfer stalls drop; remaining gaps are startup latency, no FileIcon preview, and 2.4-GHz-only
@@ -6849,7 +6849,7 @@ either**, which is *why* stock is also single-channel.
 **Conclusion:** the PHY is fine (11–22 Mbps in-burst); the ceiling is that a single-channel radio
 cannot overlap a dual-channel peer more than ~17–28 %. Matching Apple-to-Apple AirDrop speed needs
 **true multi-channel hopping**, which this silicon/driver does not provide (and stock doesn't get
-either). This is silicon-selection territory (AWDL-RESEARCH-BRIEF), not the daemon or libawdl.
+either). This is silicon-selection territory (AWDL-RESEARCH-BRIEF), not the daemon or tlink.
 
 **Still to verify (user's proposed test):** run the **full stock stack on `mustang`** (Google's own
 mosey_server/MoseyApp orchestration, not libmosey-under-tarishd) and watch for on-air frames on
@@ -6930,12 +6930,12 @@ bw=2 → new MAC → UP`), the on-demand radio cycle — still no schedule comma
 finding 115) we got **395 KB/s**, vs stock's **7–8 MB/s at the identical radio config**. Same channel,
 same width — 20× apart. So the residual gap is **NOT the vendor commands / radio setup**; it is the
 **AWDL protocol layer** — sync precision and, most likely, availability-window overlap with the peer.
-libmosey keeps itself in the peer's 5 GHz windows far better than our libawdl does. That is the next
+libmosey keeps itself in the peer's 5 GHz windows far better than our tlink does. That is the next
 thing to close (not another vendor command to copy).
 
 **Concrete next steps for our stack:** (1) default to **ch149 @ 80 MHz** like stock instead of ch6
 (revisit tarishd `channels_for`, and how stock stays discoverable + coexists on 5 GHz); (2) fix the
-bring_up TX rate to **mcs=3**; (3) then attack the residual duty-cycle/availability gap in libawdl's
+bring_up TX rate to **mcs=3**; (3) then attack the residual duty-cycle/availability gap in tlink's
 sync — measure availability-window overlap with the peer on ch149 and match libmosey's.
 
 **GMS-build cleanup gotcha (for repeating this):** a full GMS image build with tarish present fails —
@@ -6981,7 +6981,7 @@ piece. Bench: mustang = rooted stock (reference), blazer = our stack, both on th
 > help our SEND throughput, but the **RECEIVE 20× is NOT PHY rate** — it is back to the
 > **availability-window duty cycle** (finding 115: we overlap the peer ~28% on ch149; stock ~fully).
 > Both advertise `[149]` / AW 16 TU, so the delta is in the **presence/availability we advertise or
-> how tightly we hold the peer's windows** — protocol-layer libawdl work, the real task-7 target.
+> how tightly we hold the peer's windows** — protocol-layer tlink work, the real task-7 target.
 > NEXT: decode + compare the Sync-Parameters presence/availability (extended AW, aw_periods, presence
 > mode) between stock (mustang capture) and ours, and measure per-window overlap; keep the mcs fix.
 
@@ -7014,11 +7014,11 @@ protocol/config value we can copy.** Closing it needs one of: (a) a working live
 the monitor (driver-gated, currently EOPNOTSUPP); (b) driving wonder.ko's firmware channel-schedule
 so the radio attends multiple channels like stock's data path does (the "stub" schedule command —
 re-examine whether it can be made to work); or (c) using the firmware data interface (wondertap0)
-for bulk instead of monitor injection. All three are radio/driver-level, not libawdl-protocol tweaks.
+for bulk instead of monitor injection. All three are radio/driver-level, not tlink-protocol tweaks.
 The mcs fix (118) stays for SEND; the availability advertisement already matches; the frontier is the
 channel-following capability.
 
-## 120. ★★★ THE isolation: tarishd + libmosey @ ch149 is FAST (3.4 MB/s). Prod was slow from the ch6 default, NOT the daemon. Clean-room gap = libawdl vs libmosey at identical everything
+## 120. ★★★ THE isolation: tarishd + libmosey @ ch149 is FAST (3.4 MB/s). Prod was slow from the ch6 default, NOT the daemon. Clean-room gap = tlink vs libmosey at identical everything
 
 The operator's reframe cracked it: prod (tarishd + **real libmosey**) is slow + flaky, while
 mosey_server + the *same* libmosey is fast — so the variable is the daemon, not wonder.ko/hardware.
@@ -7028,7 +7028,7 @@ passes mosey_server — verified in mosey_server's own log; channel_hopping=fals
 not allowed in BOTH).
 
 **Result: tarishd + libmosey @ ch149 = ~24 MB in a ~7 s burst, peak 4.1 MB/s, ~3.4 MB/s sustained —
-BLAZING FAST**, ~10× our libawdl and in mosey_server's league.
+BLAZING FAST**, ~10× our tlink and in mosey_server's league.
 
 So the answer to "why does mosey_server+libmosey work but tarishd+libmosey doesn't": **it DOES —
 on ch149.** tarishd's `channels_for` defaults to **ch6** (Wi-Fi-5GHz coexistence protection), and
@@ -7040,9 +7040,9 @@ the channel default, not the daemon.** tarishd is fine. This corrects findings 1
 1. **PROD FIX (big, easy):** default tarishd to **ch149** (not ch6). ~138 KB/s → ~3.4 MB/s for the
    real-libmosey prod build. Caveat: 5 GHz Wi-Fi coexistence (DBS can't hold two 5 GHz channels) —
    stock tolerates it; gate it on the STA band (`channels_for` already has the machinery).
-2. **CLEAN-ROOM libawdl gap (the real remaining work):** at the SAME ch149, same daemon (tarishd),
-   same radio — **libmosey = 3.4 MB/s, our libawdl shim = 395 KB/s (~9× slower).** Every other
-   variable is now held constant, so the gap is unambiguously in **our libawdl AWDL implementation**
+2. **CLEAN-ROOM tlink gap (the real remaining work):** at the SAME ch149, same daemon (tarishd),
+   same radio — **libmosey = 3.4 MB/s, our tlink shim = 395 KB/s (~9× slower).** Every other
+   variable is now held constant, so the gap is unambiguously in **our tlink AWDL implementation**
    (RX handling / realized presence / sync), and **libmosey-under-tarishd-@149 is the exact reference
    to diff against** on the same bench (blazer). Advertised Sync-Params already match (119); the gap
    is in runtime behaviour, measurable frame-by-frame against libmosey on the identical setup.
@@ -7053,18 +7053,18 @@ BOTH prod symptoms the test team reported (slow transfers AND unstable discovery
 cause: the ch6 default in `channels_for`. The prod fix (default ch149) resolves both. Discovery on
 ch149 is stable because that is where the peer actually spends its time / where mosey's social+data
 alignment lands — ch6 discovery was the flaky path. (Our earlier "ch149 flakes discovery" note was
-about OUR libawdl shim on ch149, not libmosey — libmosey@149 discovers fine.)
+about OUR tlink shim on ch149, not libmosey — libmosey@149 discovers fine.)
 
-## 121. ★★★ The libawdl 9× at ch149 is our RX/ACK DELIVERY RATE: libmosey pushes ~2150 data-fps, we sustain ~563. Frame-diffed on the bench
+## 121. ★★★ The tlink 9× at ch149 is our RX/ACK DELIVERY RATE: libmosey pushes ~2150 data-fps, we sustain ~563. Frame-diffed on the bench
 
-Ran the clean A/B the whole session was building toward: blazer (our libawdl @149) and mustang
+Ran the clean A/B the whole session was building toward: blazer (our tlink @149) and mustang
 (libmosey @149), both rooted, same iPhone, same room, dual-capture (`mosey0` TCP + `wonder0` on-air)
 on the same file transfer.
 
 **On-air data-frame rate (`wonder0`, frames >600 B = real data, not the ~300 B action frames):**
 - **libmosey (mustang): peak ~2150 fps** — smooth, "finished in a flash," progress in sync on both
   devices.
-- **our libawdl (blazer): peak ~563 fps** — ~4× slower, plus stop-start pauses → ~335 KB/s and a
+- **our tlink (blazer): peak ~563 fps** — ~4× slower, plus stop-start pauses → ~335 KB/s and a
   hung tail.
 
 **Where our stall time goes (blazer `mosey0`):** 4.44 MB in 13.6 s, 48% of it in gaps (one 3.9 s
@@ -7081,12 +7081,12 @@ the iPhone hangs on "sending" (the 3.9 s tail). Separate from throughput; fix al
 **So task 7 is now a hard target: our receive/acknowledge path delivers ~563 fps; libmosey does
 ~2150 — we need ~4× on our RX/ACK rate.** Mechanism not yet pinned (careful not to over-call): either
 our software ACK cadence pacing the iPhone (our `mosey0` ACKs are ~4.2 ms apart), or our RX loop not
-draining/decoding/delivering frames fast enough. NEXT diagnostic: measure our libawdl RX-loop
+draining/decoding/delivering frames fast enough. NEXT diagnostic: measure our tlink RX-loop
 throughput in isolation (how many frames/s it can read+decode+deliver to the tun) and our ACK
-emission latency per received burst, vs libmosey's. Bench stays: blazer=libawdl, mustang=libmosey,
+emission latency per received burst, vs libmosey's. Bench stays: blazer=tlink, mustang=libmosey,
 both @149 rooted. (Prod ch149 default already landed, finding 120/task 8; mcs=3 for send, 118.)
 
-## 122. ★★★ FIXED: raising RX max_drain (4/32 -> 32/128) took libawdl from ~335 KB/s to 2.16 MB/s (~6.5x), peak 2699 fps > libmosey's 2150
+## 122. ★★★ FIXED: raising RX max_drain (4/32 -> 32/128) took tlink from ~335 KB/s to 2.16 MB/s (~6.5x), peak 2699 fps > libmosey's 2150
 
 Finding 121's diagnosis was right and the fix is a two-number change. Our session RX loop drained at
 most `max_drain` frames per window-aligned visit (`4` when <4 ms of slack, else `32`), and we only
@@ -7095,11 +7095,11 @@ the socket is empty, so the cap only ever bit on a real burst: a full window's w
 frames arrived, we took 32 and left the rest in the kernel buffer, and the iPhone (pacing to the ACKs
 we could then generate) throttled down to us.
 
-Raised it to `32`/`128` (crates/libawdl-session/src/lib.rs). Measured on blazer @ch149, same bench:
+Raised it to `32`/`128` (crates/tlink-session/src/lib.rs). Measured on blazer @ch149, same bench:
 - **peak on-air data-frame rate 563 → 2699 fps** (libmosey ~2150 — we now match/exceed it).
 - **active throughput ~335 KB/s → 2.16 MB/s (~6.5×)**; flawless on a 29 MB file per the operator.
 
-So the clean-room libawdl now performs in libmosey's league on identical hardware/channel — the
+So the clean-room tlink now performs in libmosey's league on identical hardware/channel — the
 weeks-old "our stack is just slow" is resolved for RECEIVE. Remaining headroom to libmosey's 3.4 MB/s
 is modest and can be chased later (further drain/ACK tuning, or the completion-signal latency below).
 
@@ -7120,20 +7120,20 @@ and return `Disposition::Close` (like the error path). Deployed → completion i
 
 **Setup/start lag — REAL and unfixed on our stack (CORRECTED: libmosey starts instant, we don't).**
 The operator's "prompt right away, start right away" was **mustang (libmosey)**, not blazer — I
-mis-attributed it. On blazer (our libawdl) the start is still slow. Setup timeline to first bulk byte
+mis-attributed it. On blazer (our tlink) the start is still slow. Setup timeline to first bulk byte
 (`SYN → TLS → /Discover → /Ask → accept → /Upload`): a 99 B control frame sent, lost, and
 **retransmitted ~0.23 s later (twice)**, plus a 0.31 s gap before the 1207 B /Discover render — **~1 s
 total**. Small setup frames dropped on our no-ARQ inject path, each an RTO (~0.2–0.3 s); same class as
 finding 113 / the completion bug. libmosey's firmware path doesn't drop them → instant start. **This
-is the remaining libawdl gap (START phase).** Fix: send the setup-phase control frames with the
+is the remaining tlink gap (START phase).** Fix: send the setup-phase control frames with the
 small-burst redundancy (`ACK_REPEAT`); first check why the existing SMALL_BURST_MAX/ACK_REPEAT path
 isn't already covering these TLS/HTTP records (window-alignment timing, or they go out before the
 immediate-ACK path is active).
 
-**Net (this session): our clean-room libawdl now does the AirDrop receive flow well except START** —
+**Net (this session): our clean-room tlink now does the AirDrop receive flow well except START** —
 ~2 MB/s transfer (finding 122) and clean instant finish (this) on our own AWDL stack, no libmosey.
 The START phase is still ~1 s slower than libmosey (lost setup control frames, above) — the one
-remaining libawdl gap. Shipped: identity/ghost fix (114), ch149 default (120), mcs=3 send (118),
+remaining tlink gap. Shipped: identity/ghost fix (114), ch149 default (120), mcs=3 send (118),
 RX max_drain (122), /Upload close (123). Remaining: setup-frame reliability (start lag).
 
 ## 124. ★★★ Remaining gap: tap→offer ~14–18 s (mustang seamless) — AWDL/mDNS rendezvous, below TCP
@@ -7170,7 +7170,7 @@ does is fast; the wait is the iPhone idle between rendering us and sending the o
 internals and, most likely, **BLE** (which triggers the offer and is not in Wi-Fi captures). Wi-Fi
 captures have hit their limit here. To settle whether it's real vs look-time: **stopwatch A/B** (time
 tap→start on blazer vs mustang; mustang ~1 s per operator). If real, it's the **app's BLE path**
-(tarish-app), not the daemon/libawdl — investigate with a BLE/HCI (btsnoop) capture, not Wi-Fi.
+(tarish-app), not the daemon/tlink — investigate with a BLE/HCI (btsnoop) capture, not Wi-Fi.
 
 **124 CORRECTED magnitude (stopwatch A/B): ~2–4 s, not 13–18 s.** With the accept prompt enabled the
 operator timed tap→prompt directly: **blazer ~3–5 s, mustang ~1 s.** So the real extra latency on our
@@ -7198,14 +7198,14 @@ but the prize is ~2-4s and the big wins (transfer 122, completion 123) are done.
 Operator pushed to measure mustang instead of guessing — decisive. Decoded each device's OWN election
 params on-air (same room, same iPhones):
 
-| field | mustang (libmosey) | blazer (our libawdl) |
+| field | mustang (libmosey) | blazer (our tlink) |
 |---|---|---|
 | master it names | `7a:4a:0f:8a:be:d5` (the sender's cluster master) | **`72:cd:01:60:74:1b`** (a DIFFERENT master) |
 | distance (v1) | **1** (synced, one hop) | **255** (AWDL "unsynced/infinity") |
 | distance (v2) | 1 | **2830** (garbage — should be ~1) |
 | self_metric | 1 | 65 |
 
-So **our libawdl does not reliably join the *sender's* AWDL cluster.** libmosey adopts the same master
+So **our tlink does not reliably join the *sender's* AWDL cluster.** libmosey adopts the same master
 the sending iPhone uses (7a:4a) at distance 1. We adopt a different master (72:cd — likely the other
 iPhone in range, "mini" vs "air", metrics are close: 528 vs 538) and advertise distance 255 (unsynced)
 with a garbage v2 distance (2830). The iPhone then sees us as an out-of-cluster / unsynced peer and

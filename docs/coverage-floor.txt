@@ -1,4 +1,4 @@
-# libawdl coverage floor -- the WORST-classified TLV of each tag.
+# tlink coverage floor -- the WORST-classified TLV of each tag.
 #
 # Regenerate with:  awdl coverage captures/*.pcap --update-baseline docs/coverage-floor.txt
 # Check with:       awdl coverage captures/*.pcap --baseline docs/coverage-floor.txt

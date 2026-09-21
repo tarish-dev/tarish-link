@@ -1,0 +1,23 @@
+[package]
+name = "tlink-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A drop-in libmosey_daemon_ffi ABI backed by tlink + the wonder backend."
+
+[lib]
+# tarishd dlopens this by soname; it must be a C dynamic library exposing the mosey_* symbols.
+name = "mosey_daemon_ffi"
+crate-type = ["cdylib"]
+
+[dependencies]
+tlink = { path = "../tlink" }
+tlink-hal = { path = "../tlink-hal" }
+tlink-session = { path = "../tlink-session" }
+log = "0.4"
+
+# So the session's log output reaches logcat, and we can read persist.tarish.iface, when
+# tarishd loads us on a phone.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+libc = "0.2"

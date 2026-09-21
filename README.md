@@ -1,4 +1,4 @@
-# tarish-libawdl
+# tarish-link
 
 **An open AWDL implementation, built from captures — the replacement for
 `libmosey_daemon_ffi.so`, the closed Google library the AirDrop stack sits on.**
@@ -57,14 +57,14 @@ needs no Google code at all.
 ## How it is built
 
 ```
-crates/libawdl        the protocol engine. No I/O, no OS dependency — bytes in, structures out,
+crates/tlink        the protocol engine. No I/O, no OS dependency — bytes in, structures out,
                       frames out. Election, sync, channel sequence, the data header.
-crates/libawdl-hal    the radio seam: a Radio trait, a mainline nl80211/monitor backend, and
+crates/tlink-hal    the radio seam: a Radio trait, a mainline nl80211/monitor backend, and
                       the wonder.ko backend (netlink vendor commands + AF_PACKET), plus the
                       awdl0 TUN.
-crates/libawdl-cli    the CLI: capture and dissect a pcap, or run a live session (beacon,
+crates/tlink-cli    the CLI: capture and dissect a pcap, or run a live session (beacon,
                       follow, datapath).
-crates/awdl-inject    a thin injector — the smallest thing that proves frames reach the air.
+crates/tlink-inject    a thin injector — the smallest thing that proves frames reach the air.
 captures/             real captures kept as fixtures, so findings are reproducible.
 docs/                 what each field turned out to mean, and how we know.
 ```
