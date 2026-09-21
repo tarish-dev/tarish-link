@@ -292,3 +292,15 @@ pub unsafe extern "C" fn mosey_reset(_which: u8) {}
 pub unsafe extern "C" fn mosey_dump() {
     log::info!("mosey shim: dump (no state exported)");
 }
+
+/// `const char *mosey_version(void)` — the tlink shim's version, so `tarishd` can report
+/// the AWDL stack's version to the app. NOT part of Google's libmosey ABI: it is an
+/// addition of ours, so the daemon must `dlsym` it and treat its absence as "unknown"
+/// (an older pin, or the real libmosey, will not export it).
+///
+/// # Safety
+/// Returns a pointer to a static NUL-terminated string, valid for the process lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn mosey_version() -> *const std::os::raw::c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const std::os::raw::c_char
+}
