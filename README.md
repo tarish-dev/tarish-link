@@ -3,8 +3,10 @@
 **An open AWDL implementation, built from captures — the replacement for
 `libmosey_daemon_ffi.so`, the closed Google library the AirDrop stack sits on.**
 
-Apple Wireless Direct Link is how AirDrop moves bytes. This is a clean-room implementation of
-it, written from the frame format rather than around an existing library. It began as a parser
+Apple Wireless Direct Link is how AirDrop moves bytes. This is an **independent
+reimplementation** of it — built from the frame format, published research (OWL), the
+Wireshark AWDL dissector, our own over-the-air captures, and observed `libmosey` behaviour,
+not from anyone's source (see [PROVENANCE.md](PROVENANCE.md)). It began as a parser
 — Wireshark can already put AWDL on a screen, so the point was to *understand* the protocol
 well enough to implement it — and it is now a transmitting implementation that, on a Pixel with
 Google's `libmosey` daemon killed, brings the radio up, wins Apple's master election against
