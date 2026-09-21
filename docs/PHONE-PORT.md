@@ -1,4 +1,17 @@
-# Running libawdl on a phone — ON HOLD
+# Running libawdl on a phone — DONE (this doc is the pre-work, now superseded)
+
+> **STATUS 2026-09-21 — no longer on hold; the port happened and works.** libawdl runs on a
+> Pixel 10 Pro (blazer) driving `wonder.ko`, doing AirDrop receive **and** send against a
+> real iPhone under SELinux enforcing with zero Google AWDL code. The "gate" and phases
+> below were answered: monitor injection works on the wonder wiphy, and what remained was
+> RX/TX tuning, not feasibility — see `docs/FINDINGS.md` 104–125. The old "libmosey is not
+> being removed / libawdl sits alongside" framing is also superseded: **libawdl now replaces
+> libmosey in prod images.** The swap is a drop-in `.so` (same soname, same five FFI
+> symbols) via `../grapheneos/scripts/gos-libawdl.sh`; the build recipe is
+> `../grapheneos/docs/LIBAWDL-PROD.md`. Everything below is the original pre-work, kept for
+> its reasoning.
+
+---
 
 *Written 2026-09-14 and deliberately parked. Everything here is preparation for a track that
 has not started; nothing in it is needed for the work on the Pi.*
