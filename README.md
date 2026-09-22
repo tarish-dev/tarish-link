@@ -31,10 +31,16 @@ Proven on a Pixel 10 Pro, against live Apple devices, with **no `libmosey` in th
 
 It runs on two backends behind one radio trait: **mainline `nl80211` + monitor mode** (an ALFA
 adapter on `mt76`, no vendor code — the reference), and the **`wonder.ko`** backend (the Pixel).
-The remaining work before Tarish's shipping daemon rides this instead of `libmosey` is a
-routable `awdl0` for unicast and the `libmosey`-ABI shim — the daemon already owns mDNS, TLS
-and the transfers. See [docs/FINDINGS.md](docs/FINDINGS.md) for the evidence behind every claim
-above.
+**Tarish's production builds now ride this instead of `libmosey`:** the `libmosey`-ABI shim is
+done (`tlink-shim`, which exports the same soname + five FFI symbols and is pinned into the
+image by the integrator), and the unicast data path is up. What is **proven on hardware** is
+the receive side and the core link (bring-up, election, sync, discovery, receive). What is
+**still being hardened** is **send throughput** and **multi-channel scheduling** — a single
+fixed channel (ch149) reaches the ch149 cluster but not every iPhone generation (the ch6
+rendezvous), which is why some peers (e.g. an iPhone mini) don't yet connect. Until those land,
+Google's `libmosey` remains available as the drop-in fallback (same ABI). So: **the AWDL
+userspace we ship is open; the radio module `wonder.ko` and its firmware are not.** See
+[docs/FINDINGS.md](docs/FINDINGS.md) for the evidence behind every claim above.
 
 ---
 
