@@ -502,7 +502,14 @@ impl Cluster {
             // own frames are filtered, the estimate would be frozen at zero observations
             // for the rest of the run.
             if self.self_addr == Some(e.master) {
-                *self.adopters.entry(src).or_insert(0) += 1;
+                // Cap distinct adopter MACs (security review, finding #9). Every spoofed source
+                // that names us as master would otherwise add a permanent entry for the life of
+                // the session — trivial unbounded growth from the air. Keep counting known
+                // adopters, but stop taking on new MACs past the cap.
+                const MAX_ADOPTERS: usize = 256;
+                if self.adopters.contains_key(&src) || self.adopters.len() < MAX_ADOPTERS {
+                    *self.adopters.entry(src).or_insert(0) += 1;
+                }
                 return;
             }
 

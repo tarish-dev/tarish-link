@@ -135,11 +135,22 @@ pub unsafe extern "C" fn mosey_start_5(
         .or_else(|| offered.contains(&149).then_some(149))
         .unwrap_or(offered[0]);
     log::info!("mosey shim: offered channels {offered:?}, sitting on ch{channel}");
+    // FAIL CLOSED on the regulatory domain (security review, finding #4). No assumed country:
+    // "00" is the world domain — the most restrictive — so without a real code from tarishd the
+    // radio uses conservative rules rather than an arbitrary guess ("QA", which happens to allow
+    // ch149). tarishd passes the SIM/locale country in normal operation; this only bites if it
+    // does not, and then restricting is the correct, legal behaviour. Channel bring-up
+    // separately refuses a no-initiate-radiation channel (Radio::set_regulatory / caps), so an
+    // unpermitted channel is never transmitted on.
     let cc: [u8; 2] = if country.is_null() {
-        *b"QA"
+        *b"00"
     } else {
         let b = unsafe { CStr::from_ptr(country) }.to_bytes();
-        [b.first().copied().unwrap_or(b'Q'), b.get(1).copied().unwrap_or(b'A')]
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1].is_ascii_alphabetic() {
+            [b[0], b[1]]
+        } else {
+            *b"00" // malformed/short code → world domain, not a guessed country
+        }
     };
 
     // Bring the radio up here, on the caller's thread, so a failure is reported synchronously
@@ -235,12 +246,22 @@ pub unsafe extern "C" fn mosey_start_5(
     let thread = std::thread::spawn(move || {
         let mut radio = radio;
         log::info!("mosey shim: session starting on ch{channel} cc={}{}", cc[0] as char, cc[1] as char);
-        match tlink_session::run(&mut radio, &cfg, &stop_thread) {
-            Ok(s) => log::info!(
+        // Catch a panic in the session (security review, finding #7). Without this a panic
+        // unwinds the thread silently: mosey_stop's join ignores the error and tarishd keeps
+        // believing the AWDL link is up. Turn it into a loud, distinct error so a crash in
+        // parsing/timing surfaces instead of a link that is dead but reported live.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tlink_session::run(&mut radio, &cfg, &stop_thread)
+        }));
+        match outcome {
+            Ok(Ok(s)) => log::info!(
                 "mosey shim: session ended — {} MIF/{} PSF sent, {} data delivered",
                 s.sent_mif, s.sent_psf, s.dp_recvd
             ),
-            Err(e) => log::error!("mosey shim: session error: {e:?}"),
+            Ok(Err(e)) => log::error!("mosey shim: session error: {e:?}"),
+            Err(_) => log::error!(
+                "mosey shim: SESSION PANICKED — AWDL link is DOWN. tarishd should restart it."
+            ),
         }
     });
 

@@ -1476,6 +1476,7 @@ fn beacon(managed: &str, monitor: &str, channel: u8, secs: u64, psf_per_mif: u32
         metric_floor,
         per_window,
         windows,
+        beacon_min_gap_us: 60_000, // match Config::default(); the CLI has no flag for it
         // --hop now means channel-LOCK (wonder cannot live-retune — findings 100/101): lock to
         // our channel and transmit only in the master windows on it. It implies --follow.
         follow: follow || hop,

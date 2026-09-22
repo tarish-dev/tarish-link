@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)] // security review: keep these pure-logic crates unsafe-free
 //! The held AWDL session: one loop that listens, keeps the cluster clock, transmits in the
 //! windows it advertises, and carries the data path — over any [`tlink_hal::Radio`].
 //!

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)] // security review: keep these pure-logic crates unsafe-free
 //! AWDL frame parsing.
 //!
 //! **This crate does no I/O and knows nothing about capture.** It takes a slice of

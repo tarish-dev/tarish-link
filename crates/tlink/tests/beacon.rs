@@ -27,7 +27,7 @@ fn a_beacon_frame_parses_as_awdl_through_our_own_reader() {
     assert_eq!(af.fixed.subtype, SUBTYPE_MIF);
     assert_eq!(af.fixed.target_tx_time, 0x1234_5678);
     let tags: Vec<u8> = af.tlvs().map(|t| t.tag).collect();
-    assert_eq!(tags, vec![4, 5, 18, 24, 12, 7, 17, 21, 16, 2]);
+    assert_eq!(tags, vec![4, 5, 18, 24, 12, 7, 6, 17, 21, 16, 2]);
 }
 
 /// Our frame carries every tag an Apple device sends except the four we know about.
@@ -42,7 +42,9 @@ fn the_beacon_omits_only_the_tags_we_cannot_fill() {
     let ours: BTreeSet<u8> = ActionFrame::parse(&f[24..]).unwrap().tlvs().map(|t| t.tag).collect();
 
     let missing: Vec<u8> = theirs.difference(&ours).copied().collect();
-    assert_eq!(missing, vec![6, 32, 33], "tag 7 is filled now; 6 and the 6 GHz pair are not");
+    // Tag 6 (Service Parameters / AirDrop bloom filter) is filled now too — only the 6 GHz
+    // channel-sequence pair (32, 33) remains unfilled.
+    assert_eq!(missing, vec![32, 33], "6 is filled now; only the 6 GHz pair is not");
 }
 
 /// PSF and MIF differ by identity, not by weight — which is what the captures show, and
@@ -61,8 +63,8 @@ fn a_psf_carries_the_state_set_without_the_identity() {
 
     let ptags: Vec<u8> = psf.tlvs().map(|t| t.tag).collect();
     let mtags: Vec<u8> = mif.tlvs().map(|t| t.tag).collect();
-    assert_eq!(ptags, vec![4, 5, 18, 24, 12, 7, 17, 21], "the measured PSF set, less tag 6");
-    assert_eq!(mtags, vec![4, 5, 18, 24, 12, 7, 17, 21, 16, 2], "plus Arpa and services");
+    assert_eq!(ptags, vec![4, 5, 18, 24, 12, 7, 6, 17, 21], "the measured PSF set, incl tag 6");
+    assert_eq!(mtags, vec![4, 5, 18, 24, 12, 7, 6, 17, 21, 16, 2], "plus Arpa and services");
 
     // Smaller, but nothing like half: the state set dominates both.
     assert!(psf_bytes.len() < mif_bytes.len());
