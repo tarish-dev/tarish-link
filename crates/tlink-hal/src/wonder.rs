@@ -701,6 +701,40 @@ impl Wonder {
     }
 }
 
+/// Bring a wonder interface DOWN over rtnetlink — the inverse of [`Wonder::set_link_up`].
+///
+/// Downing `wondertap0` (the `WL_IF_TYPE_ART` monitor) makes the Broadcom driver `del_iface`
+/// it and `dhd_monitor_stop`, which RELEASES the AWDL ART role and frees the chip's single
+/// Wi-Fi P2P slot — so a Quick Share `P2P_GO` can form. `mosey_stop` alone does not do this:
+/// it drops `tlink0` but leaves the ART iface registered. Validated on a Pixel 10 Pro
+/// (blazer) 2026-09-22. `mosey_start_5` recreates the interface, so this is safe to call on
+/// every stop. Best-effort: a missing interface or a denied SETLINK is logged, not fatal —
+/// the caller is tearing down.
+pub fn set_iface_down(name: &str) -> Result<()> {
+    // SAFETY: `name` is NUL-terminated by CString; if_nametoindex is a pure lookup.
+    let cname = std::ffi::CString::new(name)
+        .map_err(|_| Error::Radio(format!("bad iface name {name:?}")))?;
+    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if ifindex == 0 {
+        // Already gone (e.g. the driver removed it, or a prior stop). Nothing to do.
+        return Ok(());
+    }
+    let mut rt = NlSock::open(libc::NETLINK_ROUTE)?;
+    // ifinfomsg: family(u8) pad(u8) type(u16) index(i32) flags(u32) change(u32).
+    let mut body = Vec::with_capacity(16);
+    body.push(0u8); // AF_UNSPEC
+    body.push(0u8); // pad
+    body.extend_from_slice(&0u16.to_ne_bytes()); // ifi_type
+    body.extend_from_slice(&(ifindex as i32).to_ne_bytes());
+    body.extend_from_slice(&0u32.to_ne_bytes());     // ifi_flags: UP bit CLEARED = down
+    body.extend_from_slice(&IFF_UP.to_ne_bytes());   // ifi_change: only the UP bit
+    let mut m = NlMsg::rtnl(RTM_SETLINK, NLM_F_REQUEST, 0, &body);
+    let mut nm = name.as_bytes().to_vec();
+    nm.push(0);
+    m.attr(IFLA_IFNAME, &nm);
+    rt.send_acked(m, "RTM_SETLINK down")
+}
+
 /// 802.11 channel number → centre frequency in MHz. Covers the 2.4 and 5 GHz plans AWDL
 /// uses; the 5 GHz social channels (44, 149) are the ones that matter here.
 fn channel_to_mhz(ch: u8) -> Result<u32> {

@@ -263,7 +263,20 @@ pub unsafe extern "C" fn mosey_stop(handle: *mut c_void) -> *mut c_void {
     if let Some(t) = shim.thread.take() {
         let _ = t.join();
     }
-    log::info!("mosey shim: session stopped");
+    // Release the chip's single Wi-Fi P2P slot for an off-network Quick Share Wi-Fi Direct
+    // group. Dropping the session (above) frees `tlink0` but leaves `wondertap0` — the
+    // `WL_IF_TYPE_ART` monitor — registered, so the driver still refuses a `P2P_GO`. Downing
+    // wondertap0 makes it `del_iface` + `dhd_monitor_stop`, which releases the ART role;
+    // wonder0 follows for a clean teardown. `mosey_start_5` recreates both, so this is safe on
+    // every stop. Best-effort — a missing iface or denied SETLINK is logged, not fatal.
+    // Validated on a Pixel 10 Pro (blazer) 2026-09-22; see docs/COEXISTENCE.md.
+    if let Err(e) = tlink_hal::wonder::set_iface_down("wondertap0") {
+        log::warn!("mosey shim: could not down wondertap0 on stop ({e:?}); P2P slot may stay held");
+    }
+    if let Err(e) = tlink_hal::wonder::set_iface_down(WONDER_IFACE) {
+        log::warn!("mosey shim: could not down {WONDER_IFACE} on stop ({e:?})");
+    }
+    log::info!("mosey shim: session stopped (AWDL torn down, P2P slot released)");
     std::ptr::null_mut()
 }
 
