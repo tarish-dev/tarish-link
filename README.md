@@ -46,8 +46,10 @@ userspace we ship is open; the radio module `wonder.ko` and its firmware are not
 
 ## Why it exists
 
-Tarish's AirDrop works because it sits on two Google binaries that ship in the Pixel vendor
-image. This project opens the load-bearing one:
+Tarish's AirDrop **used to** work by sitting on two Google binaries that ship in the Pixel
+vendor image. This project opened the load-bearing one, and production now rides it — the
+"Today" column below is the situation this project was started to change, not the situation
+now:
 
 | Layer | Today | This project |
 |---|---|---|
