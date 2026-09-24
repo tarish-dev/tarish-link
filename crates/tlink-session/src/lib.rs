@@ -844,6 +844,27 @@ fn parse_awdl(
     for t in tlv::Tlvs::new(af.tagged) {
         match t.tag {
             4 => sync = SyncParams::parse(t.value),
+            // Tag 7 = HT Capabilities. We decode this type everywhere else and have never
+            // looked at it here, which is why every TxParams in the tree is a constant chosen
+            // before any peer exists (tlink-shim lib.rs:171, nss: 2) while stock rate-adapts.
+            //
+            // LOGGED, NOT ACTED ON, deliberately. rx_mcs_bitmap is the deciding field: in HT,
+            // MCS 0-7 is one spatial stream and 8-15 is two. If a peer advertises 0x00FF it
+            // cannot decode our nss=2 at all; if 0xFFFF the stream count is not its problem
+            // and the gap is rate adaptation. Nobody has read this from a real iPhone yet, so
+            // changing the transmit rate now would be guessing — and the rate is radio-wide,
+            // so a wrong guess degrades the peers that currently work.
+            7 => {
+                if let Some(ht) = tlink::state::HtCapabilities::parse(t.value) {
+                    log::info!(
+                        "peer {} HT caps: rx_mcs_bitmap=0x{:04x} info=0x{:04x} ampdu=0x{:02x}                          (MCS 8-15 set => 2 spatial streams)",
+                        tlink::dot11::Mac(d.src.0),
+                        ht.rx_mcs_bitmap,
+                        ht.info,
+                        ht.ampdu_params
+                    );
+                }
+            }
             18 => chanseq = ChannelSequence::parse(t.value),
             24 => elect = ElectionParamsV2::parse(t.value),
             _ => {}

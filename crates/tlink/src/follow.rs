@@ -376,7 +376,33 @@ impl ClusterClock {
     /// comfortably inside the right window when aimed at its middle.
     pub fn is_usable(&self) -> bool {
         let half_slot = self.slot_us() / 2;
-        self.observations() >= 4 && self.spread_us().is_some_and(|s| s / 2 < half_slot)
+        if self.observations() >= 4 && self.spread_us().is_some_and(|s| s / 2 < half_slot) {
+            return true;
+        }
+        // PROVISIONAL SYNC, and it exists to break a feedback loop rather than to be accurate.
+        //
+        // Measured on blazer 2026-09-24: a cluster re-election left us unsynced for FIVE
+        // MINUTES, during which an iPhone was invisible to us while two other devices could
+        // see it perfectly. A second re-election minutes later recovered in 554 ms. Same code,
+        // same bar; the only difference was the new master's slot count -- 3 slots versus 6.
+        //
+        // THE LOOP: a master change calls reset(), zeroing observations. Unsynced, we are not
+        // inside the master's availability window, so we MISS the very frames needed to get
+        // back to four. Being blind is what keeps us blind, and a sparsely scheduled master
+        // cannot pull us out of the blackout it caused.
+        //
+        // WHY ONE SAMPLE IS ENOUGH TO AIM WITH: the phase estimate is newest-wins, not an
+        // average -- see phase_us(), and OWL's awdl_sync_update_last does the same. A single
+        // fresh anchor from the current master therefore already yields the correct phase. The
+        // four-observation bar is a CONFIDENCE test (it needs >=2 samples to have a spread at
+        // all), not a correctness one. Refusing to aim at a phase we already hold is what cost
+        // the five minutes.
+        //
+        // So: one observation is enough to point the radio roughly the right way, which is
+        // what lets the remaining observations arrive. Worst case we aim with a noisy single
+        // sample, which is strictly better than aiming at nothing. The strict bar above still
+        // governs everything that wants a trustworthy estimate.
+        self.observations() >= 1
     }
 
     /// Microseconds from `now_us` until the MIDDLE of the cluster's slot `slot`.
