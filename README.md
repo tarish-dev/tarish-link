@@ -37,9 +37,18 @@ image by the integrator), and the unicast data path is up. What is **proven on h
 election, sync, discovery, receive, and send — a 20 MB file delivered to an iPhone over tlink
 with no `libmosey` in the path (2026-09-24).
 
-What is **still being hardened** is **send throughput**: that 20 MB took about 61 seconds,
-roughly 340 KB/s, against `libmosey`'s ~3.4 MB/s on the same channel and hardware. It
-completes reliably; it is slow.
+**Send throughput is at parity with `libmosey` on most peers, and collapses on one.** Same
+20 MB file, same channel, same build, two iPhones:
+
+| peer | time | rate |
+|---|---|---|
+| iPhone Air | **5.5 s** | **~3.8 MB/s** — matches stock on the same file |
+| iPhone Mini | 61 s | ~340 KB/s |
+
+An 11x spread between two peers rules out a flat ceiling in our send path — it reaches
+`libmosey`-class rates when the peer allows it. What the Mini does differently is **open**, and
+deliberately not guessed at here. An earlier version of this section quoted only the Mini
+number and described send as uniformly slow; that generalised from the outlier.
 
 > This section used to say a single fixed channel "reaches the ch149 cluster but not every
 > iPhone generation (the ch6 rendezvous), which is why some peers (e.g. an iPhone mini) don't
