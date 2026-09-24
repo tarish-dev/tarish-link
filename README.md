@@ -33,11 +33,21 @@ It runs on two backends behind one radio trait: **mainline `nl80211` + monitor m
 adapter on `mt76`, no vendor code — the reference), and the **`wonder.ko`** backend (the Pixel).
 **Tarish's production builds now ride this instead of `libmosey`:** the `libmosey`-ABI shim is
 done (`tlink-shim`, which exports the same soname + five FFI symbols and is pinned into the
-image by the integrator), and the unicast data path is up. What is **proven on hardware** is
-the receive side and the core link (bring-up, election, sync, discovery, receive). What is
-**still being hardened** is **send throughput** and **multi-channel scheduling** — a single
-fixed channel (ch149) reaches the ch149 cluster but not every iPhone generation (the ch6
-rendezvous), which is why some peers (e.g. an iPhone mini) don't yet connect. Until those land,
+image by the integrator), and the unicast data path is up. What is **proven on hardware** is the core link and both directions of transfer: bring-up,
+election, sync, discovery, receive, and send — a 20 MB file delivered to an iPhone over tlink
+with no `libmosey` in the path (2026-09-24).
+
+What is **still being hardened** is **send throughput**: that 20 MB took about 61 seconds,
+roughly 340 KB/s, against `libmosey`'s ~3.4 MB/s on the same channel and hardware. It
+completes reliably; it is slow.
+
+> This section used to say a single fixed channel "reaches the ch149 cluster but not every
+> iPhone generation (the ch6 rendezvous), which is why some peers (e.g. an iPhone mini) don't
+> yet connect". Both halves were wrong. Tracing stock's vendor commands showed it parks on
+> ch149 with a single `SET_FREQUENCY` and `channel_hopping=false` — there is no ch6 rendezvous
+> to miss. And the mini does connect: it had been holding a stale iOS cached view of us, which
+> toggling AirDrop clears.
+
 Google's `libmosey` remains available as the drop-in fallback (same ABI). So: **the AWDL
 userspace we ship is open; the radio module `wonder.ko` and its firmware are not.** See
 [docs/FINDINGS.md](docs/FINDINGS.md) for the evidence behind every claim above.
