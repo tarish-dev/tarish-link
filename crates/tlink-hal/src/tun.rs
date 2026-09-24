@@ -105,6 +105,18 @@ struct IfReqHw {
     pad: [u8; 8],
 }
 
+/// `SIOCSIFMTU` — set the link MTU. Same ioctl family as SIOCSIFHWADDR above, so it needs no
+/// additional SELinux permission beyond the ioctl already allowed on this socket.
+const SIOCSIFMTU: IoctlReq = 0x8922;
+
+/// `ifreq` shaped for `SIOCSIFMTU`: the union holds a single `int`.
+#[repr(C)]
+struct IfReqMtu {
+    name: [libc::c_char; libc::IF_NAMESIZE],
+    mtu: libc::c_int,
+    pad: [u8; 20],
+}
+
 pub struct Tun {
     fd: OwnedFd,
     name: String,
@@ -322,6 +334,37 @@ impl Tun {
             let e = std::io::Error::last_os_error();
             close(sock);
             return Err(Error::Radio(format!("SIOCSIFHWADDR {} {mac:02x?}: {e}", self.name)));
+        }
+
+        // MTU 1450, MATCHING STOCK. Measured on a stock device 2026-09-25: libmosey's mosey0
+        // runs mtu 1450 while ours ran 1500 — and 1500 was never a decision, it is the
+        // kernel's default TAP MTU because nothing here set one. Where libmosey has made a
+        // deliberate choice and we have no reason to differ, replicate it.
+        //
+        // The 50 bytes are headroom: an IP packet leaving here is encapsulated for AWDL and
+        // then framed in 802.11, and anything that ends up over the air limit is fragmented or
+        // dropped. On the injection path there is no hardware retry to cover a drop, so a
+        // strong peer absorbs it and a marginal one collapses.
+        //
+        // NOT claimed as the throughput fix — the operator's own read is that it is probably
+        // not the cause, and tonight's hypotheses have a poor record. It is here because
+        // differing from the reference for no reason is its own defect.
+        //
+        // Do not confuse this with the READ BUFFER note above: that is about how much to read
+        // from the fd in one go (>= 2048), which is a separate concern from the link MTU.
+        let mut mtu = IfReqMtu { name: [0; libc::IF_NAMESIZE], mtu: 1450, pad: [0; 20] };
+        for (dst, b) in mtu.name.iter_mut().zip(self.name.as_bytes()) {
+            *dst = *b as libc::c_char;
+        }
+        // SAFETY: correctly shaped ifreq for SIOCSIFMTU, outlives the call.
+        if unsafe { libc::ioctl(sock, SIOCSIFMTU, &mut mtu as *mut IfReqMtu) } < 0 {
+            // Fatal, like SIOCSIFHWADDR above and for the same reason: this crate has no
+            // logger, so the alternative is swallowing it and later wondering why the MTU is
+            // 1500 again. The ioctl is the same family as the one already used here, so a
+            // failure means something has genuinely changed rather than a missing permission.
+            let e = std::io::Error::last_os_error();
+            close(sock);
+            return Err(Error::Radio(format!("SIOCSIFMTU {} 1450: {e}", self.name)));
         }
 
         // IFF_UP, read-modify-write. Setting the flags word wholesale would clear
