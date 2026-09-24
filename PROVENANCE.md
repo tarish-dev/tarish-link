@@ -22,7 +22,10 @@ copyrightable; the expression here is ours.
 ## What this explicitly is not
 
 - Not a fork or derivative of `libmosey`. The binary links no Google AWDL library; it drives
-  the vendor radio shim (`wonder.ko`) directly over netlink.
+  the vendor kernel MAC module (`wonder.ko`) directly over netlink. That module is closed and
+  is deliberately **not** reimplemented — it is silicon-tied, carries a vermagic and a
+  RANDSTRUCT seed, and loads only into the kernel it was built against. It is the one layer
+  of the stack that is not ours, and this document does not claim otherwise.
 - Not derived from OWL or Wireshark source. Those were **studied**, not copied. tlink is
   Rust; both are C. Where a bring-up sequence was recovered, it was recovered from *our own
   captures of the wire and of `libmosey`'s behaviour*, not from another project's code.
