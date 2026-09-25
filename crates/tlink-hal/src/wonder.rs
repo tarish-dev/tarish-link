@@ -345,13 +345,19 @@ pub struct Wonder {
     genl: Option<NlSock>,
     /// AF_PACKET socket for TX/RX, opened lazily like [`crate::nl80211::Nl80211`].
     sock: Option<crate::rawsock::RawSock>,
+    /// The social channel we are currently on; 0 until bring-up sets it.
+    ///
+    /// Tracked for exactly one reason: `tx` must refuse to drop the radiotap RATE field on
+    /// 2.4 GHz, where the driver's no-RATE default is 1 Mb/s DSSS and an AWDL peer cannot
+    /// decode it at all. That decision needs the band, and this is the only layer that has it.
+    channel: u8,
 }
 
 impl Wonder {
     /// Construct against an existing wonder interface. The wiphy index is resolved over
     /// netlink at bring-up (not here), so `new` touches nothing that needs privilege.
     pub fn new(monitor: &str) -> Result<Wonder> {
-        Ok(Wonder { monitor: monitor.to_string(), mac: None, genl: None, sock: None })
+        Ok(Wonder { monitor: monitor.to_string(), mac: None, genl: None, sock: None, channel: 0 })
     }
 
     /// The interface MAC over netlink (`GET_INTERFACE` → `NL80211_ATTR_MAC`), for the same
@@ -588,6 +594,7 @@ impl Wonder {
     /// Order is load-bearing: configure (the driver caches it), then UP (the driver applies
     /// it). See the module note.
     pub fn bring_up(&mut self, channel: u8, params: TxParams, country: [u8; 2]) -> Result<()> {
+        self.channel = channel;
         let family = self.nl80211_family()?;
         // Resolve the wiphy over netlink from the existing monitor (it persists on a Pixel),
         // before we tear it down — see query_wiphy for why not sysfs. If wonder0 is absent (a
@@ -795,6 +802,7 @@ impl crate::Radio for Wonder {
     }
 
     fn set_channel(&mut self, channel: u8) -> Result<()> {
+        self.channel = channel;
         // Live retuning uses the STANDARD nl80211 channel-set, NOT the vendor SET_FREQUENCY.
         // The vendor command is a bring-up-cache primitive: wonder.ko accepts it only while the
         // HW is stopped and applies it on .start(); re-issuing it on a running monitor is
@@ -830,11 +838,25 @@ impl crate::Radio for Wonder {
         ))
     }
 
-    fn tx(&mut self, frame: &[u8], _params: TxParams) -> Result<()> {
+    fn tx(&mut self, frame: &[u8], params: TxParams) -> Result<()> {
         if self.sock.is_none() {
             self.sock = Some(crate::rawsock::RawSock::open(&self.monitor)?);
         }
-        self.sock.as_ref().unwrap().tx(frame)
+        let sock = self.sock.as_ref().unwrap();
+        // `params` USED TO BE DISCARDED HERE, and that was the throughput bug: every frame got
+        // a legacy radiotap RATE, which overrides the VHT rate bring-up configured with
+        // SET_FIXED_TX_RATE. Measured on ch149 — us at 6 Mb/s legacy, unaggregated, against an
+        // iPhone at VHT MCS 7 nss2 with A-MPDU. See TxParams::legacy_ofdm.
+        //
+        // The 2.4 GHz guard is not optional: with no RATE field the driver there defaults to
+        // 1 Mb/s DSSS, which an AWDL receiver cannot decode, so dropping the field on ch6 would
+        // make us silently invisible rather than slow. Unknown channel (0) counts as 2.4 and
+        // keeps the safe pinned rate.
+        if params.legacy_ofdm || self.channel < 36 {
+            sock.tx(frame)
+        } else {
+            sock.tx_at_iface_rate(frame)
+        }
     }
 
     fn rx(&mut self, timeout_ms: u32) -> Result<Option<crate::RxFrame>> {

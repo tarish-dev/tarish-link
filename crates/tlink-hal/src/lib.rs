@@ -114,6 +114,22 @@ pub struct TxParams {
     pub bandwidth: u8,
     /// Short guard interval.
     pub short_gi: bool,
+    /// Pin this frame to a legacy OFDM rate with a radiotap RATE field, instead of letting
+    /// the interface's `SET_FIXED_TX_RATE` govern it.
+    ///
+    /// TRUE FOR SYNC AND CONTROL, FALSE FOR BULK DATA, and the difference is measured.
+    /// A per-frame radiotap RATE overrides the vendor fixed-rate command, so prepending one
+    /// to *everything* threw away the VHT bring-up rate on every frame. Captured on ch149
+    /// 2026-09-25 with the Pi in monitor mode:
+    ///
+    /// ```text
+    /// 7a:4a:0f:8a:be:d5  (iPhone-Air)  VHT MCS 7 nss2   A-MPDU-flagged 2/2
+    /// ba:ae:58:fe:fa:e7  (blazer, us)  6 Mb/s legacy    A-MPDU 0/12, VHT 0/12
+    /// ```
+    ///
+    /// Note the 6: the header asks for 12 Mb/s and the radio sends the lowest OFDM rate
+    /// anyway, so the value was not even being honoured — only its legacy-ness was.
+    pub legacy_ofdm: bool,
 }
 
 impl Default for TxParams {
@@ -124,7 +140,19 @@ impl Default for TxParams {
     /// far lower, and matching that is a measurement to make rather than a guess to
     /// ship — so the default here is the safe one.
     fn default() -> Self {
-        TxParams { mcs: 0, nss: 1, bandwidth: 0, short_gi: false }
+        TxParams { mcs: 0, nss: 1, bandwidth: 0, short_gi: false, legacy_ofdm: true }
+    }
+}
+
+impl TxParams {
+    /// Bulk data: let the interface's configured rate apply instead of pinning a legacy one.
+    ///
+    /// Separate from `default()` because the two wants are opposite. A sync frame wants a
+    /// predictable, slow, long-range rate — its air time is the measurement. A payload frame
+    /// wants the fastest rate the link will carry, which is what `SET_FIXED_TX_RATE` was
+    /// configured with at bring-up and which a radiotap RATE field silently overrides.
+    pub fn bulk() -> Self {
+        TxParams { legacy_ofdm: false, ..Default::default() }
     }
 }
 

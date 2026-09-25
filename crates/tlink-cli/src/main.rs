@@ -1391,7 +1391,8 @@ fn open_wonder(monitor: &str, channel: u8) -> Box<dyn tlink_hal::Radio> {
     // libmosey's captured bring-up rate on 5 GHz is VHT/80 MHz (finding 92); on the 2.4 GHz
     // social channel (6) that width is invalid, so drop to 20 MHz there. bandwidth: 0=20, 2=80.
     let bandwidth = if channel < 36 { 0 } else { 2 };
-    let params = TxParams { mcs: 11, nss: 2, bandwidth, short_gi: false }; // HT MCS 11, matching stock libmosey
+    // HT MCS 11, matching stock libmosey
+    let params = TxParams { mcs: 11, nss: 2, bandwidth, short_gi: false, legacy_ofdm: true };
     if let Err(e) = w.bring_up(channel, params, *b"QA") {
         eprintln!("wonder bring_up failed: {e:?}");
         std::process::exit(1);

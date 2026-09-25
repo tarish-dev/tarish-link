@@ -448,9 +448,14 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         // a lost setup frame does not become a multi-second RTO stall (finding 113).
                         // A large burst is bulk-data ACKs: send once, as repeating them only adds
                         // contention with no measurable gain (finding 110).
-                        let reps: u32 = if outbound.len() <= SMALL_BURST_MAX { ACK_REPEAT } else { 1 };
+                        let small = outbound.len() <= SMALL_BURST_MAX;
+                        let reps: u32 = if small { ACK_REPEAT } else { 1 };
+                        // Bulk goes at the interface's configured rate; a small control burst
+                        // keeps the pinned legacy rate, which is what stock uses for the same
+                        // frames. See TxParams::legacy_ofdm.
+                        let tp = if small { TxParams::default() } else { TxParams::bulk() };
                         while let Some(f) = outbound.pop_front() {
-                            match radio.tx(&f, TxParams::default()) {
+                            match radio.tx(&f, tp) {
                                 Ok(()) => dp_sent += 1,
                                 Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
                             }
@@ -458,7 +463,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 let mut dup = f.clone();
                                 dup[1] |= 0x08;
                                 for _ in 1..reps {
-                                    if radio.tx(&dup, TxParams::default()).is_ok() { dp_sent += 1; }
+                                    if radio.tx(&dup, tp).is_ok() { dp_sent += 1; }
                                 }
                             }
                         }
@@ -523,9 +528,14 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     // Drain queued IP (mDNS answers/announcements) into the same window. With
                     // repetition FEC each frame is sent data_repeat times, so drain fewer unique
                     // frames to keep total transmissions per window (and airtime) about constant.
+                    let tp = if outbound.len() <= SMALL_BURST_MAX {
+                        TxParams::default()
+                    } else {
+                        TxParams::bulk()
+                    };
                     for _ in 0..(DRAIN_PER_WINDOW / cfg.data_repeat.max(1) as usize).max(1) {
                         let Some(f) = outbound.pop_front() else { break };
-                        match radio.tx(&f, TxParams::default()) {
+                        match radio.tx(&f, tp) {
                             Ok(()) => dp_sent += 1,
                             Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
                         }
@@ -535,7 +545,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                             let mut dup = f.clone();
                             dup[1] |= 0x08; // 802.11 Retry
                             for _ in 1..cfg.data_repeat {
-                                if radio.tx(&dup, TxParams::default()).is_ok() { dp_sent += 1; }
+                                if radio.tx(&dup, tp).is_ok() { dp_sent += 1; }
                             }
                         }
                     }
@@ -706,9 +716,13 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // repeating was shown to add, finding 110). data_repeat, if set, still applies to bulk.
         let small_burst = outbound.len() <= SMALL_BURST_MAX;
         let reps: u32 = if small_burst { ACK_REPEAT } else { cfg.data_repeat.max(1) };
+        // Same split for the rate: control keeps the pinned legacy OFDM rate (what stock uses
+        // for its mDNS), bulk goes at the interface's configured VHT rate. Pinning bulk is what
+        // held us at 6 Mb/s unaggregated — see TxParams::legacy_ofdm.
+        let tp = if small_burst { TxParams::default() } else { TxParams::bulk() };
         for _ in 0..(DRAIN_PER_WINDOW / reps as usize).max(1) {
             let Some(f) = outbound.pop_front() else { break };
-            match radio.tx(&f, TxParams::default()) {
+            match radio.tx(&f, tp) {
                 Ok(()) => dp_sent += 1,
                 Err(e) => {
                     failed += 1;
@@ -721,7 +735,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 let mut dup = f.clone();
                 dup[1] |= 0x08; // 802.11 Retry; the peer de-duplicates on sequence number
                 for _ in 1..reps {
-                    if radio.tx(&dup, TxParams::default()).is_ok() {
+                    if radio.tx(&dup, tp).is_ok() {
                         dp_sent += 1;
                     }
                 }

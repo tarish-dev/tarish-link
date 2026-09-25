@@ -36,7 +36,7 @@ fn main() {
 
     if bring_up_wonder {
         // libmosey's captured bring-up rate: VHT, 80 MHz, 2 streams, MCS 3 (finding 92).
-        let params = tlink_hal::TxParams { mcs: 3, nss: 2, bandwidth: 2, short_gi: false };
+        let params = tlink_hal::TxParams { mcs: 3, nss: 2, bandwidth: 2, short_gi: false, legacy_ofdm: true };
         let mut w = match tlink_hal::wonder::Wonder::new(iface) {
             Ok(w) => w,
             Err(e) => {

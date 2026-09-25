@@ -168,7 +168,12 @@ pub unsafe extern "C" fn mosey_start_5(
     // rate on ch149 is mcs=3 (VHT), and its data then rate-adapts up to MCS 9; on 2.4 GHz HT, 11 is
     // a valid HT index. So: HT(2.4) -> 11, VHT(5) -> 3 to match stock and let the firmware adapt.
     let mcs = if channel < 36 { 11 } else { 3 };
-    let params = TxParams { mcs, nss: 2, bandwidth: if channel < 36 { 0 } else { 2 }, short_gi: false };
+    let params = TxParams {
+        mcs, nss: 2, bandwidth: if channel < 36 { 0 } else { 2 }, short_gi: false,
+        // Bring-up only: this configures SET_FIXED_TX_RATE. Per-frame choice is made in
+        // tlink-session, which asks for TxParams::bulk() on payload.
+        legacy_ofdm: true,
+    };
     if let Err(e) = radio.bring_up(channel, params, cc) {
         log::error!("mosey shim: wonder bring-up failed: {e:?}");
         return std::ptr::null_mut();

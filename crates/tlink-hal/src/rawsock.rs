@@ -91,11 +91,31 @@ impl RawSock {
         Ok(RawSock { fd, iface: iface.to_string() })
     }
 
-    /// Transmit one 802.11 frame, prefixing the radiotap header the driver requires.
+    /// Transmit one 802.11 frame, pinned to legacy OFDM.
+    ///
+    /// Right for sync and control frames. For bulk payload use [`RawSock::tx_at_iface_rate`]
+    /// — [`crate::TxParams::legacy_ofdm`] records what pinning costs there.
     pub fn tx(&self, frame: &[u8]) -> Result<()> {
         // Force OFDM (see RADIOTAP_OFDM): a DSSS frame is invisible to an AWDL receiver.
-        let mut buf = Vec::with_capacity(RADIOTAP_OFDM.len() + frame.len());
-        buf.extend_from_slice(&RADIOTAP_OFDM);
+        self.tx_with(frame, &RADIOTAP_OFDM)
+    }
+
+    /// Transmit with NO rate in the radiotap header, so the rate configured on the interface
+    /// by `SET_FIXED_TX_RATE` is what actually goes out.
+    ///
+    /// ONLY SAFE ON 5 GHz, AND THE CALLER MUST ENFORCE THAT. With no RATE field the driver
+    /// falls back to its own default, and on the 2.4 GHz social channel that is 1 Mb/s DSSS —
+    /// which an AWDL receiver does not decode at all, so the frame becomes invisible to peers
+    /// while a promiscuous monitor still logs it and everything looks fine. There is no DSSS
+    /// on 5 GHz, so the worst case there is the lowest OFDM rate, which is precisely what
+    /// pinning was already delivering.
+    pub fn tx_at_iface_rate(&self, frame: &[u8]) -> Result<()> {
+        self.tx_with(frame, &RADIOTAP_EMPTY)
+    }
+
+    fn tx_with(&self, frame: &[u8], radiotap: &[u8]) -> Result<()> {
+        let mut buf = Vec::with_capacity(radiotap.len() + frame.len());
+        buf.extend_from_slice(radiotap);
         buf.extend_from_slice(frame);
         let n = unsafe {
             libc::send(self.fd, buf.as_ptr() as *const libc::c_void, buf.len(), 0)
