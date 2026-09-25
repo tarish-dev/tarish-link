@@ -179,6 +179,18 @@ const ACK_REPEAT: u32 = 3;
 /// accept→`/Upload`, finding 113). A large burst is bulk data: repeating it only adds contention.
 const SMALL_BURST_MAX: usize = 6;
 
+/// Frames longer than this are payload, never control, and are NOT repeated.
+///
+/// The small-burst rule above classified by QUEUE LENGTH alone, and during bulk that misfires:
+/// we drain faster than TCP fills, so the queue is usually short at drain time, and MSS-sized
+/// payload frames were being sent three times as if they were handshake frames. Measured on air
+/// 2026-09-25 with data_repeat=1: of 20,969 bulk data frames from us, 16,565 carried the Retry
+/// bit — 79% of the transfer was our own duplicates. Three times the airtime the peer's ACKs
+/// must share, and it is why data_repeat 1 vs 3 changed nothing: most frames were already
+/// tripled by this path. A TCP ACK, SYN, TLS record or HTTP head is a few hundred bytes; a
+/// payload frame is ~1450. Size separates them cleanly.
+const CONTROL_FRAME_MAX: usize = 400;
+
 /// Run the session on `radio` (already brought up) until `stop` is set or `cfg.duration`
 /// elapses. Returns what it did.
 pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Stats> {
@@ -212,6 +224,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     // whether the cluster underneath had changed master or degraded. These two make it legible.
     let mut last_master: Option<[u8; 6]> = None;
     let mut last_health = Instant::now();
+    // The master's advertised channel sequence, logged once per change: which of its 16 slots
+    // it spends on 6 / 44 / 149. Our transmit is locked to one channel, so this is the schedule
+    // that decides whether a frame of ours can be heard at all.
+    let mut last_master_seq: Option<Vec<u8>> = None;
     let mut rxs = RxStages::default();
 
     // Data plane: the TUN shares this loop and this radio (two processes cannot both inject
@@ -410,6 +426,15 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                             // tune to (finding 99). Only the master's own sequence counts.
                             if cluster.master == Some(src) {
                                 if let Some(cs) = chanseq {
+                                    if last_master_seq.as_ref() != Some(&cs.channels) {
+                                        let n = |c: u8| cs.channels.iter().filter(|&&x| x == c).count();
+                                        log::info!(
+                                            "MASTER CHANNEL SEQUENCE {:?}: slots on 149={}, 6={}, 44={}, other={}",
+                                            cs.channels, n(149), n(6), n(44),
+                                            cs.channels.iter().filter(|&&x| x != 149 && x != 6 && x != 44).count()
+                                        );
+                                        last_master_seq = Some(cs.channels.clone());
+                                    }
                                     cluster.set_master_channels(&cs);
                                 }
                                 heard_master = true;
@@ -473,7 +498,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 Ok(()) => dp_sent += 1,
                                 Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
                             }
-                            if reps > 1 && f.len() >= 2 {
+                            if reps > 1 && f.len() >= 2 && f.len() <= CONTROL_FRAME_MAX {
                                 let mut dup = f.clone();
                                 dup[1] |= 0x08;
                                 for _ in 1..reps {
@@ -799,7 +824,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     }
                 }
             }
-            if reps > 1 && f.len() >= 2 {
+            if reps > 1 && f.len() >= 2 && f.len() <= CONTROL_FRAME_MAX {
                 let mut dup = f.clone();
                 dup[1] |= 0x08; // 802.11 Retry; the peer de-duplicates on sequence number
                 for _ in 1..reps {
