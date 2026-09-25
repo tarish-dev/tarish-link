@@ -207,13 +207,34 @@ pub unsafe extern "C" fn mosey_start_5(
         || read_property("persist.tarish.ba_probe").as_deref() == Some("1");
     // Repetition FEC for outbound data (finding 106): our inject path has no ARQ and iOS will not
     // Block-Ack us, so send each data frame N times (same seq, Retry bit) and let the peer de-dup.
-    // Default 3 (~10% loss -> ~0.1%); tune with persist.tarish.data_repeat or TARISH_DATA_REPEAT.
+    //
+    // DEFAULT IS NOW 1 — 3 WAS MEASURED AND BOUGHT NOTHING. Four 20 MB AirDrop sends to the same
+    // iPhone, retransmits read off the live socket with `ss -ti` rather than inferred from a
+    // stopwatch:
+    //
+    //     repeat=1   retrans 434 (cwnd 57..958),  565 (cwnd 14..35)
+    //     repeat=3   retrans 376 (cwnd 15..272),  550 (cwnd 13..106)
+    //
+    // Mean 500 against 463, with single runs spanning 376-565 either way: no effect detectable,
+    // for three times the airtime — and that airtime is contention every other device in the
+    // cluster pays too.
+    //
+    // THE NULL RESULT ALSO SAYS WHERE THE LOSS IS NOT. This protects our OUTBOUND DATA frames;
+    // tripling them did not move the retransmit count, so those are not the frames going
+    // missing. The loss is on the return path (the peer's ACKs reaching us) or in the peer's own
+    // reception, and no amount of transmit-side repetition touches either.
+    //
+    // Kept as a knob rather than deleted: it is the right shape of fix for a no-ARQ link, and a
+    // different peer or a noisier room may yet show the benefit this one did not.
+    //
+    // Re-testing it needs a tarishd RESTART, not just the property: it is read here, at session
+    // start. An earlier "no effect" reading was invalid for exactly that reason.
     cfg.data_repeat = std::env::var("TARISH_DATA_REPEAT")
         .ok()
         .or_else(|| read_property("persist.tarish.data_repeat"))
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&n| n >= 1 && n <= 8)
-        .unwrap_or(3);
+        .unwrap_or(1);
     // Advertise **wondertap0's** MAC as our AWDL address, not wonder0's.
     //
     // wonder0 is only the mac80211 injection shim; the actual radio is wondertap0 (bcmdhd4390),
