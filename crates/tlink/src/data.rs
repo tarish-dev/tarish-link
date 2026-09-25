@@ -272,12 +272,34 @@ pub fn decapsulate_all(frame80211: &[u8]) -> Vec<Decap<'_>> {
         return Vec::new();
     };
 
-    let aggregated =
-        qos && frame80211.get(QOS_HEADER_LEN - 2).map(|b| b & QOS_AMSDU_PRESENT != 0).unwrap_or(false);
+    // DETECT THE AGGREGATE BY SHAPE, NOT ONLY BY THE BIT.
+    //
+    // The A-MSDU Present bit is the documented signal and this radio does not always set it.
+    // Measured 2026-09-26, three frames from our own peer, all carrying a subframe chain:
+    //
+    //     QoS `86 00`  bit set      2990 bytes
+    //     QoS `01 b8`  bit CLEAR     470 bytes, subframe len 0x0066
+    //     QoS `00 e0`  bit CLEAR     254 bytes, subframe len 0x0062
+    //
+    // Trusting the bit alone discarded the last two. The shape is unmistakable and cheap to
+    // check: an A-MSDU subframe header repeats the frame's own destination and source before
+    // its length, so twelve bytes that equal addr1 then addr2 mean an aggregate whatever the
+    // bit says. A normal AWDL payload begins `aa aa 03` and can never look like this.
     let Some(rest) = frame80211.get(hdr..) else { return Vec::new() };
+    let bit_set = qos
+        && frame80211.get(QOS_HEADER_LEN - 2).map(|b| b & QOS_AMSDU_PRESENT != 0).unwrap_or(false);
+    let looks_aggregated = rest.get(..6) == Some(&dst[..]) && rest.get(6..12) == Some(&src[..]);
 
-    if !aggregated {
-        return match one(dst, src, rest) {
+    if !(bit_set || looks_aggregated) {
+        // SNAP AT THE HEADER, OR TWO BYTES LATER.
+        //
+        // A driver may pad between the 802.11 header and the payload so the payload starts on
+        // a 4-byte boundary, and a QoS header is 26 bytes, which is not one. Measured on
+        // 120-byte multicast frames from our own peer: `06 00` sits where the SNAP should be
+        // and the real `aa aa 03 00 17 f2 08 00` follows it. Trying the aligned offset costs
+        // one comparison and cannot match by accident — eight fixed bytes is a strong
+        // signature — so it is safer than modelling every driver's padding flag.
+        return match one(dst, src, rest).or_else(|| rest.get(2..).and_then(|r| one(dst, src, r))) {
             Some(d) => vec![d],
             None => Vec::new(),
         };
@@ -476,5 +498,86 @@ mod amsdu_tests {
         f.extend_from_slice(&0xffffu16.to_be_bytes()); // length far past the end
         f.extend_from_slice(&[0u8; 8]);
         assert!(decapsulate_all(&f).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+
+    /// The aggregate bit is not always set, and the shape must be trusted over it.
+    ///
+    /// Measured 2026-09-26: frames with QoS `01 b8` and `00 e0` — bit 7 of the first octet
+    /// clear — carried a full subframe chain. Reading them as a single packet found the
+    /// repeated destination address where the SNAP belongs and dropped everything.
+    #[test]
+    fn aggregate_without_the_bit_is_still_an_aggregate() {
+        let dst = [0x6a, 0xde, 0x7d, 0x59, 0xd8, 0xd6];
+        let src = [0xb6, 0xda, 0x7c, 0x68, 0x5e, 0x38];
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&SNAP_AWDL);
+        body.extend_from_slice(&short_header(7, ETHERTYPE_IPV6));
+        body.extend_from_slice(&[0x5c; 80]);
+
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x88, 0x00, 0x2c, 0x00]);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&AWDL_BSSID);
+        f.extend_from_slice(&[0x20, 0x41]);
+        f.extend_from_slice(&[0x01, 0xb8]); // QoS control, A-MSDU bit CLEAR
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        f.extend_from_slice(&body);
+
+        let got = decapsulate_all(&f);
+        assert_eq!(got.len(), 1, "the chain must be walked despite the clear bit");
+        assert_eq!(got[0].payload, &[0x5cu8; 80][..]);
+    }
+
+    /// Two bytes of driver padding between the 802.11 header and the payload.
+    ///
+    /// Measured on 120-byte multicast frames: `06 00` where the SNAP should be, and the real
+    /// SNAP two bytes further on. A QoS header is 26 bytes, so a driver aligning the payload
+    /// to 4 bytes inserts exactly this.
+    #[test]
+    fn padded_payload_is_found_two_bytes_on() {
+        let dst = [0x33, 0x33, 0xff, 0x18, 0xbe, 0x73];
+        let src = [0x5e, 0x32, 0xbc, 0x75, 0xda, 0x5b];
+
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x88, 0x00, 0x00, 0x00]);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&AWDL_BSSID);
+        f.extend_from_slice(&[0xd0, 0x15]);
+        f.extend_from_slice(&[0x00, 0x5a]); // QoS control
+        f.extend_from_slice(&[0x06, 0x00]); // the padding seen on air
+        f.extend_from_slice(&SNAP_AWDL);
+        f.extend_from_slice(&short_header(3, ETHERTYPE_IPV6));
+        f.extend_from_slice(&[0x77; 64]);
+
+        let got = decapsulate_all(&f);
+        assert_eq!(got.len(), 1, "padding must not hide the payload");
+        assert_eq!(got[0].payload, &[0x77u8; 64][..]);
+        assert_eq!(got[0].dst, dst);
+    }
+
+    /// Padding must not make us accept rubbish: eight fixed SNAP bytes still have to match.
+    #[test]
+    fn padding_retry_does_not_accept_a_non_awdl_frame() {
+        let dst = [1u8; 6];
+        let src = [2u8; 6];
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x88, 0x00, 0x00, 0x00]);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&AWDL_BSSID);
+        f.extend_from_slice(&[0, 0, 0, 0]);
+        f.extend_from_slice(&[0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]); // ordinary SNAP
+        f.extend_from_slice(&[0u8; 40]);
+        assert!(decapsulate_all(&f).is_empty(), "another vendor's SNAP is not ours");
     }
 }
