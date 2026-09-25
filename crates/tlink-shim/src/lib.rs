@@ -235,6 +235,24 @@ pub unsafe extern "C" fn mosey_start_5(
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&n| n >= 1 && n <= 8)
         .unwrap_or(1);
+    // Data frames per on-air burst. Default 24 — unchanged, and unchanged is the point: every
+    // measurement against Apple and against Google's stack was taken at 24 and stays valid.
+    //
+    // It is settable because a peer running THIS code behaves unlike either of them. It answers
+    // inbound data on the immediate-ACK path, at once and uncapped, while a radio in monitor
+    // injection hears nothing for as long as it transmits. So our 24-frame burst lands while the
+    // peer is busy acknowledging the front of it, and each side is deaf exactly when the other
+    // speaks. Measured tlink-to-tlink 2026-09-25: ~50% frame loss, cwnd pinned at 1, 0.7 KB/s,
+    // while the same sender does 20 MB to an iPhone in 5.3 s (BUILD-NOTES 72).
+    //
+    // If that reading is right, a SHORTER burst is faster device-to-device. Read at session start,
+    // so a sweep needs a tarishd restart per value, not just a setprop.
+    cfg.drain_per_window = std::env::var("TARISH_DRAIN")
+        .ok()
+        .or_else(|| read_property("persist.tarish.drain"))
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1 && n <= 64)
+        .unwrap_or(24);
     // Advertise **wondertap0's** MAC as our AWDL address, not wonder0's.
     //
     // wonder0 is only the mac80211 injection shim; the actual radio is wondertap0 (bcmdhd4390),

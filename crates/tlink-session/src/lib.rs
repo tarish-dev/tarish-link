@@ -85,6 +85,18 @@ pub struct Config {
     /// standard duplicate-detection keep one and drop the rest, turning ~10% loss into ~10%^N.
     /// 1 = off (one transmission). Control frames/beacons are never repeated.
     pub data_repeat: u32,
+    /// Data frames drained per window visit. See `DRAIN_PER_WINDOW` for why 24 is the default.
+    ///
+    /// Settable because it is the one knob that decides how long we hold the air in one go, and
+    /// that matters when the PEER is another copy of us. A peer running this code answers inbound
+    /// data on the immediate-ACK path — at once, no throttle, no per-window cap — while a radio in
+    /// monitor injection is deaf for as long as it transmits. So a long burst from us arrives while
+    /// the peer is trying to acknowledge the front of it, and neither side hears the other. Against
+    /// an iPhone none of this applies: it defers in hardware and acknowledges on the firmware's
+    /// timing. A shorter burst should therefore be FASTER device-to-device and slower to Apple,
+    /// which is the opposite of what a bandwidth knob usually does, and is why it is measurable
+    /// rather than assumed.
+    pub drain_per_window: usize,
     /// Stop after this long. None = run until the stop flag is set (the shim's mode).
     pub duration: Option<Duration>,
 }
@@ -116,6 +128,7 @@ impl Config {
             datapath: None,
             blockack: false,
             data_repeat: 1,
+            drain_per_window: DRAIN_PER_WINDOW,
             duration: None,
         }
     }
@@ -687,7 +700,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     } else {
                         TxParams::bulk()
                     };
-                    for _ in 0..(DRAIN_PER_WINDOW / cfg.data_repeat.max(1) as usize).max(1) {
+                    for _ in 0..(cfg.drain_per_window / cfg.data_repeat.max(1) as usize).max(1) {
                         let Some(f) = outbound.pop_front() else { break };
                         {
                                 let now_host = epoch.elapsed().as_micros() as u64;
@@ -884,7 +897,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // for its mDNS), bulk goes at the interface's configured VHT rate. Pinning bulk is what
         // held us at 6 Mb/s unaggregated — see TxParams::legacy_ofdm.
         let tp = if small_burst { TxParams::default() } else { TxParams::bulk() };
-        for _ in 0..(DRAIN_PER_WINDOW / reps as usize).max(1) {
+        for _ in 0..(cfg.drain_per_window / reps as usize).max(1) {
             let Some(f) = outbound.pop_front() else { break };
             {
                                 let now_host = epoch.elapsed().as_micros() as u64;
