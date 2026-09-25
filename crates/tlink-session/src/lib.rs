@@ -228,6 +228,14 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     // it spends on 6 / 44 / 149. Our transmit is locked to one channel, so this is the schedule
     // that decides whether a frame of ours can be heard at all.
     let mut last_master_seq: Option<Vec<u8>> = None;
+    let mut peer_seq: std::collections::HashMap<[u8; 6], Vec<u8>> = std::collections::HashMap::new();
+    // Every transmitted DATA frame, classified against the master's advertised schedule at the
+    // instant it left: did it go out in one of the master's awake slots, one of its asleep
+    // slots, or with no usable clock at all. This is the question the Pi cannot answer (its
+    // fold needs a slot-0 reference it does not have) and the session can, exactly: it owns the
+    // clock model and the master's slot list. A thin master schedule (2-5 awake of 16) is where
+    // a slot-numbering error would show as loss and as "hear its beacons, never its data".
+    let (mut tx_awake, mut tx_asleep, mut tx_noclock) = (0u64, 0u64, 0u64);
     let mut rxs = RxStages::default();
 
     // Data plane: the TUN shares this loop and this radio (two processes cannot both inject
@@ -420,6 +428,22 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     if let Some((src, sync, elect, chanseq, phy_tx_time)) = parse_awdl(&rx.bytes) {
                         // Never synchronise to our own transmissions handed back by the monitor.
                         if src != addr {
+                            // EVERY peer's advertised schedule, once per change — not only the
+                            // master's. Discovery of one iPhone works only while a second Apple
+                            // device is present; the question is whether the first one's own
+                            // awake-slot count changes with company (its schedule) or with a
+                            // sender's BLE (its duty cycle), and that needs per-peer visibility.
+                            if let Some(cs) = chanseq.as_ref() {
+                                let e = peer_seq.entry(src).or_insert_with(Vec::new);
+                                if *e != cs.channels {
+                                    let n = |c: u8| cs.channels.iter().filter(|&&x| x == c).count();
+                                    log::info!(
+                                        "PEER {} SCHEDULE {:?}: awake on 149={}, 6={}, 44={}, asleep={}",
+                                        tlink::dot11::Mac(src), cs.channels, n(149), n(6), n(44), n(0)
+                                    );
+                                    *e = cs.channels.clone();
+                                }
+                            }
                             cluster.observe_at(now_us, src, &sync, elect.as_ref(), phy_tx_time);
                             // Prefer the OpClass channel map (tag 18) for the master's schedule:
                             // the Legacy one in Sync Params encodes a 40 MHz centre we cannot
@@ -494,6 +518,15 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         // frames. See TxParams::legacy_ofdm.
                         let tp = if small { TxParams::default() } else { TxParams::bulk() };
                         while let Some(f) = outbound.pop_front() {
+                            {
+                                let now_host = epoch.elapsed().as_micros() as u64;
+                                let now_tsf = tsf_anchor.map(|t| t + now_host.saturating_sub(host_at_anchor_us)).unwrap_or(now_host);
+                                match (cluster.clock.is_usable(), cluster.clock.slot_at(now_tsf)) {
+                                    (true, Some(sl)) if cluster.master_slots.contains(&sl) => tx_awake += 1,
+                                    (true, Some(_)) => tx_asleep += 1,
+                                    _ => tx_noclock += 1,
+                                }
+                            }
                             match radio.tx(&f, tp) {
                                 Ok(()) => dp_sent += 1,
                                 Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
@@ -577,6 +610,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     "tx path: queued {} -> sent {} (backlog {}, noroute {}, dropped {}, failed {})",
                     dp_queued, dp_sent, outbound.len(), dp_noroute, dp_dropped, failed
                 );
+                log::info!(
+                    "tx slots: awake {} asleep {} noclock {} (master slots {:?})",
+                    tx_awake, tx_asleep, tx_noclock, cluster.master_slots
+                );
             }
 
             // REACTIVE INJECTION. We just heard the master, so right now we are inside its
@@ -627,7 +664,16 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     };
                     for _ in 0..(DRAIN_PER_WINDOW / cfg.data_repeat.max(1) as usize).max(1) {
                         let Some(f) = outbound.pop_front() else { break };
-                        match radio.tx(&f, tp) {
+                        {
+                                let now_host = epoch.elapsed().as_micros() as u64;
+                                let now_tsf = tsf_anchor.map(|t| t + now_host.saturating_sub(host_at_anchor_us)).unwrap_or(now_host);
+                                match (cluster.clock.is_usable(), cluster.clock.slot_at(now_tsf)) {
+                                    (true, Some(sl)) if cluster.master_slots.contains(&sl) => tx_awake += 1,
+                                    (true, Some(_)) => tx_asleep += 1,
+                                    _ => tx_noclock += 1,
+                                }
+                            }
+                            match radio.tx(&f, tp) {
                             Ok(()) => dp_sent += 1,
                             Err(e) => { failed += 1; if first_error.is_none() { first_error = Some(format!("{e:?}")); } }
                         }
@@ -815,7 +861,16 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         let tp = if small_burst { TxParams::default() } else { TxParams::bulk() };
         for _ in 0..(DRAIN_PER_WINDOW / reps as usize).max(1) {
             let Some(f) = outbound.pop_front() else { break };
-            match radio.tx(&f, tp) {
+            {
+                                let now_host = epoch.elapsed().as_micros() as u64;
+                                let now_tsf = tsf_anchor.map(|t| t + now_host.saturating_sub(host_at_anchor_us)).unwrap_or(now_host);
+                                match (cluster.clock.is_usable(), cluster.clock.slot_at(now_tsf)) {
+                                    (true, Some(sl)) if cluster.master_slots.contains(&sl) => tx_awake += 1,
+                                    (true, Some(_)) => tx_asleep += 1,
+                                    _ => tx_noclock += 1,
+                                }
+                            }
+                            match radio.tx(&f, tp) {
                 Ok(()) => dp_sent += 1,
                 Err(e) => {
                     failed += 1;
