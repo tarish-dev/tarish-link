@@ -203,6 +203,16 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
 
     let mut cluster = Cluster::for_us(addr);
     let mut adopted = false;
+    // Sync health, which was previously invisible between adoption and loss.
+    //
+    // The ADOPTED/DROPPED line fires only when is_usable() FLIPS, so a master CHANGE while the
+    // clock stays nominally usable said nothing at all — and the master is what defines the
+    // availability windows that data frames (and therefore mDNS, and therefore discovery) ride
+    // in. A whole evening was spent guessing at peers that came and went with no way to see
+    // whether the cluster underneath had changed master or degraded. These two make it legible.
+    let mut last_master: Option<[u8; 6]> = None;
+    let mut last_health = Instant::now();
+    let mut rxs = RxStages::default();
 
     // Data plane: the TUN shares this loop and this radio (two processes cannot both inject
     // on one phy). Outbound IP is queued and drained in-window, because an AWDL peer listens
@@ -211,6 +221,9 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     let mut outbound: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
     let mut tbuf = vec![0u8; 4096];
     let (mut dp_sent, mut dp_recvd, mut dp_noroute, mut dp_dropped) = (0u64, 0u64, 0u64, 0u64);
+    // Frames the kernel handed us to send, counted where they leave the TAP. Without it there
+    // is no way to tell a starved drain from an idle one.
+    let mut dp_queued = 0u64;
     let (mut rx_mgmt, mut rx_ctrl, mut rx_data) = (0u64, 0u64, 0u64);
     let mut awdl_data_seq: u16 = 0;
     let mut d11_data_seq: u16 = 0;
@@ -386,7 +399,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         }
                     }
                     if tundev.is_some() {
-                        deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd);
+                        deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd, &mut rxs);
                     }
                     if let Some((src, sync, elect, chanseq, phy_tx_time)) = parse_awdl(&rx.bytes) {
                         // Never synchronise to our own transmissions handed back by the monitor.
@@ -441,6 +454,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         enqueue_from_tun(
                             t, addr, &mut tbuf, &mut outbound, OUTBOUND_MAX,
                             &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
+                            &mut dp_queued,
                         );
                         let read = outbound.len().saturating_sub(before);
                         // A small burst here is a control/handshake response (e.g. our /Ask 200)
@@ -488,6 +502,58 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 }
             }
 
+            // A MASTER CHANGE IS THE EVENT TO CORRELATE AGAINST. It re-anchors the window
+            // schedule every data frame depends on, and until now it was logged nowhere.
+            if cfg.follow && cluster.master != last_master {
+                log::info!(
+                    "MASTER CHANGED: {:?} -> {:?}, slots {:?}, anchors {}, spread {:?} us, usable {}",
+                    last_master.map(tlink::dot11::Mac),
+                    cluster.master.map(tlink::dot11::Mac),
+                    cluster.master_slots,
+                    cluster.clock.observations(),
+                    cluster.clock.spread_us(),
+                    usable
+                );
+                last_master = cluster.master;
+            }
+
+            // Periodic heartbeat, so "discovery stopped at 04:07" can be lined up against what
+            // the cluster was doing at 04:07 instead of inferred afterwards.
+            if cfg.follow && last_health.elapsed() >= Duration::from_secs(15) {
+                last_health = Instant::now();
+                log::info!(
+                    "sync health: master {:?}, anchors {}, spread {:?} us, usable {}, slots {:?}",
+                    cluster.master.map(tlink::dot11::Mac),
+                    cluster.clock.observations(),
+                    cluster.clock.spread_us(),
+                    usable,
+                    cluster.master_slots
+                );
+                // Cumulative, not per-interval: the question is where frames go over a whole
+                // session, and a rate would hide a path that produced nothing from the start.
+                // 802.11 type counts first, then what the data path did with them. The pair is
+                // the whole point: rx_data ~0 means no data frame ever reached us from air (a
+                // radio or scheduling problem), while rx_data high with written ~0 means they
+                // arrived and we threw them away (a parsing or addressing problem). Those are
+                // opposite bugs and they present identically as "the peer is not discoverable".
+                log::info!(
+                    "rx path: air mgmt {} ctrl {} data {} | seen {} -> written {} \
+                     (undecodable {}, from_self {}, not_ours {}, write_err {})",
+                    rx_mgmt, rx_ctrl, rx_data,
+                    rxs.seen, rxs.written, rxs.undecodable, rxs.from_self, rxs.not_ours, rxs.write_err
+                );
+                // The mirror of the rx line, and the blind spot that hid this for hours: the
+                // kernel handed us frames to send (tlink0 tx_packets climbing) while the Pi saw
+                // no data frames on air at all. `queued` is what came off the TAP, `dp_sent` is
+                // what actually reached the radio, `backlog` is what is stuck waiting for a
+                // window. queued >> dp_sent with a standing backlog means the drain is starved
+                // of windows, not that the radio is slow.
+                log::info!(
+                    "tx path: queued {} -> sent {} (backlog {}, noroute {}, dropped {}, failed {})",
+                    dp_queued, dp_sent, outbound.len(), dp_noroute, dp_dropped, failed
+                );
+            }
+
             // REACTIVE INJECTION. We just heard the master, so right now we are inside its
             // availability window on its channel — the whole cluster is awake and listening.
             // Transmit immediately: this is the window alignment a host-timestamp clock cannot
@@ -500,6 +566,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         enqueue_from_tun(
                             t, addr, &mut tbuf, &mut outbound, OUTBOUND_MAX,
                             &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
+                            &mut dp_queued,
                         );
                     }
                     // BEACON send, capped to beacon_min_gap_us across BOTH the reactive and
@@ -642,6 +709,7 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 enqueue_from_tun(
                     t, addr, &mut tbuf, &mut outbound, OUTBOUND_MAX,
                     &mut d11_data_seq, &mut awdl_data_seq, &mut dp_noroute, &mut dp_dropped,
+                            &mut dp_queued,
                 );
             }
             std::thread::sleep(Duration::from_micros(wait.min(3_000)));
@@ -836,6 +904,46 @@ fn frame_type(bytes: &[u8]) -> Option<u8> {
 /// The channel sequence is the standalone tag 18 (OpClass), kept separate from the Legacy one
 /// inside Sync Params: tag 18 carries the primary 20 MHz channel we can actually tune to,
 /// where the Legacy channel byte is a 40 MHz centre (finding 99).
+/// Where received data frames go, counted at every stage they can be lost.
+///
+/// Added because `tlink0` read `rx_packets=7` against `tx_packets=113` for a whole session
+/// while the cluster clock was locked to a peer at 5 us spread — so the radio was plainly
+/// receiving that peer's ACTION frames while its DATA frames reached nothing. Between "the
+/// monitor socket returned a frame" and "the kernel got it" there were four places a frame
+/// could vanish and no way to tell which, so a dead receive path and an idle one looked
+/// identical. These distinguish them.
+#[derive(Default, Clone, Copy)]
+struct RxStages {
+    /// Offered to the data path at all.
+    seen: u64,
+    /// Radiotap or AWDL decapsulation failed.
+    undecodable: u64,
+    /// Our own injected frame, echoed back by the monitor. Expected and harmless; counted
+    /// because it inflates any naive "frames received" figure.
+    from_self: u64,
+    /// Unicast to some other peer.
+    not_ours: u64,
+    /// Handed to the kernel.
+    written: u64,
+    write_err: u64,
+}
+
+/// True the first time this MAC is seen, false ever after.
+///
+/// Only for logging a peer's fixed capabilities once instead of on every frame. Process-local
+/// and never pruned: it holds at most a handful of MACs for the life of the session, and a peer
+/// that leaves and returns with the same MAC does not need its capabilities reprinted.
+fn first_time_seeing(mac: [u8; 6]) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<[u8; 6]>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut s| s.insert(mac))
+        // A poisoned lock here must not cost a frame: say "already seen" and stay quiet.
+        .unwrap_or(false)
+}
+
 fn parse_awdl(
     bytes: &[u8],
 ) -> Option<(
@@ -869,14 +977,23 @@ fn parse_awdl(
             // changing the transmit rate now would be guessing — and the rate is radio-wide,
             // so a wrong guess degrades the peers that currently work.
             7 => {
+                // ONCE PER PEER, NOT ONCE PER FRAME. A peer's HT capabilities do not change
+                // between frames, so logging them on every parse said nothing new ~19 times a
+                // second and buried everything that mattered: it was 39% of all logcat lines,
+                // and it hid both a transfer's own timestamps and an SELinux denial during
+                // diagnosis. debug! as well as deduplicated — this is a bring-up detail, and
+                // info! is what an operator reads when something is wrong.
                 if let Some(ht) = tlink::state::HtCapabilities::parse(t.value) {
-                    log::info!(
-                        "peer {} HT caps: rx_mcs_bitmap=0x{:04x} info=0x{:04x} ampdu=0x{:02x}                          (MCS 8-15 set => 2 spatial streams)",
-                        tlink::dot11::Mac(d.src.0),
-                        ht.rx_mcs_bitmap,
-                        ht.info,
-                        ht.ampdu_params
-                    );
+                    if first_time_seeing(d.src.0) {
+                        log::debug!(
+                            "peer {} HT caps: rx_mcs_bitmap=0x{:04x} info=0x{:04x} ampdu=0x{:02x} \
+                             (MCS 8-15 set => 2 spatial streams)",
+                            tlink::dot11::Mac(d.src.0),
+                            ht.rx_mcs_bitmap,
+                            ht.info,
+                            ht.ampdu_params
+                        );
+                    }
                 }
             }
             18 => chanseq = ChannelSequence::parse(t.value),
@@ -928,6 +1045,7 @@ fn enqueue_from_tun(
     awdl_seq: &mut u16,
     unroutable: &mut u64,
     dropped: &mut u64,
+    queued: &mut u64,
 ) {
     use tlink::data::{dst_mac_for_ipv6, Encap, ETHERTYPE_IPV6};
     use tlink_hal::poll::wait_readable;
@@ -967,6 +1085,7 @@ fn enqueue_from_tun(
         // here: a dropped TCP segment stalls the whole transfer (no link-layer retransmit). The
         // `dropped` counter therefore stays 0 now, which honestly reflects the backpressure path.
         queue.push_back(frame);
+        *queued += 1;
     }
 }
 
@@ -976,16 +1095,27 @@ fn deliver_data_frame(
     our_mac: [u8; 6],
     tun: Option<&tlink_hal::tun::Tun>,
     delivered: &mut u64,
+    st: &mut RxStages,
 ) {
     use tlink::data::{decapsulate, is_ipv6_multicast};
     use tlink::radiotap::Radiotap;
 
+    st.seen += 1;
     let Some(tun) = tun else { return };
     let Some(d) = Radiotap::parse(bytes).and_then(|rt| rt.payload(bytes)).and_then(decapsulate)
     else {
+        st.undecodable += 1;
         return;
     };
-    if d.src == our_mac || (d.dst != our_mac && !is_ipv6_multicast(d.dst)) {
+    // Split rather than combined: "our own frame echoed back by the monitor" and "unicast to
+    // somebody else" are different failures with different fixes, and lumping them together is
+    // what made a dead receive path look like a quiet one.
+    if d.src == our_mac {
+        st.from_self += 1;
+        return;
+    }
+    if d.dst != our_mac && !is_ipv6_multicast(d.dst) {
+        st.not_ours += 1;
         return;
     }
     // The interface is a TAP, so the kernel expects an Ethernet frame. Prepend a 14-byte
@@ -1004,6 +1134,9 @@ fn deliver_data_frame(
     frame.extend_from_slice(ip);
     if tun.write(&frame).is_ok() {
         *delivered += 1;
+        st.written += 1;
+    } else {
+        st.write_err += 1;
     }
 }
 
@@ -1012,9 +1145,12 @@ fn deliver_data_frame(
 fn enqueue_from_tun(
     _t: &(), _m: [u8; 6], _b: &mut [u8],
     _q: &mut std::collections::VecDeque<Vec<u8>>, _max: usize,
-    _d: &mut u16, _a: &mut u16, _u: &mut u64, _dr: &mut u64,
+    _d: &mut u16, _a: &mut u16, _u: &mut u64, _dr: &mut u64, _q: &mut u64,
 ) {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn deliver_data_frame(_bytes: &[u8], _our_mac: [u8; 6], _tun: Option<&()>, _delivered: &mut u64) {}
+fn deliver_data_frame(
+    _bytes: &[u8], _our_mac: [u8; 6], _tun: Option<&()>, _delivered: &mut u64, _st: &mut RxStages,
+) {
+}
