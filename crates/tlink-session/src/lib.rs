@@ -191,6 +191,18 @@ const SMALL_BURST_MAX: usize = 6;
 /// payload frame is ~1450. Size separates them cleanly.
 const CONTROL_FRAME_MAX: usize = 400;
 
+/// Seconds the running session has been BLIND: a master adopted and the cluster clock not
+/// usable, so every data frame goes out in slots nobody listens in. Zero when synced, when
+/// alone, or when no session runs.
+///
+/// Why a process-wide atomic: the shim hands `tarishd` an opaque handle and the daemon only
+/// speaks the five-symbol libmosey ABI, so the one channel back is another optional symbol,
+/// `mosey_health`, which reads this. Measured 2026-09-25: a re-election adopted a master we
+/// never heard (`anchors 0, usable false`) and discovery stayed dead for five minutes until a
+/// manual daemon restart brought a fresh session up in two seconds. The proper fix is in the
+/// follow logic (task #48); this is what lets the daemon do that restart itself.
+pub static BLIND_SECS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Run the session on `radio` (already brought up) until `stop` is set or `cfg.duration`
 /// elapses. Returns what it did.
 pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Stats> {
@@ -237,6 +249,9 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     // a slot-numbering error would show as loss and as "hear its beacons, never its data".
     let (mut tx_awake, mut tx_asleep, mut tx_noclock) = (0u64, 0u64, 0u64);
     let mut rxs = RxStages::default();
+    // When the clock last became unusable with a master adopted; see BLIND_SECS.
+    let mut blind_since: Option<Instant> = None;
+    BLIND_SECS.store(0, Ordering::Relaxed);
 
     // Data plane: the TUN shares this loop and this radio (two processes cannot both inject
     // on one phy). Outbound IP is queued and drained in-window, because an AWDL peer listens
@@ -547,6 +562,16 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             }
 
             let usable = cluster.clock.is_usable();
+            // Publish "blind": a master adopted and no usable clock. tarishd reads this through
+            // the shim's `mosey_health` and restarts the session when it has lasted a minute
+            // (task #48). Alone in the cluster, unusable is normal and is not blind.
+            if cfg.follow && cluster.master.is_some() && !usable {
+                let since = *blind_since.get_or_insert_with(Instant::now);
+                BLIND_SECS.store(since.elapsed().as_secs().min(u32::MAX as u64) as u32, Ordering::Relaxed);
+            } else {
+                blind_since = None;
+                BLIND_SECS.store(0, Ordering::Relaxed);
+            }
             if usable != adopted {
                 adopted = usable;
                 if cfg.follow {

@@ -350,7 +350,24 @@ pub unsafe extern "C" fn mosey_reset(_which: u8) {}
 /// FFI stub.
 #[no_mangle]
 pub unsafe extern "C" fn mosey_dump() {
-    log::info!("mosey shim: dump (no state exported)");
+    log::info!(
+        "mosey shim: dump — blind for {} s (0 = synced or alone)",
+        tlink_session::BLIND_SECS.load(Ordering::Relaxed)
+    );
+}
+
+/// `uint32_t mosey_health(void)` — seconds the session has been blind: a master adopted and
+/// no usable cluster clock, so our frames go out in slots nobody listens in. Zero when synced,
+/// alone, or stopped. Like `mosey_version`, an addition of ours and not part of Google's ABI:
+/// the daemon must `dlsym` it and treat absence as "unknown". `tarishd` restarts the session
+/// when this has passed a minute (task #48) — a fresh session re-elects and re-syncs in about
+/// two seconds, which is what a manual restart did by hand on 2026-09-25.
+///
+/// # Safety
+/// No arguments, reads an atomic.
+#[no_mangle]
+pub unsafe extern "C" fn mosey_health() -> u32 {
+    tlink_session::BLIND_SECS.load(Ordering::Relaxed)
 }
 
 /// `const char *mosey_version(void)` — the tlink shim's version, so `tarishd` can report
