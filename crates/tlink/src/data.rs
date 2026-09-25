@@ -230,25 +230,96 @@ pub struct Decap<'a> {
 /// frames in `captures/`, most are not AWDL's, and skipping blind lands the ethertype on
 /// another protocol's payload.
 pub fn decapsulate(frame80211: &[u8]) -> Option<Decap<'_>> {
+    decapsulate_all(frame80211).into_iter().next()
+}
+
+/// Bit 7 of the first QoS Control octet: the frame carries an **aggregate**, not one MSDU.
+const QOS_AMSDU_PRESENT: u8 = 0x80;
+
+/// Every AWDL packet in one 802.11 frame, which is not always one.
+///
+/// **A-MSDU aggregation is why a transfer between two of our own devices crawled at 0.8 KB/s.**
+/// Under bulk load the radio packs several MSDUs into a single frame and sets bit 7 of the QoS
+/// Control field. What follows the 802.11 header is then not the AWDL SNAP but a chain of
+/// subframes, each `DA(6) SA(6) Length(2)` then its own LLC/SNAP, padded to a 4-byte boundary.
+/// Reading one SNAP at a fixed offset finds the repeated destination address instead, the check
+/// fails, and the WHOLE aggregate — every packet in it — is dropped.
+///
+/// It stayed hidden because it only bites when the peer's receiver is also ours. Apple and
+/// Google de-aggregate in their own stacks, so sending to an iPhone or a stock Pixel was always
+/// fast; and small control frames are never aggregated, so discovery, `/Discover` and `/Ask`
+/// worked perfectly while every byte of payload was thrown away. Measured 2026-09-26: of 1081
+/// data frames, 502 discarded; one of them 2990 bytes with QoS Control `86 00` and a first
+/// subframe length of 1466.
+///
+/// Returns each packet in order. A frame with no aggregate yields at most one, so the common
+/// path is unchanged.
+pub fn decapsulate_all(frame80211: &[u8]) -> Vec<Decap<'_>> {
     use crate::dot11::{FrameControl, TYPE_DATA};
 
-    let fc = FrameControl::parse(frame80211)?;
+    let Some(fc) = FrameControl::parse(frame80211) else { return Vec::new() };
     if fc.frame_type != TYPE_DATA {
-        return None;
+        return Vec::new();
     }
+    let qos = fc.subtype & 0x08 != 0;
     // Bit 3 of the subtype is the QoS flag; without the QoS control field the header is
     // 24 bytes and everything after shifts by two.
-    let hdr = if fc.subtype & 0x08 != 0 { QOS_HEADER_LEN } else { QOS_HEADER_LEN - 2 };
-    let dst: [u8; 6] = frame80211.get(4..10)?.try_into().ok()?;
-    let src: [u8; 6] = frame80211.get(10..16)?.try_into().ok()?;
+    let hdr = if qos { QOS_HEADER_LEN } else { QOS_HEADER_LEN - 2 };
+    let (Some(dst), Some(src)) = (
+        frame80211.get(4..10).and_then(|b| <[u8; 6]>::try_from(b).ok()),
+        frame80211.get(10..16).and_then(|b| <[u8; 6]>::try_from(b).ok()),
+    ) else {
+        return Vec::new();
+    };
 
-    let rest = frame80211.get(hdr..)?;
-    if rest.get(..8)? != SNAP_AWDL {
+    let aggregated =
+        qos && frame80211.get(QOS_HEADER_LEN - 2).map(|b| b & QOS_AMSDU_PRESENT != 0).unwrap_or(false);
+    let Some(rest) = frame80211.get(hdr..) else { return Vec::new() };
+
+    if !aggregated {
+        return match one(dst, src, rest) {
+            Some(d) => vec![d],
+            None => Vec::new(),
+        };
+    }
+
+    // Walk the subframe chain. A malformed length must end the walk rather than loop or
+    // index wildly, so every step is bounds-checked and the cursor only ever moves forward.
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 14 <= rest.len() {
+        let (Some(sda), Some(ssa)) = (
+            rest.get(at..at + 6).and_then(|b| <[u8; 6]>::try_from(b).ok()),
+            rest.get(at + 6..at + 12).and_then(|b| <[u8; 6]>::try_from(b).ok()),
+        ) else {
+            break;
+        };
+        let len = match rest.get(at + 12..at + 14) {
+            Some(b) => u16::from_be_bytes([b[0], b[1]]) as usize,
+            None => break,
+        };
+        if len == 0 || at + 14 + len > rest.len() {
+            break;
+        }
+        if let Some(d) = rest.get(at + 14..at + 14 + len).and_then(|b| one(sda, ssa, b)) {
+            out.push(d);
+        }
+        // Subframes are padded so the next one starts on a 4-byte boundary. The last one
+        // carries no padding, which is why this is computed rather than always added.
+        at += 14 + len;
+        at += (4 - (at % 4)) % 4;
+    }
+    out
+}
+
+/// One AWDL packet: check the SNAP, then the AWDL data header.
+fn one<'a>(dst: [u8; 6], src: [u8; 6], body: &'a [u8]) -> Option<Decap<'a>> {
+    if body.get(..8)? != SNAP_AWDL {
         return None;
     }
-    let body = rest.get(8..)?;
-    let header = DataHeader::parse(body)?;
-    let payload = header.payload(body)?;
+    let inner = body.get(8..)?;
+    let header = DataHeader::parse(inner)?;
+    let payload = header.payload(inner)?;
     Some(Decap { dst, src, header, payload })
 }
 
@@ -322,4 +393,88 @@ pub fn dst_mac_for_ipv6(pkt: &[u8]) -> Option<[u8; 6]> {
     }
     let dst: [u8; 16] = pkt.get(24..40)?.try_into().ok()?;
     multicast_mac(dst).or_else(|| mac_from_link_local(dst))
+}
+
+#[cfg(test)]
+mod amsdu_tests {
+    use super::*;
+
+    /// Build one A-MSDU subframe: DA, SA, length, then an AWDL packet, 4-byte padded.
+    fn subframe(dst: [u8; 6], src: [u8; 6], payload: &[u8], pad: bool) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&SNAP_AWDL);
+        body.extend_from_slice(&short_header(1, ETHERTYPE_IPV6));
+        body.extend_from_slice(payload);
+        let mut o = Vec::new();
+        o.extend_from_slice(&dst);
+        o.extend_from_slice(&src);
+        o.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        o.extend_from_slice(&body);
+        if pad {
+            while o.len() % 4 != 0 {
+                o.push(0);
+            }
+        }
+        o
+    }
+
+    /// An aggregate must yield EVERY packet, not the first.
+    ///
+    /// This is the regression guard for the 0.8 KB/s stall: the radio aggregates under bulk
+    /// load, and reading one SNAP at a fixed offset found the repeated destination address,
+    /// failed the check and discarded the whole frame — every packet in it.
+    #[test]
+    fn amsdu_yields_every_subframe() {
+        let dst = [0xde, 0xcc, 0x36, 0xaf, 0xde, 0xc6];
+        let src = [0xee, 0xc2, 0x95, 0x67, 0x02, 0xe6];
+
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x88, 0x00]); // QoS data
+        f.extend_from_slice(&[0x2c, 0x00]); // duration
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&[0x00, 0x25, 0x00, 0xff, 0x94, 0x73]); // BSSID
+        f.extend_from_slice(&[0xf0, 0x08]); // sequence control
+        f.extend_from_slice(&[0x86, 0x00]); // QoS control, A-MSDU present (bit 7)
+        f.extend_from_slice(&subframe(dst, src, &[0x11; 64], true));
+        f.extend_from_slice(&subframe(dst, src, &[0x22; 100], false));
+
+        let got = decapsulate_all(&f);
+        assert_eq!(got.len(), 2, "both subframes must come back");
+        assert_eq!(got[0].payload, &[0x11u8; 64][..]);
+        assert_eq!(got[1].payload, &[0x22u8; 100][..]);
+        assert_eq!(got[0].dst, dst);
+        assert_eq!(got[1].src, src);
+    }
+
+    /// A frame WITHOUT the aggregate bit must behave exactly as before: one packet.
+    #[test]
+    fn plain_qos_data_is_unchanged() {
+        let dst = [1, 2, 3, 4, 5, 6];
+        let src = [7, 8, 9, 10, 11, 12];
+        let built = Encap { dst, src, tid: DEFAULT_TID }.frame(1, 1, ETHERTYPE_IPV6, &[0xab; 40]);
+        let got = decapsulate_all(&built);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].payload, &[0xabu8; 40][..]);
+        assert!(decapsulate(&built).is_some(), "the single-packet helper still works");
+    }
+
+    /// A truncated or lying length must stop the walk, never loop or panic.
+    #[test]
+    fn malformed_aggregate_stops_cleanly() {
+        let dst = [1u8; 6];
+        let src = [2u8; 6];
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x88, 0x00, 0x00, 0x00]);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&[0; 6]);
+        f.extend_from_slice(&[0, 0]);
+        f.extend_from_slice(&[0x80, 0x00]); // A-MSDU present
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&0xffffu16.to_be_bytes()); // length far past the end
+        f.extend_from_slice(&[0u8; 8]);
+        assert!(decapsulate_all(&f).is_empty());
+    }
 }

@@ -1228,7 +1228,7 @@ fn deliver_data_frame(
     delivered: &mut u64,
     st: &mut RxStages,
 ) {
-    use tlink::data::{decapsulate, is_ipv6_multicast};
+    use tlink::data::{decapsulate_all, is_ipv6_multicast};
     use tlink::radiotap::Radiotap;
 
     st.seen += 1;
@@ -1246,7 +1246,10 @@ fn deliver_data_frame(
         st.undecodable += 1;
         return;
     };
-    let Some(d) = decapsulate(dot11) else {
+    // EVERY packet in the frame, not the first: under load the radio aggregates several
+    // MSDUs into one 802.11 frame, and taking only the head silently drops the rest.
+    let packets = decapsulate_all(dot11);
+    if packets.is_empty() {
         st.undecodable += 1;
         // A management frame failing here is normal and says nothing. A DATA frame failing
         // here is the interesting case, so name it and keep the source, because "our peer" and
@@ -1257,10 +1260,20 @@ fn deliver_data_frame(
                 if let Some(src) = dot11.get(10..16) {
                     let mac: [u8; 6] = src.try_into().unwrap_or_default();
                     if st.data_undecodable % 64 == 1 {
+                        // LENGTH IS THE POINT OF THIS LINE. If every failure is a long frame,
+                        // the capture is truncating and only bulk payload is being lost —
+                        // which is exactly what a transfer that stalls while control traffic
+                        // keeps flowing looks like. If the lengths are mixed, it is a header
+                        // we misparse. Those need different fixes and a counter cannot tell
+                        // them apart, so print the size, the subtype and the bytes where the
+                        // SNAP header should be.
                         log::warn!(
                             "rx: data frame from {mac:02x?} did not decapsulate ({} so far) — \
-                             SNAP/AWDL header we do not read, or a peer using a format we do not",
-                            st.data_undecodable
+                             len {} subtype {:#04x} head {:02x?}",
+                            st.data_undecodable,
+                            dot11.len(),
+                            fc.subtype,
+                            dot11.get(..40).unwrap_or(dot11)
                         );
                     }
                 }
@@ -1268,17 +1281,18 @@ fn deliver_data_frame(
             _ => st.not_data += 1,
         }
         return;
-    };
+    }
+    for d in packets {
     // Split rather than combined: "our own frame echoed back by the monitor" and "unicast to
     // somebody else" are different failures with different fixes, and lumping them together is
     // what made a dead receive path look like a quiet one.
     if d.src == our_mac {
         st.from_self += 1;
-        return;
+        continue;
     }
     if d.dst != our_mac && !is_ipv6_multicast(d.dst) {
         st.not_ours += 1;
-        return;
+        continue;
     }
     // The interface is a TAP, so the kernel expects an Ethernet frame. Prepend a 14-byte
     // header: destination is our MAC for unicast, or the 33:33-mapped multicast MAC for a
@@ -1299,6 +1313,7 @@ fn deliver_data_frame(
         st.written += 1;
     } else {
         st.write_err += 1;
+    }
     }
 }
 
