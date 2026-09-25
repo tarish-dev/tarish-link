@@ -634,9 +634,12 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                 // opposite bugs and they present identically as "the peer is not discoverable".
                 log::info!(
                     "rx path: air mgmt {} ctrl {} data {} | seen {} -> written {} \
-                     (undecodable {}, from_self {}, not_ours {}, write_err {})",
+                     (undecodable {} = no_radiotap {} + not_data {} + DATA {}, \
+                      from_self {}, not_ours {}, write_err {})",
                     rx_mgmt, rx_ctrl, rx_data,
-                    rxs.seen, rxs.written, rxs.undecodable, rxs.from_self, rxs.not_ours, rxs.write_err
+                    rxs.seen, rxs.written, rxs.undecodable,
+                    rxs.no_radiotap, rxs.not_data, rxs.data_undecodable,
+                    rxs.from_self, rxs.not_ours, rxs.write_err
                 );
                 // The mirror of the rx line, and the blind spot that hid this for hours: the
                 // kernel handed us frames to send (tlink0 tx_packets climbing) while the Pi saw
@@ -1034,8 +1037,18 @@ fn frame_type(bytes: &[u8]) -> Option<u8> {
 struct RxStages {
     /// Offered to the data path at all.
     seen: u64,
-    /// Radiotap or AWDL decapsulation failed.
+    /// Anything that did not decapsulate, for continuity with the old figure. The three
+    /// counters below say WHICH, because the old single number could not.
     undecodable: u64,
+    /// The radiotap header itself did not parse, so we never saw an 802.11 frame at all.
+    no_radiotap: u64,
+    /// Decapsulation failed on a frame that is NOT data — a beacon or action frame. Expected:
+    /// every frame on the channel is offered here. Counted only so it stops inflating the
+    /// number that matters.
+    not_data: u64,
+    /// Decapsulation failed on a DATA frame. THIS is the one that costs a transfer, and it was
+    /// invisible inside `undecodable`.
+    data_undecodable: u64,
     /// Our own injected frame, echoed back by the monitor. Expected and harmless; counted
     /// because it inflates any naive "frames received" figure.
     from_self: u64,
@@ -1220,9 +1233,40 @@ fn deliver_data_frame(
 
     st.seen += 1;
     let Some(tun) = tun else { return };
-    let Some(d) = Radiotap::parse(bytes).and_then(|rt| rt.payload(bytes)).and_then(decapsulate)
-    else {
+    // ONE COUNTER FOR FOUR DIFFERENT THINGS WAS THE PROBLEM. `undecodable` lumped together a
+    // beacon (expected, every frame on the channel comes through here) and a data frame we
+    // could not parse (a bug, and the only one that costs a transfer). Measured 2026-09-26 on
+    // a stalled 20 MB send: seen 6548, mgmt 5467, data 1081, written 579, undecodable 5969 —
+    // so 502 DATA frames were thrown away, which is the ~50% loss TCP was reporting. Whether
+    // those were our peer's frames or an Apple device's that we simply do not parse cannot be
+    // told from one number, and the answer changes the diagnosis completely. So: count the
+    // stages apart.
+    let Some(dot11) = Radiotap::parse(bytes).and_then(|rt| rt.payload(bytes)) else {
+        st.no_radiotap += 1;
         st.undecodable += 1;
+        return;
+    };
+    let Some(d) = decapsulate(dot11) else {
+        st.undecodable += 1;
+        // A management frame failing here is normal and says nothing. A DATA frame failing
+        // here is the interesting case, so name it and keep the source, because "our peer" and
+        // "some iPhone whose format we do not read" are opposite conclusions.
+        match tlink::dot11::FrameControl::parse(dot11) {
+            Some(fc) if fc.frame_type == tlink::dot11::TYPE_DATA => {
+                st.data_undecodable += 1;
+                if let Some(src) = dot11.get(10..16) {
+                    let mac: [u8; 6] = src.try_into().unwrap_or_default();
+                    if st.data_undecodable % 64 == 1 {
+                        log::warn!(
+                            "rx: data frame from {mac:02x?} did not decapsulate ({} so far) — \
+                             SNAP/AWDL header we do not read, or a peer using a format we do not",
+                            st.data_undecodable
+                        );
+                    }
+                }
+            }
+            _ => st.not_data += 1,
+        }
         return;
     };
     // Split rather than combined: "our own frame echoed back by the monitor" and "unicast to
