@@ -614,7 +614,8 @@ mod amsdu_tests {
         body.extend_from_slice(&subframe_offset2(dst, src, b"offset-one", true));
         body.extend_from_slice(&subframe(dst, src, b"plain-two", false));
 
-        let got = decapsulate_all(&qos_data(dst, src, 0x00, &body));
+        let frame = qos_data(dst, src, 0x00, &body);
+        let got = decapsulate_all(&frame);
         assert_eq!(got.len(), 2);
         assert!(got[0].payload.ends_with(b"offset-one"));
         assert!(got[1].payload.ends_with(b"plain-two"));

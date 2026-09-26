@@ -213,6 +213,74 @@ const SMALL_BURST_MAX: usize = 6;
 /// payload frame is ~1450. Size separates them cleanly.
 const CONTROL_FRAME_MAX: usize = 400;
 
+/// How many frame repeats a second still counts as control traffic.
+///
+/// `ACK_REPEAT` exists for the HANDSHAKE, where a lost frame costs a multi-second RTO and the
+/// frames are a handful. `CONTROL_FRAME_MAX` stopped bulk PAYLOAD being tripled, but a TCP
+/// acknowledgement is ~40 bytes -- far under it -- so every acknowledgement of a transfer was
+/// still going out three times.
+///
+/// Measured 2026-09-26 on a 10 MB AirDrop between two of our own devices. The device that was
+/// only ACKNOWLEDGING queued 10,221 frames and transmitted **29,133** (2.85x), putting nearly
+/// TWICE the airtime on the medium as the device actually sending the file (14,586). Our inject
+/// path does not carrier-sense, so on a half-duplex medium that is direct contention with the
+/// very data being acknowledged.
+///
+/// Rate is what separates the two cases: a handshake is a few frames, a bulk acknowledgement
+/// stream is hundreds a second. Setup therefore keeps its redundancy and bulk stops paying for
+/// it. Losing one acknowledgement of a stream is cheap in a way losing a handshake frame is
+/// not, because TCP acknowledgements are cumulative and the next one covers it.
+///
+/// **This does not apply against Apple and never did**, which is why only ours-to-ours suffered:
+/// an Apple peer does not triple its acknowledgements, so the air stays clear for our data.
+const REPEAT_BUDGET_PER_SEC: u32 = 12;
+
+/// How recently we must have HEARD the peer for it to count as proven awake.
+///
+/// The immediate drain is deliberately un-gated, on the stated grounds that "the peer just
+/// sent us data, which proves it is awake right now whatever the master's advertised map
+/// says". That premise is sound for an acknowledgement and false for bulk: the same loop runs
+/// whenever the tun has anything to send, and during an upload it is the local application
+/// filling it, not the peer. So the exception was being taken for thousands of payload frames
+/// on the word of a peer that had said nothing.
+///
+/// Measured 2026-09-26, sending device, one 10 MB AirDrop: **awake 6164, asleep 2945** -- a
+/// third of our transmissions went out while the peer's radio was, by the master's own map,
+/// elsewhere. The receiver honours the map strictly, so those are simply lost, and the
+/// resulting loss collapses the connection: cwnd 1-4 against ssthresh pinned at 2, 445
+/// retransmits in ~3900 segments (11.4%), 487 KB sitting in the socket that TCP would not
+/// send, over a link whose minimum round trip is 5.26 ms.
+///
+/// One slot is 16.384 ms, so this is comfortably inside the window the peer was in when we
+/// heard it, and outside the next one.
+const PEER_AWAKE_US: u64 = 12_000;
+
+/// Spends a per-second allowance of frame repeats. See [`REPEAT_BUDGET_PER_SEC`].
+struct RepeatBudget {
+    window_us: u64,
+    spent: u32,
+}
+
+impl RepeatBudget {
+    fn new() -> Self {
+        Self { window_us: 0, spent: 0 }
+    }
+
+    /// May this burst be repeated? Consumes allowance when it says yes.
+    fn take(&mut self, now_us: u64) -> bool {
+        if now_us.saturating_sub(self.window_us) >= 1_000_000 {
+            self.window_us = now_us;
+            self.spent = 0;
+        }
+        if self.spent < REPEAT_BUDGET_PER_SEC {
+            self.spent += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Seconds the running session has been BLIND: a master adopted and the cluster clock not
 /// usable, so every data frame goes out in slots nobody listens in. Zero when synced, when
 /// alone, or when no session runs.
@@ -356,6 +424,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
 
     let (mut sent_mif, mut sent_psf, mut failed) = (0u64, 0u64, 0u64);
     let mut last_tx_us = 0u64;
+    // Keeps ACK_REPEAT for the handshake and off a bulk stream. See RepeatBudget.
+    let mut repeat_budget = RepeatBudget::new();
+    // When we last received a data frame from the peer. See PEER_AWAKE_US.
+    let mut last_rx_us = 0u64;
     let mut n = 0u32;
     let mut first_error: Option<String> = None;
     let mut stepped = false;
@@ -473,7 +545,12 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         }
                     }
                     if tundev.is_some() {
+                        let before_rx = dp_recvd;
                         deliver_data_frame(&rx.bytes, addr, tundev.as_ref(), &mut dp_recvd, &mut rxs);
+                        if dp_recvd != before_rx {
+                            // Heard from the peer: it is awake NOW, whatever the map says.
+                            last_rx_us = epoch.elapsed().as_micros() as u64;
+                        }
                     }
                     if let Some((src, sync, elect, chanseq, phy_tx_time)) = parse_awdl(&rx.bytes) {
                         // Never synchronise to our own transmissions handed back by the monitor.
@@ -562,7 +639,15 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                         // A large burst is bulk-data ACKs: send once, as repeating them only adds
                         // contention with no measurable gain (finding 110).
                         let small = outbound.len() <= SMALL_BURST_MAX;
-                        let reps: u32 = if small { ACK_REPEAT } else { 1 };
+                        // Rate-gated: a handshake gets the redundancy, a sustained
+                        // acknowledgement stream does not. See RepeatBudget.
+                        let reps: u32 = if small
+                            && repeat_budget.take(epoch.elapsed().as_micros() as u64)
+                        {
+                            ACK_REPEAT
+                        } else {
+                            1
+                        };
                         // Bulk goes at the interface's configured rate; a small control burst
                         // keeps the pinned legacy rate, which is what stock uses for the same
                         // frames. See TxParams::legacy_ofdm.
@@ -573,12 +658,32 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 let now_tsf = tsf_anchor.map(|t| t + now_host.saturating_sub(host_at_anchor_us)).unwrap_or(now_host);
                                 match (cluster.clock.is_usable(), cluster.clock.slot_at(now_tsf)) {
                                     (true, Some(sl)) if cluster.master_slots.contains(&sl) => tx_awake += 1,
-                                    // NOT GATED, DELIBERATELY. This drain runs because the peer just sent us
-                                    // data, which proves it is awake right now whatever the master's
-                                    // advertised map says. Holding an acknowledgement here would stall
-                                    // the sender that is waiting for it. Counted so the gate's effect
-                                    // elsewhere can be told apart from this.
-                                    (true, Some(_)) => { tx_asleep += 1; tx_asleep_ack += 1; }
+                                    // UN-GATED ONLY WHILE THE PEER IS PROVEN AWAKE.
+                                    //
+                                    // The exception is for an acknowledgement answering data we
+                                    // just received: the peer is demonstrably listening, whatever
+                                    // the master's map says, and holding the ACK would stall it.
+                                    // But this loop also carries BULK, driven by the local
+                                    // application rather than by the peer, and there the premise
+                                    // is simply untrue. Measured: a third of a sending device's
+                                    // frames left in slots the peer was not listening in.
+                                    //
+                                    // So the exception now requires actually having heard the
+                                    // peer, recently. Otherwise this behaves like every other
+                                    // drain: put the frame back and wait for the window.
+                                    (true, Some(_))
+                                        if epoch.elapsed().as_micros() as u64
+                                            - last_rx_us.min(epoch.elapsed().as_micros() as u64)
+                                            < PEER_AWAKE_US =>
+                                    {
+                                        tx_asleep += 1;
+                                        tx_asleep_ack += 1;
+                                    }
+                                    (true, Some(_)) => {
+                                        tx_held_asleep += 1;
+                                        outbound.push_front(f);
+                                        break;
+                                    }
                                     _ => tx_noclock += 1,
                                 }
                             }
@@ -973,7 +1078,14 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
         // (finding 113); a large burst is bulk data, sent once to avoid channel contention (which
         // repeating was shown to add, finding 110). data_repeat, if set, still applies to bulk.
         let small_burst = outbound.len() <= SMALL_BURST_MAX;
-        let reps: u32 = if small_burst { ACK_REPEAT } else { cfg.data_repeat.max(1) };
+        // Rate-gated, same reason as the immediate-ACK path above.
+        let reps: u32 = if small_burst
+            && repeat_budget.take(epoch.elapsed().as_micros() as u64)
+        {
+            ACK_REPEAT
+        } else {
+            cfg.data_repeat.max(1)
+        };
         // Same split for the rate: control keeps the pinned legacy OFDM rate (what stock uses
         // for its mDNS), bulk goes at the interface's configured VHT rate. Pinning bulk is what
         // held us at 6 Mb/s unaggregated — see TxParams::legacy_ofdm.
