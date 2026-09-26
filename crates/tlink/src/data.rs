@@ -323,7 +323,35 @@ pub fn decapsulate_all(frame80211: &[u8]) -> Vec<Decap<'_>> {
         if len == 0 || at + 14 + len > rest.len() {
             break;
         }
-        if let Some(d) = rest.get(at + 14..at + 14 + len).and_then(|b| one(sda, ssa, b)) {
+        // THE SAME TWO-BYTE OFFSET APPLIES INSIDE A SUBFRAME. Leaving it out here is what
+        // held tlink-to-tlink AirDrop at 93 KB/s long after the aggregate itself was being
+        // detected correctly.
+        //
+        // Measured 2026-09-26 on 1869 aggregates captured off wondertap0 during a live
+        // transfer. Where the A-MSDU Present bit is SET the payload begins at the subframe
+        // header as documented; where it is CLEAR and the aggregate was found by shape, the
+        // payload begins two bytes later:
+        //
+        //     qos[0]=0x86  bit set    ->  aa aa 03 00 17 f2 08 00 ...
+        //     qos[0]=0x00  bit clear  ->  06 00 aa aa 03 00 17 f2 ...
+        //     qos[0]=0x01  bit clear  ->  06 00 aa aa 03 00 17 f2 ...
+        //
+        // **The length field COVERS those two bytes**, so the advance below is unchanged.
+        // That is measured, not assumed: across those 1869 aggregates, `14 + len` landed on
+        // a valid next subframe header or exactly at the end of the frame 1869 times, and
+        // `16 + len` zero times. Getting it the other way round would have misaligned every
+        // following subframe silently, which is why it was captured rather than guessed.
+        //
+        // Why it mattered so much: the receiver was discarding 44.6% of the data frames its
+        // own peer sent, nearly all of them TCP acknowledgements -- acknowledgements are
+        // small, and small frames are what get aggregated. A connection missing half its
+        // acknowledgements collapses its window, which presented as a 10.2% lossy radio and
+        // was nothing of the kind.
+        let body = rest.get(at + 14..at + 14 + len);
+        if let Some(d) = body
+            .and_then(|b| one(sda, ssa, b))
+            .or_else(|| body.and_then(|b| b.get(2..)).and_then(|b| one(sda, ssa, b)))
+        {
             out.push(d);
         }
         // Subframes are padded so the next one starts on a 4-byte boundary. The last one
@@ -421,6 +449,45 @@ pub fn dst_mac_for_ipv6(pkt: &[u8]) -> Option<[u8; 6]> {
 mod amsdu_tests {
     use super::*;
 
+    /// An 802.11 QoS Data frame carrying `body`, with an explicit QoS control byte so a
+    /// test can say whether the A-MSDU Present bit is set.
+    fn qos_data(dst: [u8; 6], src: [u8; 6], qos0: u8, body: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x88, 0x00]); // QoS data
+        f.extend_from_slice(&[0x2c, 0x00]); // duration
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&AWDL_BSSID);
+        f.extend_from_slice(&[0xf0, 0x08]); // sequence control
+        f.extend_from_slice(&[qos0, 0x00]); // QoS control
+        f.extend_from_slice(body);
+        f
+    }
+
+    /// Build one A-MSDU subframe whose payload is offset by two bytes before the SNAP.
+    ///
+    /// The shape this radio actually produces when the A-MSDU Present bit is CLEAR, measured
+    /// on 1869 captured aggregates. The length field COVERS the two bytes, which is what the
+    /// walk depends on and what the capture settled: `14 + len` landed correctly 1869 times
+    /// and `16 + len` never.
+    fn subframe_offset2(dst: [u8; 6], src: [u8; 6], payload: &[u8], pad: bool) -> Vec<u8> {
+        let mut body = vec![0x06, 0x00];
+        body.extend_from_slice(&SNAP_AWDL);
+        body.extend_from_slice(&short_header(1, ETHERTYPE_IPV6));
+        body.extend_from_slice(payload);
+        let mut o = Vec::new();
+        o.extend_from_slice(&dst);
+        o.extend_from_slice(&src);
+        o.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        o.extend_from_slice(&body);
+        if pad {
+            while o.len() % 4 != 0 {
+                o.push(0);
+            }
+        }
+        o
+    }
+
     /// Build one A-MSDU subframe: DA, SA, length, then an AWDL packet, 4-byte padded.
     fn subframe(dst: [u8; 6], src: [u8; 6], payload: &[u8], pad: bool) -> Vec<u8> {
         let mut body = Vec::new();
@@ -498,6 +565,59 @@ mod amsdu_tests {
         f.extend_from_slice(&0xffffu16.to_be_bytes()); // length far past the end
         f.extend_from_slice(&[0u8; 8]);
         assert!(decapsulate_all(&f).is_empty());
+    }
+
+    /// THE BUG THAT HELD OURS-TO-OURS AIRDROP AT 93 KB/s.
+    ///
+    /// The aggregate was already detected by shape; every subframe inside it was then
+    /// thrown away because the payload starts two bytes before the SNAP. 44.6% of the
+    /// frames our own peer sent were discarded, nearly all of them TCP acknowledgements.
+    #[test]
+    fn a_subframe_payload_offset_by_two_still_decapsulates() {
+        let dst = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let src = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+        let mut body = Vec::new();
+        body.extend_from_slice(&subframe_offset2(dst, src, b"first-payload", true));
+        body.extend_from_slice(&subframe_offset2(dst, src, b"second-payload", false));
+        // QoS control 0x00: the A-MSDU Present bit is CLEAR, as this radio sends it.
+        let frame = qos_data(dst, src, 0x00, &body);
+
+        let got = decapsulate_all(&frame);
+        assert_eq!(got.len(), 2, "both offset subframes must survive the walk");
+        assert!(got[0].payload.ends_with(b"first-payload"));
+        assert!(got[1].payload.ends_with(b"second-payload"));
+    }
+
+    /// The bit-set form has no offset, and must not regress into skipping two good bytes.
+    #[test]
+    fn a_subframe_with_the_bit_set_is_not_offset() {
+        let dst = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let src = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+        let mut body = Vec::new();
+        body.extend_from_slice(&subframe(dst, src, b"plain-one", true));
+        body.extend_from_slice(&subframe(dst, src, b"plain-two", false));
+        let frame = qos_data(dst, src, 0x80, &body);
+
+        let got = decapsulate_all(&frame);
+        assert_eq!(got.len(), 2);
+        assert!(got[0].payload.ends_with(b"plain-one"));
+        assert!(got[1].payload.ends_with(b"plain-two"));
+    }
+
+    /// Both forms in one aggregate. Nothing says a radio may not mix them, and the retry is
+    /// per subframe precisely so that it need not be decided globally.
+    #[test]
+    fn offset_and_plain_subframes_mixed_in_one_aggregate() {
+        let dst = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let src = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+        let mut body = Vec::new();
+        body.extend_from_slice(&subframe_offset2(dst, src, b"offset-one", true));
+        body.extend_from_slice(&subframe(dst, src, b"plain-two", false));
+
+        let got = decapsulate_all(&qos_data(dst, src, 0x00, &body));
+        assert_eq!(got.len(), 2);
+        assert!(got[0].payload.ends_with(b"offset-one"));
+        assert!(got[1].payload.ends_with(b"plain-two"));
     }
 }
 
