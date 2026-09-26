@@ -253,6 +253,21 @@ pub unsafe extern "C" fn mosey_start_5(
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n >= 1 && n <= 64)
         .unwrap_or(24);
+    // Ask the radio to acknowledge and retry our unicast frames, instead of injecting them
+    // once and hoping. See tlink_hal::rawsock::RADIOTAP_OFDM_ACK for the measurement that
+    // prompted it: four frames in ten never arrived between two of our own devices, with
+    // nothing to retry them. Default on, because it is what every other Wi-Fi transmitter on
+    // the planet does; switchable with persist.tarish.tx_ack=0 so the two can be compared on
+    // hardware rather than argued about.
+    {
+        let on = std::env::var("TARISH_TX_ACK")
+            .ok()
+            .or_else(|| read_property("persist.tarish.tx_ack"))
+            .map(|v| v.trim() != "0")
+            .unwrap_or(true);
+        tlink_hal::rawsock::TX_ACK.store(on, std::sync::atomic::Ordering::Relaxed);
+        log::info!("mosey shim: unicast TX acknowledgement {}", if on { "requested" } else { "OFF" });
+    }
     // Advertise **wondertap0's** MAC as our AWDL address, not wonder0's.
     //
     // wonder0 is only the mac80211 injection shim; the actual radio is wondertap0 (bcmdhd4390),

@@ -46,6 +46,60 @@ pub const RADIOTAP_EMPTY: [u8; 8] = [0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0
 /// Layout: version, pad, len=9, present=RATE(bit 2 = 0x04), rate=0x18.
 pub const RADIOTAP_OFDM: [u8; 9] = [0x00, 0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x00, 0x18];
 
+/// The same, plus **TX_FLAGS asking for a normal acknowledged transmission**.
+///
+/// THIS IS THE MECHANISM WE HAD BEEN THROWING AWAY. A radiotap header with no TX_FLAGS field
+/// is fire-and-forget: the frame goes out once and nothing checks whether it landed. Ordinary
+/// Wi-Fi loses frames all the time — collisions, noise, a peer transmitting at the same
+/// instant — and it does not matter, because the MAC acknowledges every unicast frame and
+/// retries it within microseconds, several times over, so TCP never learns a loss happened.
+/// We opted out of all of it and then tried to compensate in software by sending each frame up
+/// to three times, which is both weaker than a retry and more airtime than one.
+///
+/// Measured 2026-09-26, blazer to mustang, with the receive parser already fixed: the sender
+/// queued 994 frames and the receiver heard 567. **Four frames in ten never arrived at all**,
+/// 533 retransmits a minute, congestion window pinned at 1-4. The same code to an iPhone is
+/// fast, because only one side is injecting and the loss stays survivable. Two of ours collide
+/// by construction and nothing retries.
+///
+/// TX_FLAGS is two bytes and must be 2-byte aligned, so the rate byte gets one pad byte after
+/// it. All bits clear means: acknowledge this frame, and let the driver assign the 802.11
+/// sequence number — which is right, because the sequence a receiver of ours actually reads is
+/// the AWDL one inside the payload, not this one.
+///
+/// Layout: version, pad, len=12, present=RATE|TX_FLAGS, rate=0x18, pad, tx_flags=0x0000.
+pub const RADIOTAP_OFDM_ACK: [u8; 12] =
+    [0x00, 0x00, 0x0c, 0x00, 0x04, 0x80, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00];
+
+/// No rate, but still asking for acknowledgement. 5 GHz only, as [`RawSock::tx_at_iface_rate`].
+///
+/// Layout: version, pad, len=10, present=TX_FLAGS, tx_flags=0x0000.
+pub const RADIOTAP_ACK: [u8; 10] = [0x00, 0x00, 0x0a, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00];
+
+/// Whether to ask the driver for acknowledged transmission. See [`RADIOTAP_OFDM_ACK`].
+///
+/// MEASURED, AND THIS DRIVER IGNORES IT. Two 60-second transfers, blazer to mustang, same
+/// file, same room, only this flag changed:
+///
+/// ```text
+///   with TX_FLAGS     134 KB/s   848 retransmits   14.7% of segments   cwnd 3
+///   without           125 KB/s   824 retransmits   15.3% of segments   cwnd 2
+/// ```
+///
+/// Indistinguishable. Asking politely in the radiotap header does not buy MAC-layer
+/// acknowledgement or retry on this hardware, so injection here is fire-and-forget whatever we
+/// write in the header, and the ~15% segment loss between two of our own devices stands
+/// unexplained by this.
+///
+/// Left on and switchable anyway: it is what a correct transmitter asks for, it costs three
+/// bytes a frame, and a different driver or a firmware update may honour it. Turn it off with
+/// `persist.tarish.tx_ack=0` to repeat the comparison.
+pub static TX_ACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn want_ack() -> bool {
+    TX_ACK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A raw socket bound to one monitor interface.
 pub struct RawSock {
     fd: i32,
@@ -97,7 +151,11 @@ impl RawSock {
     /// — [`crate::TxParams::legacy_ofdm`] records what pinning costs there.
     pub fn tx(&self, frame: &[u8]) -> Result<()> {
         // Force OFDM (see RADIOTAP_OFDM): a DSSS frame is invisible to an AWDL receiver.
-        self.tx_with(frame, &RADIOTAP_OFDM)
+        if want_ack() {
+            self.tx_with(frame, &RADIOTAP_OFDM_ACK)
+        } else {
+            self.tx_with(frame, &RADIOTAP_OFDM)
+        }
     }
 
     /// Transmit with NO rate in the radiotap header, so the rate configured on the interface
@@ -110,7 +168,11 @@ impl RawSock {
     /// on 5 GHz, so the worst case there is the lowest OFDM rate, which is precisely what
     /// pinning was already delivering.
     pub fn tx_at_iface_rate(&self, frame: &[u8]) -> Result<()> {
-        self.tx_with(frame, &RADIOTAP_EMPTY)
+        if want_ack() {
+            self.tx_with(frame, &RADIOTAP_ACK)
+        } else {
+            self.tx_with(frame, &RADIOTAP_EMPTY)
+        }
     }
 
     fn tx_with(&self, frame: &[u8], radiotap: &[u8]) -> Result<()> {
