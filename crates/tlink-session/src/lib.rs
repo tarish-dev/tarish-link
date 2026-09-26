@@ -180,6 +180,15 @@ const OUTBOUND_MAX: usize = 512;
 /// frame is ~0.25 ms on air, so 24 frames is ~6 ms — comfortably inside a 16 TU (~16.4 ms)
 /// availability window, without overrunning into the next slot.
 const DRAIN_PER_WINDOW: usize = 24;
+/// Longest we will go without transmitting anything before beaconing off-window anyway.
+///
+/// The deadlock guard for the window gate. Without it, a cluster that goes quiet is permanent:
+/// nothing heard means nothing sent means nothing to hear us, and the peer drops us with no way
+/// back. One slot is ~16 ms and a full cycle ~262 ms, so a second is several cycles of genuine
+/// silence — long enough that it never fires during normal traffic, short enough that a peer
+/// does not time us out while we wait.
+const TX_LIVENESS_US: u64 = 1_000_000;
+
 /// How many times to transmit each ACK on the immediate-ACK path. Our inject path has no
 /// link-layer ARQ, and a lost ACK is a full TCP RTO stall (seconds), not a hiccup — while an ACK
 /// is ~40 bytes. Sending it 3× (same seq, Retry bit; the peer de-duplicates) makes a ~p loss ~p³
@@ -261,6 +270,19 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
     // clock model and the master's slot list. A thin master schedule (2-5 awake of 16) is where
     // a slot-numbering error would show as loss and as "hear its beacons, never its data".
     let (mut tx_awake, mut tx_asleep, mut tx_noclock) = (0u64, 0u64, 0u64);
+    // What the window gate did: frames it held back because the cluster was asleep, and the
+    // times it transmitted anyway to stay alive. Both matter — the first is the saving, the
+    // second is the cost of never deadlocking, and a large second number means the gate is
+    // firing when it should not.
+    let (mut tx_skipped_asleep, mut tx_forced_live) = (0u64, 0u64);
+    /// Asleep-slot transmits from the immediate-ACK drain alone, which is deliberately NOT
+    /// gated. If the gate works and this number is what remains, the rest is unavoidable.
+    let mut tx_asleep_ack = 0u64;
+    /// Frames the per-frame gate put back because the window shut part-way through a burst.
+    /// These were NOT transmitted and NOT wasted — they go out in the next window. Kept apart
+    /// from `tx_asleep` because counting a held frame as a wasted one makes the fix look like
+    /// the bug, which is exactly the mistake that made this counter worth splitting.
+    let mut tx_held_asleep = 0u64;
     let mut rxs = RxStages::default();
     // When the clock last became unusable with a master adopted; see BLIND_SECS.
     let mut blind_since: Option<Instant> = None;
@@ -551,7 +573,12 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 let now_tsf = tsf_anchor.map(|t| t + now_host.saturating_sub(host_at_anchor_us)).unwrap_or(now_host);
                                 match (cluster.clock.is_usable(), cluster.clock.slot_at(now_tsf)) {
                                     (true, Some(sl)) if cluster.master_slots.contains(&sl) => tx_awake += 1,
-                                    (true, Some(_)) => tx_asleep += 1,
+                                    // NOT GATED, DELIBERATELY. This drain runs because the peer just sent us
+                                    // data, which proves it is awake right now whatever the master's
+                                    // advertised map says. Holding an acknowledgement here would stall
+                                    // the sender that is waiting for it. Counted so the gate's effect
+                                    // elsewhere can be told apart from this.
+                                    (true, Some(_)) => { tx_asleep += 1; tx_asleep_ack += 1; }
                                     _ => tx_noclock += 1,
                                 }
                             }
@@ -652,8 +679,10 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                     dp_queued, dp_sent, outbound.len(), dp_noroute, dp_dropped, failed
                 );
                 log::info!(
-                    "tx slots: awake {} asleep {} noclock {} (master slots {:?})",
-                    tx_awake, tx_asleep, tx_noclock, cluster.master_slots
+                    "tx slots: awake {} asleep {} (un-gated ACKs {}) noclock {} | held-for-window {} \
+                     (beacon gate {} off-window, forced {} for liveness; master slots {:?})",
+                    tx_awake, tx_asleep, tx_asleep_ack, tx_noclock, tx_held_asleep,
+                    tx_skipped_asleep, tx_forced_live, cluster.master_slots
                 );
             }
 
@@ -710,7 +739,12 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 let now_tsf = tsf_anchor.map(|t| t + now_host.saturating_sub(host_at_anchor_us)).unwrap_or(now_host);
                                 match (cluster.clock.is_usable(), cluster.clock.slot_at(now_tsf)) {
                                     (true, Some(sl)) if cluster.master_slots.contains(&sl) => tx_awake += 1,
-                                    (true, Some(_)) => tx_asleep += 1,
+                                    // WINDOW CLOSED PART-WAY THROUGH THE BURST. We entered in-window and ran
+                                    // out of it: a drain is up to 24 frames and injection is not free.
+                                    // Put the frame back and stop rather than spend the rest of the
+                                    // burst talking to nobody. Nothing is dropped — it goes out in the
+                                    // next window, which is where it would have been heard anyway.
+                                    (true, Some(_)) => { tx_held_asleep += 1; outbound.push_front(f); break; }
                                     _ => tx_noclock += 1,
                                 }
                             }
@@ -852,6 +886,50 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
             std::thread::sleep(Duration::from_micros(3_000));
             continue;
         }
+        // DO NOT TRANSMIT INTO AN EMPTY ROOM.
+        //
+        // Two of the three transmit paths are already event-driven and provably in-window: the
+        // reactive one fires on hearing the master, which only beacons while the cluster is
+        // awake, and the immediate-ACK one fires on receiving data, which proves the peer is
+        // awake right then. This third path is a bare timer and never asked, so whenever the
+        // master advertises a thin schedule it sprayed most of its frames into slots where
+        // nobody is listening. Those are not collisions and not interference — they are simply
+        // never heard, and each one costs TCP a retransmit.
+        //
+        // Measured 2026-09-26 on blazer, same master throughout, two receives:
+        //
+        // ```text
+        //   master awake 10/16 slots   tx awake +3119  asleep   +89    2.8% wasted  ~5 MB/s
+        //   master awake  4/16 slots   tx awake  +344  asleep +1014   74.7% wasted  208 KB/s
+        // ```
+        //
+        // Throughput tracked the waste. The dense case is clean precisely because the reactive
+        // path fires often there and this timer rarely gets a turn. The predicate below is the
+        // same one the awake/asleep counters use, so the gate and the measurement cannot drift.
+        //
+        // THE LIVENESS ESCAPE IS NOT OPTIONAL. Gate on the window alone and silence becomes
+        // self-sustaining: a master that leaves or sleeps means we hear nothing, so we transmit
+        // nothing, so we stop beaconing, so the peer drops us, and nothing can restart it. This
+        // path exists to be that backstop. So it still fires after `TX_LIVENESS_US` with no
+        // transmission at all, off-window if it must — a handful of wasted frames in exchange
+        // for a deadlock that cannot happen.
+        if cfg.follow && cluster.clock.is_usable() {
+            let in_window = cluster
+                .clock
+                .slot_at(now_tsf)
+                .is_some_and(|sl| cluster.master_slots.contains(&sl));
+            let starved = now_us.saturating_sub(last_tx_us) >= TX_LIVENESS_US;
+            if !in_window && !starved {
+                tx_skipped_asleep += 1;
+                // Short enough to catch the next window — a slot is ~16 ms — and long enough
+                // not to spin the CPU while the cluster is quiet.
+                std::thread::sleep(Duration::from_micros(2_000));
+                continue;
+            }
+            if !in_window {
+                tx_forced_live += 1;
+            }
+        }
         // Advertise the best master we know: claim self while our metric leads, else name the
         // adopted cluster's master and present as a MEMBER of it — same master address, same
         // window timeline (finding 80/89, and the AirDrop-peering finding). Relative to the
@@ -907,7 +985,12 @@ pub fn run(radio: &mut dyn Radio, cfg: &Config, stop: &AtomicBool) -> Result<Sta
                                 let now_tsf = tsf_anchor.map(|t| t + now_host.saturating_sub(host_at_anchor_us)).unwrap_or(now_host);
                                 match (cluster.clock.is_usable(), cluster.clock.slot_at(now_tsf)) {
                                     (true, Some(sl)) if cluster.master_slots.contains(&sl) => tx_awake += 1,
-                                    (true, Some(_)) => tx_asleep += 1,
+                                    // WINDOW CLOSED PART-WAY THROUGH THE BURST. We entered in-window and ran
+                                    // out of it: a drain is up to 24 frames and injection is not free.
+                                    // Put the frame back and stop rather than spend the rest of the
+                                    // burst talking to nobody. Nothing is dropped — it goes out in the
+                                    // next window, which is where it would have been heard anyway.
+                                    (true, Some(_)) => { tx_held_asleep += 1; outbound.push_front(f); break; }
                                     _ => tx_noclock += 1,
                                 }
                             }
@@ -1273,7 +1356,13 @@ fn deliver_data_frame(
                             st.data_undecodable,
                             dot11.len(),
                             fc.subtype,
-                            dot11.get(..40).unwrap_or(dot11)
+                            // 72 BYTES, NOT 40. Forty reached the A-MSDU subframe header and
+                            // stopped exactly where the interesting part starts: the subframe's
+                            // own body, which is where the SNAP should be and is not. Measured
+                            // 2026-09-26 — these frames ARE detected as aggregates and walked,
+                            // and then the subframe body fails, so the aggregation fix was
+                            // necessary and not sufficient. Show enough to read that body.
+                            dot11.get(..72).unwrap_or(dot11)
                         );
                     }
                 }
